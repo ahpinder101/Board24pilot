@@ -16,7 +16,7 @@ import {
   GetManualGraphParams,
 } from "@workspace/api-zod";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { runExtractionPipeline } from "../lib/extractionPipeline.js";
+import { runExtractionPipeline, rechunkManual } from "../lib/extractionPipeline.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -260,6 +260,22 @@ router.get("/manuals/:id/stats", async (req, res) => {
     entitiesByType,
     relationshipsByType,
   });
+});
+
+// POST /manuals/:id/rechunk — admin: re-apply semantic chunker without full pipeline
+router.post("/manuals/:id/rechunk", async (req, res) => {
+  const manualId = parseInt(req.params.id ?? "", 10);
+  if (isNaN(manualId)) {
+    res.status(400).json({ error: "Invalid manual id" });
+    return;
+  }
+  try {
+    const result = await rechunkManual(manualId);
+    res.json({ ok: true, manualId, ...result });
+  } catch (err) {
+    req.log.error({ err, manualId }, "Rechunk failed");
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 export default router;

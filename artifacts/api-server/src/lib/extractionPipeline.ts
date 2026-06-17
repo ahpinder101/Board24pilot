@@ -24,8 +24,8 @@ import {
   type InsertEntity,
   type InsertRelationship,
 } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
-import { extractPdfText, chunkText, type PdfContent } from "./pdfExtractor.js";
+import { eq, and, count } from "drizzle-orm";
+import { extractPdfText, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
 
@@ -367,8 +367,11 @@ Return a JSON object with:
 }
 
 // ─── PASS 7: Chunk text for RAG (stored with auto-generated FTS vector) ──────
-
-const CHUNK_SIZE = 500; // chars per chunk
+//
+// Uses chunkPageSemantically() — see pdfExtractor.ts for the full rationale.
+// Each page is split at alphabetic step markers (e.g. a), b), f), g)) with
+// validity-scope labels prepended to every chunk, so machine-type discriminators
+// ("Valid only for Sq machines") always travel with their values tables.
 
 async function pass7EmbedChunks(
   manualId: number,
@@ -379,14 +382,15 @@ async function pass7EmbedChunks(
   // Delete old chunks for this manual (idempotent re-runs)
   await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
 
+  let totalChunks = 0;
   for (const page of pages) {
     if (!page.text || page.text.trim().length < 20) continue;
 
-    const rawChunks = chunkText(page.text, CHUNK_SIZE);
+    const semanticChunks = chunkPageSemantically(page.text);
 
-    for (let ci = 0; ci < rawChunks.length; ci++) {
-      const content = rawChunks[ci]!.trim();
-      if (content.length < 20) continue;
+    for (let ci = 0; ci < semanticChunks.length; ci++) {
+      const content = semanticChunks[ci]!.trim();
+      if (content.length < 15) continue;
 
       try {
         await db.insert(chunksTable).values({
@@ -395,6 +399,7 @@ async function pass7EmbedChunks(
           chunkIndex: ci,
           content,
         });
+        totalChunks++;
       } catch (err) {
         logger.warn(
           { err, manualId, pageNumber: page.pageNumber, chunkIndex: ci },
@@ -404,7 +409,36 @@ async function pass7EmbedChunks(
     }
   }
 
-  logger.info({ manualId }, "Pass 7: text chunks stored");
+  logger.info({ manualId, totalChunks }, "Pass 7: semantic chunks stored");
+}
+
+// ─── RECHUNK: re-run Pass 7 from stored page text ────────────────────────────
+
+/**
+ * Re-applies the semantic chunker to all stored pages for a manual without
+ * re-running the full extraction pipeline.  Useful after upgrading the
+ * chunking strategy.
+ */
+export async function rechunkManual(manualId: number): Promise<{ chunks: number }> {
+  const pages = await db
+    .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
+    .from(manualPagesTable)
+    .where(eq(manualPagesTable.manualId, manualId))
+    .orderBy(manualPagesTable.pageNumber);
+
+  if (pages.length === 0) throw new Error(`No pages found for manual ${manualId}`);
+
+  await pass7EmbedChunks(
+    manualId,
+    pages.map((p) => ({ pageNumber: p.pageNumber, text: p.rawText ?? "" }))
+  );
+
+  const [row] = await db
+    .select({ cnt: count() })
+    .from(chunksTable)
+    .where(eq(chunksTable.manualId, manualId));
+
+  return { chunks: row?.cnt ?? 0 };
 }
 
 // ─── MAIN PIPELINE ──────────────────────────────────────────────────────────
