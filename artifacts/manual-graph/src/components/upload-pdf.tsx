@@ -17,13 +17,13 @@ export function UploadPDF() {
 
   const { uploadFile, isUploading, progress } = useUpload({
     onSuccess: async (response) => {
-      if (!fileInfo) return;
       try {
-        const manualName = fileInfo.name.replace(/\.pdf$/i, '').replace(/[-_]/g, ' ');
+        const filename = response.metadata.name;
+        const manualName = filename.replace(/\.pdf$/i, '').replace(/[-_]/g, ' ');
         const manual = await createManual.mutateAsync({
           data: {
             name: manualName,
-            filename: fileInfo.name,
+            filename,
             objectPath: response.objectPath,
           }
         });
