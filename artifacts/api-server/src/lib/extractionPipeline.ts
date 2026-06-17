@@ -612,6 +612,120 @@ export async function reprocessManualWithVision(
   }
 }
 
+// ─── TARGETED PAGE OCR: vision-extract and rechunk a page range ──────────────
+
+/**
+ * Vision-OCR only a specific range of pages, update their rawText and chunks,
+ * without touching the rest of the manual's data.
+ */
+export async function reprocessPageRangeWithVision(
+  manualId: number,
+  pdfBuffer: Buffer,
+  startPage: number,
+  endPage: number
+): Promise<{ pages: number; chunks: number }> {
+  const clampedEnd = Math.max(startPage, endPage);
+  const totalToProcess = clampedEnd - startPage + 1;
+  logger.info({ manualId, startPage, endPage: clampedEnd }, "Vision OCR page-range reprocess started");
+
+  const ocrPages: Array<{ pageNumber: number; text: string }> = [];
+  const CONCURRENCY = 5;
+
+  for (let batch_start = startPage; batch_start <= clampedEnd; batch_start += CONCURRENCY) {
+    const batch: number[] = [];
+    for (let p = batch_start; p < batch_start + CONCURRENCY && p <= clampedEnd; p++) {
+      batch.push(p);
+    }
+
+    const batchResults = await Promise.all(
+      batch.map(async (pageNumber) => {
+        try {
+          const base64Image = await renderPdfPageToBase64(pdfBuffer, pageNumber);
+          const response = await openai.chat.completions.create({
+            model: MODEL,
+            max_completion_tokens: 2048,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${base64Image}`,
+                      detail: "high",
+                    },
+                  },
+                  {
+                    type: "text",
+                    text: `This is page ${pageNumber} of an engineering manual. Extract ALL text exactly as it appears on this page. Preserve the layout: numbered/lettered steps, table rows, part labels, measurements (with units), warnings, and section headings. Do NOT summarize or paraphrase — output only the literal text content. If the page is blank or contains only a diagram with no text labels, output the single line: [diagram only]`,
+                  },
+                ],
+              },
+            ],
+          });
+          const text = response.choices[0]?.message?.content ?? "";
+          const cleanedText = text.trim() === "[diagram only]" ? "" : text.trim();
+          return { pageNumber, text: cleanedText };
+        } catch (err) {
+          logger.warn({ err, pageNumber }, "Vision OCR failed for page");
+          return { pageNumber, text: "" };
+        }
+      })
+    );
+
+    ocrPages.push(...batchResults);
+
+    for (const { pageNumber, text } of batchResults) {
+      await db
+        .update(manualPagesTable)
+        .set({ rawText: text })
+        .where(
+          and(
+            eq(manualPagesTable.manualId, manualId),
+            eq(manualPagesTable.pageNumber, pageNumber)
+          )
+        );
+    }
+  }
+
+  // Delete only the chunks for this page range, then re-insert
+  for (const { pageNumber, text } of ocrPages) {
+    await db
+      .delete(chunksTable)
+      .where(
+        and(
+          eq(chunksTable.manualId, manualId),
+          eq(chunksTable.pageNumber, pageNumber)
+        )
+      );
+
+    if (!text || text.trim().length < 20) continue;
+    const semanticChunks = chunkPageSemantically(text);
+    for (let ci = 0; ci < semanticChunks.length; ci++) {
+      const content = semanticChunks[ci]!.trim();
+      if (content.length < 15) continue;
+      try {
+        await db.insert(chunksTable).values({ manualId, pageNumber, chunkIndex: ci, content });
+      } catch (err) {
+        logger.warn({ err, pageNumber, ci }, "Chunk insert failed");
+      }
+    }
+  }
+
+  // Count newly created chunks for the processed range
+  let totalChunks = 0;
+  for (const { pageNumber } of ocrPages) {
+    const [row] = await db
+      .select({ cnt: count() })
+      .from(chunksTable)
+      .where(and(eq(chunksTable.manualId, manualId), eq(chunksTable.pageNumber, pageNumber)));
+    totalChunks += row?.cnt ?? 0;
+  }
+
+  logger.info({ manualId, startPage, endPage: clampedEnd, pages: totalToProcess, totalChunks }, "Vision OCR page-range complete");
+  return { pages: totalToProcess, chunks: totalChunks };
+}
+
 // ─── RECHUNK: re-run Pass 7 from stored page text ────────────────────────────
 
 /**

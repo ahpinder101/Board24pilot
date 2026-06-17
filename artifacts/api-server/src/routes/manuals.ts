@@ -16,7 +16,7 @@ import {
   GetManualGraphParams,
 } from "@workspace/api-zod";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { runExtractionPipeline, rechunkManual, reprocessManualWithVision } from "../lib/extractionPipeline.js";
+import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision } from "../lib/extractionPipeline.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -311,6 +311,48 @@ router.post("/manuals/:id/reprocess-vision", async (req, res) => {
   });
 
   res.json({ ok: true, manualId, message: "Vision reprocess started" });
+});
+
+// POST /manuals/:id/reprocess-vision-pages — OCR a specific page range only
+router.post("/manuals/:id/reprocess-vision-pages", async (req, res) => {
+  const manualId = parseInt(req.params.id ?? "", 10);
+  const startPage = parseInt(String(req.body?.startPage ?? ""), 10);
+  const endPage = parseInt(String(req.body?.endPage ?? ""), 10);
+
+  if (isNaN(manualId) || isNaN(startPage) || isNaN(endPage) || startPage < 1 || endPage < startPage) {
+    res.status(400).json({ error: "Invalid params — need manualId, startPage (>=1), endPage (>=startPage)" });
+    return;
+  }
+
+  const [manual] = await db.select().from(manualsTable).where(eq(manualsTable.id, manualId));
+  if (!manual) { res.status(404).json({ error: "Manual not found" }); return; }
+
+  let pdfBuffer: Buffer;
+  try {
+    const storage = new ObjectStorageService();
+    const file = await storage.getObjectEntityFile(manual.objectPath);
+    const parts: Buffer[] = [];
+    const stream = file.createReadStream();
+    await new Promise<void>((resolve, reject) => {
+      stream.on("data", (c) => parts.push(Buffer.from(c)));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    pdfBuffer = Buffer.concat(parts);
+  } catch (err) {
+    req.log.error({ err, manualId }, "Failed to download PDF for page-range OCR");
+    res.status(500).json({ error: "Failed to download PDF" });
+    return;
+  }
+
+  // Run synchronously — page ranges are small, caller wants the result
+  try {
+    const result = await reprocessPageRangeWithVision(manualId, pdfBuffer, startPage, endPage);
+    res.json({ ok: true, manualId, startPage, endPage, ...result });
+  } catch (err) {
+    req.log.error({ err, manualId }, "Page-range vision OCR failed");
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // POST /manuals/:id/rechunk — admin: re-apply semantic chunker without full pipeline
