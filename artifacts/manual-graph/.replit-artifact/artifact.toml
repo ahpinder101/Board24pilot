@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "Engineering Manual Graph"
+version = "1.0.0"
+id = "artifacts/manual-graph"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23578
+
+[services.development]
+run = "pnpm --filter @workspace/manual-graph run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/manual-graph", "run", "build" ]
+publicDir = "artifacts/manual-graph/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23578"
+BASE_PATH = "/"

@@ -3,20 +3,25 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: Engineering Manual Knowledge Graph API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: manuals
+    description: Engineering manual management
+  - name: graph
+    description: Graph data (nodes and edges)
+  - name: storage
+    description: File storage operations
 paths:
   /healthz:
     get:
       operationId: healthCheck
       tags: [health]
       summary: Health check
-      description: Returns server health status
       responses:
         "200":
           description: Healthy
@@ -24,13 +29,372 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /storage/uploads/request-url:
+    post:
+      operationId: requestUploadUrl
+      tags: [storage]
+      summary: Request a presigned upload URL for a PDF file
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadUrlRequest"
+      responses:
+        "200":
+          description: Presigned URL generated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadUrlResponse"
+
+  /manuals:
+    get:
+      operationId: listManuals
+      tags: [manuals]
+      summary: List all engineering manuals
+      responses:
+        "200":
+          description: List of manuals
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Manual"
+    post:
+      operationId: createManual
+      tags: [manuals]
+      summary: Create a manual record after PDF upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ManualInput"
+      responses:
+        "201":
+          description: Manual created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Manual"
+
+  /manuals/{id}:
+    get:
+      operationId: getManual
+      tags: [manuals]
+      summary: Get a manual by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Manual details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Manual"
+        "404":
+          description: Not found
+    delete:
+      operationId: deleteManual
+      tags: [manuals]
+      summary: Delete a manual and all its extracted data
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+
+  /manuals/{id}/process:
+    post:
+      operationId: processManual
+      tags: [manuals]
+      summary: Trigger multi-pass AI extraction for a manual
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Processing started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Manual"
+
+  /manuals/{id}/graph:
+    get:
+      operationId: getManualGraph
+      tags: [graph]
+      summary: Get the knowledge graph for a specific manual
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Graph data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphData"
+
+  /manuals/{id}/stats:
+    get:
+      operationId: getManualStats
+      tags: [manuals]
+      summary: Get entity and relationship statistics for a manual
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Manual statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManualStats"
+
+  /graph:
+    get:
+      operationId: getGlobalGraph
+      tags: [graph]
+      summary: Get the combined knowledge graph across all manuals
+      responses:
+        "200":
+          description: Combined graph data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphData"
+
+  /stats:
+    get:
+      operationId: getGlobalStats
+      tags: [graph]
+      summary: Get aggregate statistics across all manuals
+      responses:
+        "200":
+          description: Global statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GlobalStats"
+
+  /entities/{id}:
+    get:
+      operationId: getEntity
+      tags: [graph]
+      summary: Get a single entity with its relationships
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Entity details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EntityDetail"
+        "404":
+          description: Not found
+
 components:
   schemas:
     HealthStatus:
       type: object
+      required: [status]
       properties:
         status:
           type: string
-      required:
-        - status
 
+    UploadUrlRequest:
+      type: object
+      required: [name, size, contentType]
+      properties:
+        name:
+          type: string
+        size:
+          type: integer
+        contentType:
+          type: string
+
+    UploadUrlResponse:
+      type: object
+      required: [uploadURL, objectPath]
+      properties:
+        uploadURL:
+          type: string
+        objectPath:
+          type: string
+
+    Manual:
+      type: object
+      required: [id, name, filename, objectPath, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        filename:
+          type: string
+        objectPath:
+          type: string
+        status:
+          type: string
+          enum: [pending, processing, completed, failed]
+        processingPass:
+          type: ["integer", "null"]
+        totalPages:
+          type: ["integer", "null"]
+        documentType:
+          type: ["string", "null"]
+        errorMessage:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ManualInput:
+      type: object
+      required: [name, filename, objectPath]
+      properties:
+        name:
+          type: string
+        filename:
+          type: string
+        objectPath:
+          type: string
+
+    GraphNode:
+      type: object
+      required: [id, manualId, name, type, description]
+      properties:
+        id:
+          type: integer
+        manualId:
+          type: integer
+        name:
+          type: string
+        type:
+          type: string
+          enum: [machine, component, subsystem, process, part, material, sensor, system, assembly, document_section]
+        description:
+          type: string
+        properties:
+          type: ["object", "null"]
+        pageReferences:
+          type: array
+          items:
+            type: integer
+        orderIndex:
+          type: ["integer", "null"]
+        manualName:
+          type: ["string", "null"]
+
+    GraphEdge:
+      type: object
+      required: [id, manualId, sourceEntityId, targetEntityId, type, label]
+      properties:
+        id:
+          type: integer
+        manualId:
+          type: integer
+        sourceEntityId:
+          type: integer
+        targetEntityId:
+          type: integer
+        type:
+          type: string
+          enum: [contains, part_of, connects_to, depends_on, sequence, communicates_with, powers, controls, feeds_into, mounted_on]
+        label:
+          type: string
+        orderIndex:
+          type: ["integer", "null"]
+        properties:
+          type: ["object", "null"]
+
+    GraphData:
+      type: object
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+
+    EntityDetail:
+      type: object
+      required: [entity, incomingEdges, outgoingEdges]
+      properties:
+        entity:
+          $ref: "#/components/schemas/GraphNode"
+        incomingEdges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+        outgoingEdges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+
+    ManualStats:
+      type: object
+      required: [manualId, totalEntities, totalRelationships, entitiesByType, relationshipsByType]
+      properties:
+        manualId:
+          type: integer
+        totalEntities:
+          type: integer
+        totalRelationships:
+          type: integer
+        entitiesByType:
+          type: object
+        relationshipsByType:
+          type: object
+
+    GlobalStats:
+      type: object
+      required: [totalManuals, totalEntities, totalRelationships, completedManuals, processingManuals, entitiesByType, relationshipsByType]
+      properties:
+        totalManuals:
+          type: integer
+        totalEntities:
+          type: integer
+        totalRelationships:
+          type: integer
+        completedManuals:
+          type: integer
+        processingManuals:
+          type: integer
+        entitiesByType:
+          type: object
+        relationshipsByType:
+          type: object

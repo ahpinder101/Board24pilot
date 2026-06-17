@@ -74,6 +74,11 @@ onlyBuiltDependencies:
   - msw
   - unrs-resolver
 
+pnpm:
+  overrides:
+    react: $react
+    react-dom: $react-dom
+
 overrides:
   # replit uses linux-x64 only, we can exclude all other platforms
   "esbuild>@esbuild/darwin-arm64": "-"

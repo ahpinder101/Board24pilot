@@ -1,0 +1,1 @@
+- [Workspace lib rules](workspace-lib-rules.md) — key pitfalls with composite libs, deep imports, and Orval queryKey requirements in this monorepo

@@ -1,0 +1,213 @@
+import { Router } from "express";
+import { db } from "@workspace/db";
+import {
+  manualsTable,
+  entitiesTable,
+  relationshipsTable,
+} from "@workspace/db";
+import { eq, sql } from "drizzle-orm";
+import {
+  CreateManualBody,
+  GetManualParams,
+  DeleteManualParams,
+  ProcessManualParams,
+  GetManualStatsParams,
+  GetManualGraphParams,
+} from "@workspace/api-zod";
+import { ObjectStorageService } from "../lib/objectStorage.js";
+import { runExtractionPipeline } from "../lib/extractionPipeline.js";
+
+const router = Router();
+const storage = new ObjectStorageService();
+
+// GET /manuals
+router.get("/manuals", async (req, res) => {
+  const manuals = await db.select().from(manualsTable).orderBy(manualsTable.createdAt);
+  res.json(manuals);
+});
+
+// POST /manuals
+router.post("/manuals", async (req, res) => {
+  const parsed = CreateManualBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid request body", details: parsed.error.issues });
+    return;
+  }
+  const { name, filename, objectPath } = parsed.data;
+
+  const [manual] = await db
+    .insert(manualsTable)
+    .values({ name, filename, objectPath, status: "pending" })
+    .returning();
+
+  res.status(201).json(manual);
+});
+
+// GET /manuals/:id
+router.get("/manuals/:id", async (req, res) => {
+  const parsed = GetManualParams.safeParse({ id: Number(req.params.id) });
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid ID" });
+    return;
+  }
+
+  const [manual] = await db
+    .select()
+    .from(manualsTable)
+    .where(eq(manualsTable.id, parsed.data.id));
+
+  if (!manual) {
+    res.status(404).json({ error: "Manual not found" });
+    return;
+  }
+
+  res.json(manual);
+});
+
+// DELETE /manuals/:id
+router.delete("/manuals/:id", async (req, res) => {
+  const parsed = DeleteManualParams.safeParse({ id: Number(req.params.id) });
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid ID" });
+    return;
+  }
+
+  await db.delete(manualsTable).where(eq(manualsTable.id, parsed.data.id));
+  res.status(204).end();
+});
+
+// POST /manuals/:id/process — trigger multi-pass AI extraction
+router.post("/manuals/:id/process", async (req, res) => {
+  const parsed = ProcessManualParams.safeParse({ id: Number(req.params.id) });
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid ID" });
+    return;
+  }
+
+  const [manual] = await db
+    .select()
+    .from(manualsTable)
+    .where(eq(manualsTable.id, parsed.data.id));
+
+  if (!manual) {
+    res.status(404).json({ error: "Manual not found" });
+    return;
+  }
+
+  // If already processing or completed, return current state
+  if (manual.status === "processing") {
+    res.json(manual);
+    return;
+  }
+
+  // Download the PDF from object storage
+  let pdfBuffer: Buffer;
+  try {
+    const file = await storage.getObjectEntityFile(manual.objectPath);
+    const chunks: Buffer[] = [];
+    const stream = file.createReadStream();
+    await new Promise<void>((resolve, reject) => {
+      stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    pdfBuffer = Buffer.concat(chunks);
+  } catch (err) {
+    req.log.error({ err }, "Failed to download PDF for processing");
+    res.status(500).json({ error: "Failed to download PDF from storage" });
+    return;
+  }
+
+  // Clear any previous extraction data
+  await db.delete(entitiesTable).where(eq(entitiesTable.manualId, parsed.data.id));
+
+  // Start pipeline in background (don't await)
+  const manualId = parsed.data.id;
+  runExtractionPipeline(manualId, pdfBuffer).catch((err) => {
+    req.log.error({ err, manualId }, "Background extraction pipeline error");
+  });
+
+  // Return updated manual immediately
+  const [updated] = await db
+    .select()
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId));
+
+  res.json(updated ?? manual);
+});
+
+// GET /manuals/:id/graph
+router.get("/manuals/:id/graph", async (req, res) => {
+  const parsed = GetManualGraphParams.safeParse({ id: Number(req.params.id) });
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid ID" });
+    return;
+  }
+
+  const nodes = await db
+    .select()
+    .from(entitiesTable)
+    .where(eq(entitiesTable.manualId, parsed.data.id));
+
+  const edges = await db
+    .select()
+    .from(relationshipsTable)
+    .where(eq(relationshipsTable.manualId, parsed.data.id));
+
+  res.json({ nodes, edges });
+});
+
+// GET /manuals/:id/stats
+router.get("/manuals/:id/stats", async (req, res) => {
+  const parsed = GetManualStatsParams.safeParse({ id: Number(req.params.id) });
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid ID" });
+    return;
+  }
+
+  const manualId = parsed.data.id;
+
+  const [entityCount] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(entitiesTable)
+    .where(eq(entitiesTable.manualId, manualId));
+
+  const [relCount] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(relationshipsTable)
+    .where(eq(relationshipsTable.manualId, manualId));
+
+  const entityTypes = await db
+    .select({
+      type: entitiesTable.type,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(entitiesTable)
+    .where(eq(entitiesTable.manualId, manualId))
+    .groupBy(entitiesTable.type);
+
+  const relTypes = await db
+    .select({
+      type: relationshipsTable.type,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(relationshipsTable)
+    .where(eq(relationshipsTable.manualId, manualId))
+    .groupBy(relationshipsTable.type);
+
+  const entitiesByType: Record<string, number> = {};
+  for (const row of entityTypes) entitiesByType[row.type] = row.count;
+
+  const relationshipsByType: Record<string, number> = {};
+  for (const row of relTypes) relationshipsByType[row.type] = row.count;
+
+  res.json({
+    manualId,
+    totalEntities: entityCount?.count ?? 0,
+    totalRelationships: relCount?.count ?? 0,
+    entitiesByType,
+    relationshipsByType,
+  });
+});
+
+export default router;
