@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
-import { Network, Database, LayoutDashboard, Menu, X } from "lucide-react";
+import { Network, Database, LayoutDashboard, Menu, X, MessageSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +20,7 @@ export function Layout({ children }: LayoutProps) {
   const navItems = [
     { href: "/", label: "Dashboard", icon: LayoutDashboard },
     { href: "/graph", label: "Global Graph", icon: Network },
+    { href: "/ask", label: "Ask Engineer", icon: MessageSquare },
   ];
 
   return (

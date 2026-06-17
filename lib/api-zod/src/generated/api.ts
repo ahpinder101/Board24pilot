@@ -9,6 +9,51 @@ import * as zod from 'zod';
 
 
 /**
+ * @summary Ask a question about the engineering manuals
+ */
+export const SendChatMessageBody = zod.object({
+  "question": zod.string(),
+  "sessionId": zod.string().optional()
+})
+
+export const SendChatMessageResponse = zod.object({
+  "answer": zod.string(),
+  "citations": zod.array(zod.object({
+  "manualId": zod.number(),
+  "manualName": zod.string(),
+  "pageNumber": zod.number().optional(),
+  "excerpt": zod.string(),
+  "entityNames": zod.array(zod.string()).optional()
+})),
+  "sessionId": zod.string(),
+  "graphEntities": zod.array(zod.string()).optional()
+})
+
+
+/**
+ * @summary Get message history for a session
+ */
+export const GetChatHistoryParams = zod.object({
+  "sessionId": zod.coerce.string()
+})
+
+export const GetChatHistoryResponseItem = zod.object({
+  "id": zod.number(),
+  "role": zod.string(),
+  "content": zod.string(),
+  "citations": zod.array(zod.object({
+  "manualId": zod.number(),
+  "manualName": zod.string(),
+  "pageNumber": zod.number().optional(),
+  "excerpt": zod.string(),
+  "entityNames": zod.array(zod.string()).optional()
+})).optional(),
+  "createdAt": zod.string()
+})
+export const GetChatHistoryResponse = zod.array(GetChatHistoryResponseItem)
+
+
+/**
  * @summary Health check
  */
 export const HealthCheckResponse = zod.object({

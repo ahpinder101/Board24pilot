@@ -161,3 +161,31 @@ export interface GlobalStats {
   relationshipsByType: GlobalStatsRelationshipsByType;
 }
 
+export interface ChatCitation {
+  manualId: number;
+  manualName: string;
+  pageNumber?: number;
+  excerpt: string;
+  entityNames?: string[];
+}
+
+export interface ChatRequest {
+  question: string;
+  sessionId?: string;
+}
+
+export interface ChatResponse {
+  answer: string;
+  citations: ChatCitation[];
+  sessionId: string;
+  graphEntities?: string[];
+}
+
+export interface ChatHistoryMessage {
+  id: number;
+  role: string;
+  content: string;
+  citations?: ChatCitation[];
+  createdAt: string;
+}
+

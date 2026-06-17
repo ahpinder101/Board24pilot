@@ -1,1 +1,4 @@
 - [Workspace lib rules](workspace-lib-rules.md) — key pitfalls with composite libs, deep imports, and Orval queryKey requirements in this monorepo
+- [Replit AI embeddings not supported](replit-ai-embeddings.md) — Replit AI proxy blocks POST /embeddings; use PostgreSQL FTS instead of vector similarity for RAG.
+- [Drizzle sql ANY array](drizzle-sql-any-array.md) — Passing a JS array to ANY() in a drizzle sql template generates wrong SQL; use PG array literal string instead.
+- [tsc --build timeout](tsc-build-timeout.md) — tsc --build often times out in this environment; manually update dist/*.d.ts files to unblock artifact typechecks quickly.

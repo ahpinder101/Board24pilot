@@ -6,6 +6,7 @@ import { Layout } from "@/components/layout";
 import Dashboard from "@/pages/dashboard";
 import ManualGraphPage from "@/pages/manual-graph-page";
 import GlobalGraphPage from "@/pages/global-graph-page";
+import AskPage from "@/pages/ask-page";
 import NotFound from "@/pages/not-found";
 
 const queryClient = new QueryClient();
@@ -16,6 +17,7 @@ function Router() {
       <Route path="/" component={Dashboard} />
       <Route path="/manuals/:id" component={ManualGraphPage} />
       <Route path="/graph" component={GlobalGraphPage} />
+      <Route path="/ask" component={AskPage} />
       <Route component={NotFound} />
     </Switch>
   );

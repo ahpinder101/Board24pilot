@@ -7,6 +7,7 @@
  * Pass 4: Entity extraction (machines, components, subsystems, processes, parts, etc.)
  * Pass 5: Relationship extraction (connects-to, part-of, contains, sequence, etc.)
  * Pass 6: Ordering & hierarchy (sequences, procedures, dependency order)
+ * Pass 7: Embedding generation for RAG (chunks → pgvector)
  */
 
 import { openai } from "@workspace/integrations-openai-ai-server";
@@ -16,6 +17,7 @@ import {
   manualPagesTable,
   entitiesTable,
   relationshipsTable,
+  chunksTable,
   type Manual,
   type ManualPage,
   type Entity,
@@ -364,6 +366,47 @@ Return a JSON object with:
   }
 }
 
+// ─── PASS 7: Chunk text for RAG (stored with auto-generated FTS vector) ──────
+
+const CHUNK_SIZE = 500; // chars per chunk
+
+async function pass7EmbedChunks(
+  manualId: number,
+  pages: Array<{ pageNumber: number; text: string }>
+): Promise<void> {
+  await updateManualPass(manualId, 7);
+
+  // Delete old chunks for this manual (idempotent re-runs)
+  await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
+
+  for (const page of pages) {
+    if (!page.text || page.text.trim().length < 20) continue;
+
+    const rawChunks = chunkText(page.text, CHUNK_SIZE);
+
+    for (let ci = 0; ci < rawChunks.length; ci++) {
+      const content = rawChunks[ci]!.trim();
+      if (content.length < 20) continue;
+
+      try {
+        await db.insert(chunksTable).values({
+          manualId,
+          pageNumber: page.pageNumber,
+          chunkIndex: ci,
+          content,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, manualId, pageNumber: page.pageNumber, chunkIndex: ci },
+          "Chunk insert failed"
+        );
+      }
+    }
+  }
+
+  logger.info({ manualId }, "Pass 7: text chunks stored");
+}
+
 // ─── MAIN PIPELINE ──────────────────────────────────────────────────────────
 
 export async function runExtractionPipeline(
@@ -465,7 +508,10 @@ export async function runExtractionPipeline(
     // Pass 6: Ordering & hierarchy
     await pass6OrderingHierarchy(manualId, pdfContent.fullText, extractedEntities);
 
-    await setManualStatus(manualId, "completed", { processingPass: 6 });
+    // Pass 7: Embed chunks for RAG
+    await pass7EmbedChunks(manualId, pdfContent.pages);
+
+    await setManualStatus(manualId, "completed", { processingPass: 7 });
     logger.info({ manualId }, "Extraction pipeline completed");
   } catch (err) {
     logger.error({ err, manualId }, "Extraction pipeline failed");

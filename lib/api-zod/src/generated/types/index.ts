@@ -6,6 +6,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './chatCitation';
+export * from './chatHistoryMessage';
+export * from './chatRequest';
+export * from './chatResponse';
 export * from './entityDetail';
 export * from './globalStats';
 export * from './globalStatsEntitiesByType';

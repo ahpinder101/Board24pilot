@@ -28,27 +28,31 @@ Upload PDF engineering manuals and let AI extract entities and relationships int
 
 - `lib/api-spec/openapi.yaml` — source of truth for API contract
 - `lib/api-client-react/src/generated/` — auto-generated React Query hooks + Zod schemas (do not edit)
-- `lib/db/src/schema/` — DB schema: `manuals.ts`, `entities.ts`
-- `artifacts/api-server/src/lib/extractionPipeline.ts` — 6-pass AI extraction pipeline
-- `artifacts/api-server/src/routes/` — manuals, graph, storage route handlers
+- `lib/db/src/schema/` — DB schema: `manuals.ts`, `entities.ts`, `chunks.ts`, `chat.ts`
+- `artifacts/api-server/src/lib/extractionPipeline.ts` — 7-pass AI extraction pipeline (Pass 7 = text chunking)
+- `artifacts/api-server/src/routes/` — manuals, graph, storage, chat route handlers
 - `artifacts/manual-graph/src/` — React frontend (pages, components)
+- `artifacts/manual-graph/src/pages/ask-page.tsx` — Ask Engineer chat UI
 
 ## Architecture decisions
 
 - **Contract-first API**: OpenAPI spec drives both server validation (Zod) and client hooks (React Query). Any new endpoint needs the spec updated first, then `codegen` run.
-- **6-pass pipeline**: document structure → page content → vision descriptions → entity extraction → relationship extraction → hierarchy ordering. Each pass updates `processingPass` on the manual so the UI can show progress.
+- **7-pass pipeline**: document structure → page content → vision descriptions → entity extraction → relationship extraction → hierarchy ordering → text chunking (RAG). Each pass updates `processingPass` on the manual so the UI can show progress.
 - **Async processing**: PDF processing runs in the background after upload; the frontend polls every 3s while `status === 'processing'`.
 - **Object storage for PDFs**: Files go to GCS via presigned URL (client-side direct upload), then the API reads them from storage for processing.
 - **Cross-manual graph**: entities and relationships are stored per-manual, but the global graph endpoint joins across all completed manuals.
+- **RAG via FTS**: The Replit AI proxy does not support `/embeddings`, so RAG uses PostgreSQL full-text search (`to_tsvector` / `to_tsquery`) with a generated `fts_vector` column on the `chunks` table. Chat answers combine FTS chunk retrieval + graph entity/relationship keyword search, synthesized by GPT-4o.
+- **pgvector is enabled** but `embedding` column is nullable — reserved for when a supported embedding source becomes available.
 
 ## Product
 
 - Upload PDF engineering manuals (up to 50MB)
-- AI extracts machines, components, subsystems, processes, parts, sensors, and their relationships via 6 AI passes
+- AI extracts machines, components, subsystems, processes, parts, sensors, and their relationships via 7 AI passes (Pass 7 = text chunking for RAG)
 - Interactive graph visualization with dagre auto-layout, node detail panel, minimap, and zoom
 - Per-manual graph view with processing progress bar
 - Global graph view combining all uploaded manuals
 - Stats dashboard showing entity and relationship counts
+- **Ask Engineer** (`/ask`): RAG chat — ask natural language questions, answers synthesized by GPT-4o from FTS chunk retrieval + graph entity/relationship search, with cited page references
 
 ## User preferences
 

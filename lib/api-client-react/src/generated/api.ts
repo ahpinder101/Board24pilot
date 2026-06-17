@@ -20,6 +20,9 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  ChatHistoryMessage,
+  ChatRequest,
+  ChatResponse,
   EntityDetail,
   GlobalStats,
   GraphData,
@@ -40,6 +43,154 @@ type AwaitedInput<T> = PromiseLike<T> | T;
 
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
+
+
+
+export const getSendChatMessageUrl = () => {
+
+
+
+
+  return `/api/chat`
+}
+
+/**
+ * @summary Ask a question about the engineering manuals
+ */
+export const sendChatMessage = async (chatRequest: ChatRequest, options?: RequestInit): Promise<ChatResponse> => {
+
+  return customFetch<ChatResponse>(getSendChatMessageUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      chatRequest,)
+  }
+);}
+
+
+
+
+export const getSendChatMessageMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sendChatMessage>>, TError,{data: BodyType<ChatRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof sendChatMessage>>, TError,{data: BodyType<ChatRequest>}, TContext> => {
+
+const mutationKey = ['sendChatMessage'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sendChatMessage>>, {data: BodyType<ChatRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  sendChatMessage(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SendChatMessageMutationResult = NonNullable<Awaited<ReturnType<typeof sendChatMessage>>>
+    export type SendChatMessageMutationBody = BodyType<ChatRequest>
+    export type SendChatMessageMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Ask a question about the engineering manuals
+ */
+export const useSendChatMessage = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sendChatMessage>>, TError,{data: BodyType<ChatRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof sendChatMessage>>,
+        TError,
+        {data: BodyType<ChatRequest>},
+        TContext
+      > => {
+      return useMutation(getSendChatMessageMutationOptions(options));
+    }
+
+export const getGetChatHistoryUrl = (sessionId: string,) => {
+
+
+
+
+  return `/api/chat/${sessionId}/history`
+}
+
+/**
+ * @summary Get message history for a session
+ */
+export const getChatHistory = async (sessionId: string, options?: RequestInit): Promise<ChatHistoryMessage[]> => {
+
+  return customFetch<ChatHistoryMessage[]>(getGetChatHistoryUrl(sessionId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetChatHistoryQueryKey = (sessionId: string,) => {
+    return [
+    `/api/chat/${sessionId}/history`
+    ] as const;
+    }
+
+
+export const getGetChatHistoryQueryOptions = <TData = Awaited<ReturnType<typeof getChatHistory>>, TError = ErrorType<unknown>>(sessionId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getChatHistory>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetChatHistoryQueryKey(sessionId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getChatHistory>>> = ({ signal }) => getChatHistory(sessionId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: !!(sessionId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getChatHistory>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetChatHistoryQueryResult = NonNullable<Awaited<ReturnType<typeof getChatHistory>>>
+export type GetChatHistoryQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Get message history for a session
+ */
+
+export function useGetChatHistory<TData = Awaited<ReturnType<typeof getChatHistory>>, TError = ErrorType<unknown>>(
+ sessionId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getChatHistory>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetChatHistoryQueryOptions(sessionId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
 
 
 
