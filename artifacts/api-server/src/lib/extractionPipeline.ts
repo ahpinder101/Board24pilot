@@ -412,10 +412,81 @@ async function pass7EmbedChunks(
   logger.info({ manualId, totalChunks }, "Pass 7: semantic chunks stored");
 }
 
-// ─── VISION OCR: GPT-4o image-based text extraction ─────────────────────────
+// ─── VISION OCR: ISO/IEC-guided page interpretation ──────────────────────────
 //
-// Used when pdf-parse returns empty text for all pages (scanned / image PDF).
-// Renders each page via pdftoppm and sends the PNG to GPT-4o vision.
+// Replaces naive "transcribe text" with a classify-then-interpret approach.
+// GPT-4o first identifies the page type, then applies the relevant ISO/IEC
+// standard to produce semantically rich output (counts, topology, flow paths)
+// rather than a flat repetition of visible labels.
+//
+// Supported page types and governing standards:
+//   PNEUMATIC_SCHEMATIC  — ISO 1219-1/2 (fluid power graphical symbols)
+//   HYDRAULIC_SCHEMATIC  — ISO 1219-1/2
+//   ELECTRICAL_WIRING    — IEC 60617 (graphical symbols for diagrams)
+//   PLC_IO_TABLE         — IEC 61131-3 (PLC I/O addressing)
+//   MECHANICAL_DRAWING   — ISO 128 (technical drawings / projections)
+//   TEXT_TABLE           — plain text, tables, or mixed procedural content
+
+function buildPageInterpretationPrompt(pageNumber: number): string {
+  return `You are an expert engineering document analyst trained in ISO and IEC technical standards.
+
+This is page ${pageNumber} of an engineering manual.
+
+STEP 1 — Classify the page. Output exactly one of these labels on the first line:
+  PAGE_TYPE: PNEUMATIC_SCHEMATIC
+  PAGE_TYPE: HYDRAULIC_SCHEMATIC
+  PAGE_TYPE: ELECTRICAL_WIRING
+  PAGE_TYPE: PLC_IO_TABLE
+  PAGE_TYPE: MECHANICAL_DRAWING
+  PAGE_TYPE: TEXT_TABLE
+
+STEP 2 — Interpret the page according to the relevant standard. Follow the rules for the type you identified:
+
+━━━ PNEUMATIC_SCHEMATIC or HYDRAULIC_SCHEMATIC (ISO 1219-1/2) ━━━
+Output the following sections:
+ACTUATORS:
+  For each cylinder or motor symbol: part number / model, bore × stroke (if labelled), quantity of that component visible in the circuit. Example: "DSNU-32-80-PPV-A — 32mm bore, 80mm stroke — QTY: 3"
+
+DIRECTIONAL CONTROL VALVES (DCVs):
+  For each DCV: model, port/position configuration (e.g. 5/2-way), actuation method (solenoid coil model + part number if shown), PLC output address if labelled.
+
+FLOW CONTROL & CHECK VALVES:
+  Model, part number, quantity, and which branch of the circuit they appear in.
+
+PRESSURE / FILTER / REGULATOR (FRL):
+  Model and part number if visible.
+
+FITTINGS & CONNECTORS:
+  For each fitting type: model, part number, total quantity visible in this circuit.
+
+CIRCUIT FLOW DESCRIPTION:
+  Trace the pneumatic/hydraulic flow path from supply inlet to each actuator in plain English. Name each component in sequence. Explicitly state how many actuators a single valve controls.
+
+━━━ ELECTRICAL_WIRING (IEC 60617) ━━━
+Output:
+POWER RAILS: voltage levels and AC/DC type.
+LOADS: each load's label, model, and rating.
+SWITCHING ELEMENTS: relays, contactors, switches — model and coil/contact ratings.
+CIRCUIT TRACES: for each circuit, describe: power source → switching elements → load, with wire colour and terminal numbers where visible.
+
+━━━ PLC_IO_TABLE (IEC 61131-3) ━━━
+Extract every row as a structured record:
+  ADDRESS | DESCRIPTION | SENSOR/DEVICE TYPE | CROSS-REF PAGE
+Group rows under headings: DIGITAL INPUTS, DIGITAL OUTPUTS, ANALOGUE INPUTS, ANALOGUE OUTPUTS, TEMPERATURE INPUTS, SPARE CHANNELS.
+Note the PLC platform/format if identifiable (e.g. Allen-Bradley ControlLogix, Siemens S7).
+
+━━━ MECHANICAL_DRAWING (ISO 128) ━━━
+Output:
+PART/ASSEMBLY: name and drawing number.
+DIMENSIONS: list all labelled dimensions with units and tolerances.
+MATERIALS: material specs and surface finish callouts if present.
+BOM TABLE: if a parts list is visible, extract every row.
+
+━━━ TEXT_TABLE ━━━
+Extract ALL text exactly as it appears. Preserve: numbered/lettered steps, table rows, part labels, measurements with units, warnings, and section headings. Do NOT summarize or paraphrase.
+
+If the page is blank or contains only unlabelled artwork with no text, output exactly: [diagram only]`;
+}
 
 async function passVisionOcr(
   manualId: number,
@@ -438,7 +509,7 @@ async function passVisionOcr(
 
           const response = await openai.chat.completions.create({
             model: MODEL,
-            max_completion_tokens: 2048,
+            max_completion_tokens: 4096,
             messages: [
               {
                 role: "user",
@@ -452,7 +523,7 @@ async function passVisionOcr(
                   },
                   {
                     type: "text",
-                    text: `This is page ${pageNumber} of an engineering manual. Extract ALL text exactly as it appears on this page. Preserve the layout: numbered/lettered steps, table rows, part labels, measurements (with units), warnings, and section headings. Do NOT summarize or paraphrase — output only the literal text content. If the page is blank or contains only a diagram with no text labels, output the single line: [diagram only]`,
+                    text: buildPageInterpretationPrompt(pageNumber),
                   },
                 ],
               },
@@ -643,7 +714,7 @@ export async function reprocessPageRangeWithVision(
           const base64Image = await renderPdfPageToBase64(pdfBuffer, pageNumber);
           const response = await openai.chat.completions.create({
             model: MODEL,
-            max_completion_tokens: 2048,
+            max_completion_tokens: 4096,
             messages: [
               {
                 role: "user",
@@ -657,7 +728,7 @@ export async function reprocessPageRangeWithVision(
                   },
                   {
                     type: "text",
-                    text: `This is page ${pageNumber} of an engineering manual. Extract ALL text exactly as it appears on this page. Preserve the layout: numbered/lettered steps, table rows, part labels, measurements (with units), warnings, and section headings. Do NOT summarize or paraphrase — output only the literal text content. If the page is blank or contains only a diagram with no text labels, output the single line: [diagram only]`,
+                    text: buildPageInterpretationPrompt(pageNumber),
                   },
                 ],
               },
