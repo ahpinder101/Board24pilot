@@ -1,4 +1,47 @@
 import { Buffer } from "node:buffer";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { writeFile, readFile, readdir, rm, mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * Renders a single PDF page to a base64-encoded PNG using pdftoppm.
+ * Used for vision-based OCR on image-only (scanned) PDFs.
+ */
+export async function renderPdfPageToBase64(
+  pdfBuffer: Buffer,
+  pageNumber: number
+): Promise<string> {
+  const tempDir = await mkdtemp(join(tmpdir(), "pdfrender-"));
+  const pdfPath = join(tempDir, "input.pdf");
+  const outputPrefix = join(tempDir, "pg");
+
+  try {
+    await writeFile(pdfPath, pdfBuffer);
+
+    // -r 150: 150 DPI — good quality for OCR without oversized images
+    await execFileAsync("pdftoppm", [
+      "-r", "150",
+      "-f", String(pageNumber),
+      "-l", String(pageNumber),
+      "-png",
+      pdfPath,
+      outputPrefix,
+    ]);
+
+    const files = await readdir(tempDir);
+    const pngFile = files.find((f) => f.endsWith(".png"));
+    if (!pngFile) throw new Error(`pdftoppm produced no PNG for page ${pageNumber}`);
+
+    const imageBuffer = await readFile(join(tempDir, pngFile));
+    return imageBuffer.toString("base64");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
 
 export interface PageContent {
   pageNumber: number;

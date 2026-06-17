@@ -25,7 +25,7 @@ import {
   type InsertRelationship,
 } from "@workspace/db";
 import { eq, and, count } from "drizzle-orm";
-import { extractPdfText, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
+import { extractPdfText, renderPdfPageToBase64, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
 
@@ -412,6 +412,206 @@ async function pass7EmbedChunks(
   logger.info({ manualId, totalChunks }, "Pass 7: semantic chunks stored");
 }
 
+// ─── VISION OCR: GPT-4o image-based text extraction ─────────────────────────
+//
+// Used when pdf-parse returns empty text for all pages (scanned / image PDF).
+// Renders each page via pdftoppm and sends the PNG to GPT-4o vision.
+
+async function passVisionOcr(
+  manualId: number,
+  pdfBuffer: Buffer,
+  totalPages: number
+): Promise<Array<{ pageNumber: number; text: string }>> {
+  const results: Array<{ pageNumber: number; text: string }> = [];
+  const CONCURRENCY = 5;
+
+  for (let start = 1; start <= totalPages; start += CONCURRENCY) {
+    const batch: number[] = [];
+    for (let p = start; p < start + CONCURRENCY && p <= totalPages; p++) {
+      batch.push(p);
+    }
+
+    const batchResults = await Promise.all(
+      batch.map(async (pageNumber) => {
+        try {
+          const base64Image = await renderPdfPageToBase64(pdfBuffer, pageNumber);
+
+          const response = await openai.chat.completions.create({
+            model: MODEL,
+            max_completion_tokens: 2048,
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${base64Image}`,
+                      detail: "high",
+                    },
+                  },
+                  {
+                    type: "text",
+                    text: `This is page ${pageNumber} of an engineering manual. Extract ALL text exactly as it appears on this page. Preserve the layout: numbered/lettered steps, table rows, part labels, measurements (with units), warnings, and section headings. Do NOT summarize or paraphrase — output only the literal text content. If the page is blank or contains only a diagram with no text labels, output the single line: [diagram only]`,
+                  },
+                ],
+              },
+            ],
+          });
+
+          const text = response.choices[0]?.message?.content ?? "";
+          const cleanedText = text.trim() === "[diagram only]" ? "" : text.trim();
+          return { pageNumber, text: cleanedText };
+        } catch (err) {
+          logger.warn({ err, pageNumber }, "Vision OCR failed for page");
+          return { pageNumber, text: "" };
+        }
+      })
+    );
+
+    results.push(...batchResults);
+
+    // Persist OCR text to manual_pages immediately so progress is saved
+    for (const { pageNumber, text } of batchResults) {
+      await db
+        .update(manualPagesTable)
+        .set({ rawText: text })
+        .where(
+          and(
+            eq(manualPagesTable.manualId, manualId),
+            eq(manualPagesTable.pageNumber, pageNumber)
+          )
+        );
+    }
+
+    logger.info(
+      { manualId, batchStart: batch[0], batchEnd: batch[batch.length - 1] },
+      "Vision OCR batch complete"
+    );
+  }
+
+  return results;
+}
+
+// ─── REPROCESS WITH VISION: full re-pipeline for image-based PDFs ─────────────
+
+/**
+ * Re-runs the full extraction pipeline for a manual that was originally
+ * processed as an image-based PDF (empty raw_text).  Reads the PDF from
+ * the provided buffer, uses GPT-4o vision to OCR every page, then runs
+ * entity/relationship extraction and semantic chunking on the result.
+ */
+export async function reprocessManualWithVision(
+  manualId: number,
+  pdfBuffer: Buffer
+): Promise<void> {
+  try {
+    await setManualStatus(manualId, "processing", { processingPass: 0 });
+
+    // Fetch persisted page count and document type
+    const [manual] = await db
+      .select({ totalPages: manualsTable.totalPages, documentType: manualsTable.documentType })
+      .from(manualsTable)
+      .where(eq(manualsTable.id, manualId));
+
+    const totalPages = manual?.totalPages ?? 0;
+    if (totalPages === 0) throw new Error("Manual has no pages recorded");
+
+    // Clear previous (empty) extraction data
+    await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
+    await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+    await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
+
+    // Vision OCR — populate rawText for every page
+    await updateManualPass(manualId, 2);
+    const ocrPages = await passVisionOcr(manualId, pdfBuffer, totalPages);
+    const fullText = ocrPages.map((p) => p.text).join("\n\n");
+
+    // Pass 1: Document structure (from OCR text)
+    const structure = await pass1DocumentStructure(manualId, fullText, totalPages);
+    await db
+      .update(manualsTable)
+      .set({ documentType: structure.documentType, updatedAt: new Date() })
+      .where(eq(manualsTable.id, manualId));
+
+    // Pass 4: Entity extraction
+    const extractedEntities = await pass4EntityExtraction(
+      manualId,
+      fullText,
+      structure.documentType,
+      structure.overview ?? ""
+    );
+
+    const insertedEntities: Array<{ name: string; id: number }> = [];
+    for (const entity of extractedEntities) {
+      try {
+        const [inserted] = await db
+          .insert(entitiesTable)
+          .values({
+            manualId,
+            name: entity.name,
+            type: entity.type ?? "component",
+            description: entity.description ?? "",
+            properties: null,
+            pageReferences: entity.pageReferences ?? [],
+            orderIndex: entity.orderIndex ?? null,
+          })
+          .returning();
+        if (inserted) insertedEntities.push({ name: entity.name, id: inserted.id });
+      } catch (err) {
+        logger.warn({ err, entity: entity.name }, "Entity insert failed");
+      }
+    }
+
+    // Pass 5: Relationship extraction
+    const extractedRelationships = await pass5RelationshipExtraction(
+      manualId,
+      fullText,
+      extractedEntities
+    );
+
+    const nameToId = new Map<string, number>();
+    for (const e of insertedEntities) nameToId.set(e.name.toLowerCase().trim(), e.id);
+
+    for (const rel of extractedRelationships) {
+      const sourceId = nameToId.get(rel.sourceName?.toLowerCase().trim() ?? "");
+      const targetId = nameToId.get(rel.targetName?.toLowerCase().trim() ?? "");
+      if (!sourceId || !targetId || sourceId === targetId) continue;
+      try {
+        await db.insert(relationshipsTable).values({
+          manualId,
+          sourceEntityId: sourceId,
+          targetEntityId: targetId,
+          type: rel.type ?? "connects_to",
+          label: rel.label ?? "",
+          orderIndex: rel.orderIndex ?? null,
+          properties: null,
+        });
+      } catch (err) {
+        logger.warn({ err }, "Relationship insert failed");
+      }
+    }
+
+    // Pass 6: Ordering & hierarchy
+    await pass6OrderingHierarchy(manualId, fullText, extractedEntities);
+
+    // Pass 7: Semantic chunking
+    await pass7EmbedChunks(
+      manualId,
+      ocrPages.map((p) => ({ pageNumber: p.pageNumber, text: p.text }))
+    );
+
+    await setManualStatus(manualId, "completed", { processingPass: 7 });
+    logger.info({ manualId }, "Vision reprocess completed");
+  } catch (err) {
+    await setManualStatus(manualId, "failed", {
+      errorMessage: err instanceof Error ? err.message : "Unknown error",
+    });
+    logger.error({ err, manualId }, "Vision reprocess failed");
+    throw err;
+  }
+}
+
 // ─── RECHUNK: re-run Pass 7 from stored page text ────────────────────────────
 
 /**
@@ -475,6 +675,19 @@ export async function runExtractionPipeline(
 
     // Pass 3: Vision descriptions
     await pass3VisionDescriptions(manualId, pdfContent.fullText, pdfContent.pages);
+
+    // Image-PDF detection: if >80% of pages have no text, use GPT-4o vision OCR
+    const emptyCount = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20).length;
+    if (pdfContent.pages.length > 0 && emptyCount / pdfContent.pages.length > 0.8) {
+      logger.info({ manualId, emptyCount }, "Image-based PDF detected — running vision OCR");
+      const ocrPages = await passVisionOcr(manualId, pdfBuffer, pdfContent.totalPages);
+      // Patch pdfContent in-place so downstream passes use the OCR text
+      for (const ocrPage of ocrPages) {
+        const page = pdfContent.pages.find((p) => p.pageNumber === ocrPage.pageNumber);
+        if (page) page.text = ocrPage.text;
+      }
+      pdfContent.fullText = ocrPages.map((p) => p.text).join("\n\n");
+    }
 
     // Pass 4: Entity extraction
     const extractedEntities = await pass4EntityExtraction(

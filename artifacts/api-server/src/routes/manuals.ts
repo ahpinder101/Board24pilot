@@ -16,7 +16,7 @@ import {
   GetManualGraphParams,
 } from "@workspace/api-zod";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { runExtractionPipeline, rechunkManual } from "../lib/extractionPipeline.js";
+import { runExtractionPipeline, rechunkManual, reprocessManualWithVision } from "../lib/extractionPipeline.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -260,6 +260,57 @@ router.get("/manuals/:id/stats", async (req, res) => {
     entitiesByType,
     relationshipsByType,
   });
+});
+
+// POST /manuals/:id/reprocess-vision — admin: re-run full pipeline with GPT-4o vision OCR
+// Use when a manual was processed as an image-based PDF and produced no entities/chunks.
+router.post("/manuals/:id/reprocess-vision", async (req, res) => {
+  const manualId = parseInt(req.params.id ?? "", 10);
+  if (isNaN(manualId)) {
+    res.status(400).json({ error: "Invalid manual id" });
+    return;
+  }
+
+  const [manual] = await db
+    .select()
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId));
+
+  if (!manual) {
+    res.status(404).json({ error: "Manual not found" });
+    return;
+  }
+
+  if (manual.status === "processing") {
+    res.status(409).json({ error: "Manual is already processing" });
+    return;
+  }
+
+  // Read PDF from object storage
+  let pdfBuffer: Buffer;
+  try {
+    const storage = new ObjectStorageService();
+    const file = await storage.getObjectEntityFile(manual.objectPath);
+    const chunks: Buffer[] = [];
+    const stream = file.createReadStream();
+    await new Promise<void>((resolve, reject) => {
+      stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+      stream.on("end", resolve);
+      stream.on("error", reject);
+    });
+    pdfBuffer = Buffer.concat(chunks);
+  } catch (err) {
+    req.log.error({ err, manualId }, "Failed to download PDF for vision reprocess");
+    res.status(500).json({ error: "Failed to download PDF from storage" });
+    return;
+  }
+
+  // Start reprocess in background
+  reprocessManualWithVision(manualId, pdfBuffer).catch((err) => {
+    req.log.error({ err, manualId }, "Vision reprocess pipeline error");
+  });
+
+  res.json({ ok: true, manualId, message: "Vision reprocess started" });
 });
 
 // POST /manuals/:id/rechunk — admin: re-apply semantic chunker without full pipeline
