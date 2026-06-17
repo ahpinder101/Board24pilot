@@ -1,4 +1,5 @@
 import { Router } from "express";
+import multer from "multer";
 import { db } from "@workspace/db";
 import {
   manualsTable,
@@ -17,8 +18,59 @@ import {
 import { ObjectStorageService } from "../lib/objectStorage.js";
 import { runExtractionPipeline } from "../lib/extractionPipeline.js";
 
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype === "application/pdf") {
+      cb(null, true);
+    } else {
+      cb(new Error("Only PDF files are accepted"));
+    }
+  },
+});
+
 const router = Router();
 const storage = new ObjectStorageService();
+
+// POST /manuals/upload — combined: receive PDF → store in GCS → create record → kick off processing
+router.post("/manuals/upload", upload.single("file"), async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: "No PDF file provided" });
+    return;
+  }
+
+  const filename = req.file.originalname;
+  const buffer = req.file.buffer;
+  const contentType = req.file.mimetype;
+
+  let objectPath: string;
+  try {
+    objectPath = await storage.uploadBuffer(buffer, filename, contentType);
+  } catch (err) {
+    req.log.error({ err }, "Failed to upload PDF to object storage");
+    res.status(500).json({ error: "Failed to store PDF" });
+    return;
+  }
+
+  const name = filename.replace(/\.pdf$/i, "").replace(/[-_]/g, " ");
+  const [manual] = await db
+    .insert(manualsTable)
+    .values({ name, filename, objectPath, status: "pending" })
+    .returning();
+
+  if (!manual) {
+    res.status(500).json({ error: "Failed to create manual record" });
+    return;
+  }
+
+  // Start pipeline in background
+  runExtractionPipeline(manual.id, buffer).catch((err) => {
+    req.log.error({ err, manualId: manual.id }, "Background extraction pipeline error");
+  });
+
+  res.status(201).json(manual);
+});
 
 // GET /manuals
 router.get("/manuals", async (req, res) => {
