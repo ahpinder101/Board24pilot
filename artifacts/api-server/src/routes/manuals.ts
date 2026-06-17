@@ -16,7 +16,8 @@ import {
   GetManualGraphParams,
 } from "@workspace/api-zod";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision } from "../lib/extractionPipeline.js";
+import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText } from "../lib/extractionPipeline.js";
+import { logger } from "../lib/logger.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -353,6 +354,26 @@ router.post("/manuals/:id/reprocess-vision-pages", async (req, res) => {
     req.log.error({ err, manualId }, "Page-range vision OCR failed");
     res.status(500).json({ error: String(err) });
   }
+});
+
+// POST /manuals/:id/extract-graph — run entity/relationship extraction on existing OCR text
+// Responds 202 immediately; extraction runs in background (can take 2-5 min).
+// Poll GET /manuals/:id to check processingPass progress (1→4→5→6 = done).
+router.post("/manuals/:id/extract-graph", async (req, res) => {
+  const manualId = parseInt(req.params.id ?? "", 10);
+  if (isNaN(manualId)) { res.status(400).json({ error: "Invalid manual id" }); return; }
+  const [manual] = await db.select().from(manualsTable).where(eq(manualsTable.id, manualId));
+  if (!manual) { res.status(404).json({ error: "Manual not found" }); return; }
+  res.status(202).json({ ok: true, manualId, message: "Graph extraction started — poll GET /api/manuals/:id for progress" });
+  // Defer to next tick so the HTTP response flushes before the blocking AI work starts
+  setImmediate(async () => {
+    try {
+      const result = await extractGraphFromExistingText(manualId);
+      logger.info({ manualId, ...result }, "Graph extraction completed");
+    } catch (err) {
+      logger.error({ err, manualId }, "Graph extraction failed");
+    }
+  });
 });
 
 // POST /manuals/:id/rechunk — admin: re-apply semantic chunker without full pipeline

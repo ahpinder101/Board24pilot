@@ -797,6 +797,117 @@ export async function reprocessPageRangeWithVision(
   return { pages: totalToProcess, chunks: totalChunks };
 }
 
+// ─── EXTRACT GRAPH: run entity/relationship extraction on existing OCR text ───
+//
+// Runs passes 1, 4, 5, 6 on whatever rawText is already stored in manual_pages.
+// Use this after a page-range OCR to populate the knowledge graph without
+// re-running the full pipeline or re-downloading the PDF.
+
+export async function extractGraphFromExistingText(
+  manualId: number
+): Promise<{ entities: number; relationships: number }> {
+  const [manual] = await db
+    .select({ documentType: manualsTable.documentType })
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId));
+  if (!manual) throw new Error(`Manual ${manualId} not found`);
+
+  const pages = await db
+    .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
+    .from(manualPagesTable)
+    .where(eq(manualPagesTable.manualId, manualId))
+    .orderBy(manualPagesTable.pageNumber);
+
+  const fullText = pages
+    .map((p) => p.rawText ?? "")
+    .filter((t) => t.trim().length > 0)
+    .join("\n\n");
+
+  if (fullText.trim().length === 0) {
+    throw new Error(`Manual ${manualId} has no OCR text — run vision OCR first`);
+  }
+
+  // Clear existing graph data so re-runs are idempotent
+  await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
+  await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+
+  // Pass 1: document structure (needed for document type + overview context)
+  const structure = await pass1DocumentStructure(manualId, fullText, pages.length);
+  await db
+    .update(manualsTable)
+    .set({ documentType: structure.documentType, updatedAt: new Date() })
+    .where(eq(manualsTable.id, manualId));
+
+  // Pass 4: entity extraction
+  const extractedEntities = await pass4EntityExtraction(
+    manualId,
+    fullText,
+    structure.documentType,
+    structure.overview ?? ""
+  );
+
+  const insertedEntities: Array<{ name: string; id: number }> = [];
+  for (const entity of extractedEntities) {
+    try {
+      const [inserted] = await db
+        .insert(entitiesTable)
+        .values({
+          manualId,
+          name: entity.name,
+          type: entity.type ?? "component",
+          description: entity.description ?? "",
+          properties: null,
+          pageReferences: entity.pageReferences ?? [],
+          orderIndex: entity.orderIndex ?? null,
+        })
+        .returning();
+      if (inserted) insertedEntities.push({ name: entity.name, id: inserted.id });
+    } catch (err) {
+      logger.warn({ err, entity: entity.name }, "Entity insert failed");
+    }
+  }
+
+  // Pass 5: relationship extraction
+  const extractedRelationships = await pass5RelationshipExtraction(
+    manualId,
+    fullText,
+    extractedEntities
+  );
+
+  const nameToId = new Map<string, number>();
+  for (const e of insertedEntities) nameToId.set(e.name.toLowerCase().trim(), e.id);
+
+  let relCount = 0;
+  for (const rel of extractedRelationships) {
+    const sourceId = nameToId.get(rel.sourceName?.toLowerCase().trim() ?? "");
+    const targetId = nameToId.get(rel.targetName?.toLowerCase().trim() ?? "");
+    if (!sourceId || !targetId || sourceId === targetId) continue;
+    try {
+      await db.insert(relationshipsTable).values({
+        manualId,
+        sourceEntityId: sourceId,
+        targetEntityId: targetId,
+        type: rel.type ?? "connects_to",
+        label: rel.label ?? "",
+        orderIndex: rel.orderIndex ?? null,
+        properties: null,
+      });
+      relCount++;
+    } catch (err) {
+      logger.warn({ err }, "Relationship insert failed");
+    }
+  }
+
+  // Pass 6: ordering & hierarchy
+  await pass6OrderingHierarchy(manualId, fullText, extractedEntities);
+
+  logger.info(
+    { manualId, entities: insertedEntities.length, relationships: relCount },
+    "Graph extraction from existing text complete"
+  );
+  return { entities: insertedEntities.length, relationships: relCount };
+}
+
 // ─── RECHUNK: re-run Pass 7 from stored page text ────────────────────────────
 
 /**
