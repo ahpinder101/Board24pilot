@@ -57,7 +57,7 @@ router.post("/manuals/upload", upload.single("file"), async (req, res) => {
   const name = filename.replace(/\.pdf$/i, "").replace(/[-_]/g, " ");
   const [manual] = await db
     .insert(manualsTable)
-    .values({ name, filename, objectPath, status: "pending" })
+    .values({ name, filename, objectPath, status: "pending", pdfData: buffer })
     .returning();
 
   if (!manual) {
@@ -392,7 +392,7 @@ router.post("/manuals/:id/rechunk", async (req, res) => {
   }
 });
 
-// GET /manuals/:id/pdf — redirect to a signed GCS URL so the browser fetches directly
+// GET /manuals/:id/pdf — serve PDF stored in the database
 router.get("/manuals/:id/pdf", async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) {
@@ -411,13 +411,18 @@ router.get("/manuals/:id/pdf", async (req: Request, res: Response) => {
     return;
   }
 
-  try {
-    const signedUrl = await storage.getSignedDownloadUrl(manual.objectPath, 3600);
-    res.redirect(302, signedUrl);
-  } catch (err) {
-    req.log.error({ err, manualId: id }, "Failed to serve PDF");
-    res.status(500).json({ error: "Failed to serve PDF" });
+  if (!manual.pdfData) {
+    res.status(404).json({ error: "PDF not available — please re-upload this manual" });
+    return;
   }
+
+  const buf = Buffer.isBuffer(manual.pdfData) ? manual.pdfData : Buffer.from(manual.pdfData as unknown as string, "hex");
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(manual.filename)}"`);
+  res.setHeader("Content-Length", String(buf.length));
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  res.end(buf);
 });
 
 export default router;

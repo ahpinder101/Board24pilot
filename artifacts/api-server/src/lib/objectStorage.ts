@@ -221,6 +221,41 @@ export class ObjectStorageService {
     return signObjectURL({ bucketName, objectName, method: "GET", ttlSec });
   }
 
+  /**
+   * Fetches a private object directly via the GCS JSON API, authenticated with
+   * the sidecar /credential token. Avoids the broken STS /token exchange.
+   */
+  async fetchObjectDirect(objectPath: string): Promise<Response> {
+    if (!objectPath.startsWith("/objects/")) {
+      throw new ObjectNotFoundError();
+    }
+    const entityId = objectPath.slice("/objects/".length);
+    let entityDir = this.getPrivateObjectDir();
+    if (!entityDir.endsWith("/")) {
+      entityDir = `${entityDir}/`;
+    }
+    const fullPath = `${entityDir}${entityId}`;
+    const { bucketName, objectName } = parseObjectPath(fullPath);
+
+    const credRes = await fetch(`${REPLIT_SIDECAR_ENDPOINT}/credential`, {
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!credRes.ok) {
+      throw new Error(`Sidecar credential fetch failed: ${credRes.status}`);
+    }
+    const { access_token } = await credRes.json() as { access_token: string };
+
+    const gcsUrl = `https://storage.googleapis.com/download/storage/v1/b/${encodeURIComponent(bucketName)}/o/${encodeURIComponent(objectName)}?alt=media`;
+    const fileRes = await fetch(gcsUrl, {
+      headers: { Authorization: `Bearer ${access_token}` },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!fileRes.ok) {
+      throw new Error(`GCS fetch failed: ${fileRes.status}`);
+    }
+    return fileRes;
+  }
+
   async canAccessObjectEntity({
     userId,
     objectFile,

@@ -1,6 +1,12 @@
-import { pgTable, serial, text, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, jsonb, customType } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
+
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() { return "bytea"; },
+  toDriver(val) { return val; },
+  fromDriver(val) { return Buffer.isBuffer(val) ? val : Buffer.from(val as unknown as string, "hex"); },
+});
 
 export const manualsTable = pgTable("manuals", {
   id: serial("id").primaryKey(),
@@ -12,6 +18,7 @@ export const manualsTable = pgTable("manuals", {
   totalPages: integer("total_pages"),
   documentType: text("document_type"),
   errorMessage: text("error_message"),
+  pdfData: bytea("pdf_data"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

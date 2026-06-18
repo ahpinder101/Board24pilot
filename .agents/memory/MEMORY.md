@@ -2,3 +2,4 @@
 - [Replit AI embeddings not supported](replit-ai-embeddings.md) — Replit AI proxy blocks POST /embeddings; use PostgreSQL FTS instead of vector similarity for RAG.
 - [Drizzle sql ANY array](drizzle-sql-any-array.md) — Passing a JS array to ANY() in a drizzle sql template generates wrong SQL; use PG array literal string instead.
 - [tsc --build timeout](tsc-build-timeout.md) — tsc --build often times out in this environment; manually update dist/*.d.ts files to unblock artifact typechecks quickly.
+- [GCS object storage reads broken](gcs-reads-broken.md) — Replit object storage sidecar auth is broken for reads; PDF bytes are stored in DB (manuals.pdf_data BYTEA) instead.
