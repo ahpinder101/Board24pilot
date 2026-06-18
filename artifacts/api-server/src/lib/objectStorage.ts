@@ -207,6 +207,20 @@ export class ObjectStorageService {
     return normalizedPath;
   }
 
+  async getSignedDownloadUrl(objectPath: string, ttlSec: number = 3600): Promise<string> {
+    if (!objectPath.startsWith("/objects/")) {
+      throw new ObjectNotFoundError();
+    }
+    const entityId = objectPath.slice("/objects/".length);
+    let entityDir = this.getPrivateObjectDir();
+    if (!entityDir.endsWith("/")) {
+      entityDir = `${entityDir}/`;
+    }
+    const fullPath = `${entityDir}${entityId}`;
+    const { bucketName, objectName } = parseObjectPath(fullPath);
+    return signObjectURL({ bucketName, objectName, method: "GET", ttlSec });
+  }
+
   async canAccessObjectEntity({
     userId,
     objectFile,

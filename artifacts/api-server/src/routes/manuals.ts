@@ -1,6 +1,5 @@
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
-import { Readable } from "stream";
 import { db } from "@workspace/db";
 import {
   manualsTable,
@@ -393,7 +392,7 @@ router.post("/manuals/:id/rechunk", async (req, res) => {
   }
 });
 
-// GET /manuals/:id/pdf — stream the PDF from object storage inline (supports #page=N fragment)
+// GET /manuals/:id/pdf — redirect to a signed GCS URL so the browser fetches directly
 router.get("/manuals/:id/pdf", async (req: Request, res: Response) => {
   const id = parseInt(req.params.id, 10);
   if (isNaN(id)) {
@@ -413,25 +412,8 @@ router.get("/manuals/:id/pdf", async (req: Request, res: Response) => {
   }
 
   try {
-    const file = await storage.getObjectEntityFile(manual.objectPath);
-    const response = await storage.downloadObject(file, 3600);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(manual.filename)}"`);
-    res.setHeader("Cache-Control", "private, max-age=3600");
-
-    response.headers.forEach((value, key) => {
-      const lower = key.toLowerCase();
-      if (lower === "content-length") res.setHeader("Content-Length", value);
-      if (lower === "accept-ranges") res.setHeader("Accept-Ranges", value);
-    });
-
-    if (response.body) {
-      const nodeStream = Readable.fromWeb(response.body as import("stream/web").ReadableStream<Uint8Array>);
-      nodeStream.pipe(res);
-    } else {
-      res.end();
-    }
+    const signedUrl = await storage.getSignedDownloadUrl(manual.objectPath, 3600);
+    res.redirect(302, signedUrl);
   } catch (err) {
     req.log.error({ err, manualId: id }, "Failed to serve PDF");
     res.status(500).json({ error: "Failed to serve PDF" });
