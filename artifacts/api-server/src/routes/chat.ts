@@ -304,6 +304,22 @@ router.post("/chat", async (req: Request, res: Response) => {
     // the classified manual(s) and merge any new top-K chunks into ragChunks.
     // This is the primary fix for dimension/spec tables that only partially
     // overlap with question vocabulary (e.g. "height of box" vs "A B C mm 515").
+    //
+    // Query expansion for measurement questions: when the question asks about a
+    // physical dimension (height, width, depth, size, weight), also search for
+    // "dimension | specification | weight" so that section headers like
+    // "2.3 - Machine dimensions and weight" are boosted into the result set even
+    // when the exact measurement word ("height") doesn't appear in that chunk.
+    const MEASUREMENT_WORDS = new Set([
+      "height", "width", "depth", "length", "weight",
+      "size", "dimension", "measurement", "thickness",
+    ]);
+    const qWords = trimmedQuestion.toLowerCase().split(/\s+/);
+    const hasMeasurementWord = qWords.some((w) => MEASUREMENT_WORDS.has(w));
+    const scopedPassQuery = hasMeasurementWord
+      ? `${tsQuery} | dimension | specification | weight`
+      : tsQuery;
+
     if (scopedManualIds.length <= 2 && tsQuery.length > 0) {
       const scopedFtsResult = await db.execute<ChunkRow>(sql`
         SELECT
@@ -313,11 +329,11 @@ router.post("/chat", async (req: Request, res: Response) => {
           c.page_number,
           c.chunk_index,
           c.content,
-          ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
+          ts_rank(c.fts_vector, to_tsquery('english', ${scopedPassQuery})) AS rank
         FROM chunks c
         JOIN manuals m ON m.id = c.manual_id
         WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
-          AND c.fts_vector @@ to_tsquery('english', ${tsQuery})
+          AND c.fts_vector @@ to_tsquery('english', ${scopedPassQuery})
         ORDER BY rank DESC
         LIMIT ${TOP_K_CHUNKS}
       `);
@@ -485,8 +501,9 @@ CRITICAL RULES FOR ACCURACY:
 2. Numeric tables: when an excerpt contains a table of numbers (rows with ± notation, column headers like "Package", "C (mm)", "D (mm)"), read the values directly from that table. Do NOT say a value is unavailable if the table is present in the source excerpts — extract the specific row that matches the question.
 3. PDF table formatting: in PDF-extracted text, table values are sometimes concatenated directly to the row label without spaces. For example "TBA 1000 S3" means the TBA 1000 S row has a value of 3; "TBA 750 S250 ±185 ±1" means TBA 750 S: C=250 ±1, D=85 ±1. Parse such rows by reading trailing numbers as the value for the preceding label.
 4. Repeated identifier lists: when a part number, catalogue code, or component name appears as a repeated list in an excerpt (the same identifier on consecutive lines, e.g. "QST-5/16-12\nQST-5/16-12\nQST-5/16-12…"), each repetition represents one physical instance. Count them — that count IS the answer to "how many" questions about that item. Then look at context lines immediately after the list to identify which assemblies they serve.
-5. Dimension tables: when an excerpt shows a table with lettered column headers (A, B, C) and numeric values below them, those letters refer to labelled dimensions in a figure. Report all available dimension values (e.g. "A=515mm, B=435mm, C=385mm") and note which figure they reference. If the question asks for a specific dimension (e.g. "height") but the table only has A/B/C labels, provide all dimensions and note the figure reference so the engineer can identify which is height.
-6. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
+5. Dimension tables: when an excerpt shows a table with lettered column headers (A, B, C …) and numeric values below them, those letters refer to labelled dimensions in a figure. Report all available dimension values (e.g. "A=515mm, B=435mm, C=385mm") and note which figure they reference. If the question asks for a specific dimension (e.g. "height") but the table only has A/B/C labels, provide all dimensions and note the figure reference so the engineer can identify which is height.
+6. Machine dimensions vs packaging dimensions: manuals typically contain TWO separate dimension tables — one for the machine itself (e.g. "Machine dimensions and weight", Fig 2.x) and one for the shipping/packaging box (e.g. "Delivery and handling", Fig 3.x). When the question asks about the machine's height/size, answer from the MACHINE dimensions table. When the question asks about the box or packaging the machine ships in, answer from the PACKAGING dimensions table. If both are present in the excerpts, clearly label which is which.
+7. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
 
 Structure your answer with:
 - A direct answer to the question
