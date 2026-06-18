@@ -22,7 +22,7 @@ export function Layout({ children }: LayoutProps) {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <img src="/logo.svg" alt="Machine Mesh" className="h-8 sm:h-10 w-auto" />
-            <img src="/board24-logo2.png" alt="Board24" className="h-7 sm:h-9 w-auto object-contain rounded rounded-tl-[10px] rounded-tr-[10px] rounded-br-[10px] rounded-bl-[10px]" />
+            <img src="/board24-logo2.png" alt="Board24" className="h-10 sm:h-12 w-auto object-contain rounded-lg" />
           </div>
 
           <nav className="flex items-center gap-0.5">
