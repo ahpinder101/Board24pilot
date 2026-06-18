@@ -34,6 +34,26 @@ const upload = multer({
 const router = Router();
 const storage = new ObjectStorageService();
 
+// Columns to select when returning manuals to clients (excludes the large pdf_data blob)
+const manualCols = {
+  id: manualsTable.id,
+  name: manualsTable.name,
+  filename: manualsTable.filename,
+  objectPath: manualsTable.objectPath,
+  status: manualsTable.status,
+  processingPass: manualsTable.processingPass,
+  totalPages: manualsTable.totalPages,
+  documentType: manualsTable.documentType,
+  errorMessage: manualsTable.errorMessage,
+  createdAt: manualsTable.createdAt,
+  updatedAt: manualsTable.updatedAt,
+};
+
+function getPdfBuffer(manual: { pdfData?: Buffer | null }): Buffer {
+  if (!manual.pdfData) throw new Error("PDF not stored in database — please re-upload this manual");
+  return Buffer.isBuffer(manual.pdfData) ? manual.pdfData : Buffer.from(manual.pdfData as unknown as string, "hex");
+}
+
 // POST /manuals/upload — combined: receive PDF → store in GCS → create record → kick off processing
 router.post("/manuals/upload", upload.single("file"), async (req, res) => {
   if (!req.file) {
@@ -43,16 +63,9 @@ router.post("/manuals/upload", upload.single("file"), async (req, res) => {
 
   const filename = req.file.originalname;
   const buffer = req.file.buffer;
-  const contentType = req.file.mimetype;
 
-  let objectPath: string;
-  try {
-    objectPath = await storage.uploadBuffer(buffer, filename, contentType);
-  } catch (err) {
-    req.log.error({ err }, "Failed to upload PDF to object storage");
-    res.status(500).json({ error: "Failed to store PDF" });
-    return;
-  }
+  // PDF is stored directly in the database (GCS sidecar auth is unavailable)
+  const objectPath = `/db/${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
 
   const name = filename.replace(/\.pdf$/i, "").replace(/[-_]/g, " ");
   const [manual] = await db
@@ -70,12 +83,13 @@ router.post("/manuals/upload", upload.single("file"), async (req, res) => {
     req.log.error({ err, manualId: manual.id }, "Background extraction pipeline error");
   });
 
-  res.status(201).json(manual);
+  const { pdfData: _, ...safeManual } = manual;
+  res.status(201).json(safeManual);
 });
 
 // GET /manuals
 router.get("/manuals", async (req, res) => {
-  const manuals = await db.select().from(manualsTable).orderBy(manualsTable.createdAt);
+  const manuals = await db.select(manualCols).from(manualsTable).orderBy(manualsTable.createdAt);
   res.json(manuals);
 });
 
@@ -105,7 +119,7 @@ router.get("/manuals/:id", async (req, res) => {
   }
 
   const [manual] = await db
-    .select()
+    .select(manualCols)
     .from(manualsTable)
     .where(eq(manualsTable.id, parsed.data.id));
 
@@ -153,21 +167,13 @@ router.post("/manuals/:id/process", async (req, res) => {
     return;
   }
 
-  // Download the PDF from object storage
+  // Read PDF from database
   let pdfBuffer: Buffer;
   try {
-    const file = await storage.getObjectEntityFile(manual.objectPath);
-    const chunks: Buffer[] = [];
-    const stream = file.createReadStream();
-    await new Promise<void>((resolve, reject) => {
-      stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-      stream.on("end", resolve);
-      stream.on("error", reject);
-    });
-    pdfBuffer = Buffer.concat(chunks);
+    pdfBuffer = getPdfBuffer(manual);
   } catch (err) {
-    req.log.error({ err }, "Failed to download PDF for processing");
-    res.status(500).json({ error: "Failed to download PDF from storage" });
+    req.log.error({ err }, "Failed to read PDF from database");
+    res.status(500).json({ error: String(err) });
     return;
   }
 
@@ -182,7 +188,7 @@ router.post("/manuals/:id/process", async (req, res) => {
 
   // Return updated manual immediately
   const [updated] = await db
-    .select()
+    .select(manualCols)
     .from(manualsTable)
     .where(eq(manualsTable.id, manualId));
 
@@ -287,22 +293,13 @@ router.post("/manuals/:id/reprocess-vision", async (req, res) => {
     return;
   }
 
-  // Read PDF from object storage
+  // Read PDF from database
   let pdfBuffer: Buffer;
   try {
-    const storage = new ObjectStorageService();
-    const file = await storage.getObjectEntityFile(manual.objectPath);
-    const chunks: Buffer[] = [];
-    const stream = file.createReadStream();
-    await new Promise<void>((resolve, reject) => {
-      stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-      stream.on("end", resolve);
-      stream.on("error", reject);
-    });
-    pdfBuffer = Buffer.concat(chunks);
+    pdfBuffer = getPdfBuffer(manual);
   } catch (err) {
-    req.log.error({ err, manualId }, "Failed to download PDF for vision reprocess");
-    res.status(500).json({ error: "Failed to download PDF from storage" });
+    req.log.error({ err, manualId }, "Failed to read PDF from database for vision reprocess");
+    res.status(500).json({ error: String(err) });
     return;
   }
 
@@ -330,19 +327,10 @@ router.post("/manuals/:id/reprocess-vision-pages", async (req, res) => {
 
   let pdfBuffer: Buffer;
   try {
-    const storage = new ObjectStorageService();
-    const file = await storage.getObjectEntityFile(manual.objectPath);
-    const parts: Buffer[] = [];
-    const stream = file.createReadStream();
-    await new Promise<void>((resolve, reject) => {
-      stream.on("data", (c) => parts.push(Buffer.from(c)));
-      stream.on("end", resolve);
-      stream.on("error", reject);
-    });
-    pdfBuffer = Buffer.concat(parts);
+    pdfBuffer = getPdfBuffer(manual);
   } catch (err) {
-    req.log.error({ err, manualId }, "Failed to download PDF for page-range OCR");
-    res.status(500).json({ error: "Failed to download PDF" });
+    req.log.error({ err, manualId }, "Failed to read PDF from database for page-range OCR");
+    res.status(500).json({ error: String(err) });
     return;
   }
 
