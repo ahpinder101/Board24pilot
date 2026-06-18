@@ -15,7 +15,6 @@ import {
   CheckCircle2,
   AlertTriangle,
   ChevronRight,
-  UploadCloud,
   ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -53,17 +52,17 @@ function StatCard({
     teal: "text-teal-600",
   };
   return (
-    <div className="bg-white rounded-lg border border-gray-200 p-5 flex flex-col gap-1.5">
-      <div className={cn("text-3xl font-bold", colours[accent ?? "blue"])}>{value}</div>
-      <div className="text-sm font-medium text-gray-700">{label}</div>
-      {sub && <div className="text-xs text-gray-400">{sub}</div>}
+    <div className="bg-white rounded-lg border border-gray-200 p-4 flex flex-col gap-1">
+      <div className={cn("text-2xl sm:text-3xl font-bold", colours[accent ?? "blue"])}>{value}</div>
+      <div className="text-xs sm:text-sm font-medium text-gray-700">{label}</div>
+      {sub && <div className="text-[11px] text-gray-400">{sub}</div>}
     </div>
   );
 }
 
 function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) => void }) {
   return (
-    <div className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0 group">
+    <div className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0">
       <div className="w-8 h-8 bg-blue-50 rounded flex items-center justify-center shrink-0">
         <FileText className="w-4 h-4 text-blue-500" />
       </div>
@@ -74,7 +73,7 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
         </p>
         {manual.status === "processing" && (
           <div className="mt-1.5">
-            <div className="h-1 bg-gray-100 rounded-full overflow-hidden w-32">
+            <div className="h-1 bg-gray-100 rounded-full overflow-hidden w-24">
               <div
                 className="h-full bg-blue-500 transition-all duration-500 rounded-full"
                 style={{ width: `${((manual.processingPass || 1) / 7) * 100}%` }}
@@ -84,7 +83,7 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
           </div>
         )}
       </div>
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex items-center gap-1 shrink-0">
         {manual.status === "completed" && (
           <CheckCircle2 className="w-4 h-4 text-green-500" />
         )}
@@ -104,7 +103,7 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
             <Button
               variant="ghost"
               size="icon"
-              className="w-7 h-7 text-gray-300 hover:text-blue-600 hover:bg-blue-50 transition-opacity"
+              className="w-8 h-8 text-gray-300 hover:text-blue-600 hover:bg-blue-50"
               asChild={false}
             >
               <ExternalLink className="w-3.5 h-3.5" />
@@ -114,7 +113,7 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
         <Button
           variant="ghost"
           size="icon"
-          className="w-7 h-7 text-gray-300 hover:text-red-500 hover:bg-red-50 transition-opacity"
+          className="w-8 h-8 text-gray-300 hover:text-red-500 hover:bg-red-50"
           onClick={() => onDelete(manual.id)}
         >
           <Trash2 className="w-3.5 h-3.5" />
@@ -159,15 +158,15 @@ export default function Dashboard() {
   const lastQ = recentQs[0];
 
   return (
-    <div className="max-w-7xl mx-auto px-6 py-8 w-full space-y-6">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5 sm:py-8 w-full space-y-5">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">
+          <h1 className="text-xl sm:text-2xl font-bold text-gray-900">
             {greeting()}, Engineer.
           </h1>
-          <div className="flex items-center gap-2 mt-1">
-            <span className="text-sm text-gray-400">Knowledge Base</span>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className="text-xs sm:text-sm text-gray-400">Knowledge Base</span>
             <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100 text-[10px] px-1.5 py-0 font-medium">
               Admin
             </Badge>
@@ -176,22 +175,22 @@ export default function Dashboard() {
         <Button
           variant="outline"
           size="sm"
-          className="gap-2 text-gray-600"
+          className="gap-1.5 text-gray-600 shrink-0"
           onClick={handleRefresh}
           disabled={isRefreshing}
         >
           <RefreshCw className={cn("w-3.5 h-3.5", isRefreshing && "animate-spin")} />
-          Refresh
+          <span className="hidden sm:inline">Refresh</span>
         </Button>
       </div>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {statsLoading ? (
           [1, 2, 3, 4].map((i) => (
-            <div key={i} className="bg-white rounded-lg border border-gray-200 p-5">
-              <Skeleton className="h-8 w-16 mb-2" />
-              <Skeleton className="h-4 w-24" />
+            <div key={i} className="bg-white rounded-lg border border-gray-200 p-4">
+              <Skeleton className="h-7 w-12 mb-2" />
+              <Skeleton className="h-3 w-20" />
             </div>
           ))
         ) : (
@@ -214,14 +213,14 @@ export default function Dashboard() {
               sub={`${(stats?.totalRelationships ?? 0).toLocaleString()} relationships`}
               accent="orange"
             />
-            <div className="bg-teal-50 rounded-lg border border-teal-100 p-5 flex flex-col gap-1.5">
+            <div className="bg-teal-50 rounded-lg border border-teal-100 p-4 flex flex-col gap-1">
               <div className="flex items-center gap-1.5 text-teal-600 text-xs font-semibold mb-1">
                 <MessageSquare className="w-3.5 h-3.5" />
                 Last question
               </div>
               {lastQ ? (
                 <>
-                  <p className="text-sm font-medium text-gray-800 line-clamp-2 leading-snug">
+                  <p className="text-xs sm:text-sm font-medium text-gray-800 line-clamp-2 leading-snug">
                     "{lastQ.question}"
                   </p>
                   <p className="text-xs text-teal-500">
@@ -229,7 +228,7 @@ export default function Dashboard() {
                   </p>
                 </>
               ) : (
-                <p className="text-sm text-gray-400 italic">No questions asked yet</p>
+                <p className="text-xs sm:text-sm text-gray-400 italic">No questions asked yet</p>
               )}
             </div>
           </>
@@ -237,14 +236,14 @@ export default function Dashboard() {
       </div>
 
       {/* Main panels */}
-      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 sm:gap-6">
         {/* Knowledge Base */}
         <div className="lg:col-span-3 bg-white rounded-lg border border-gray-200">
-          <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
+          <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
             <BookOpen className="w-4 h-4 text-gray-500" />
             <h2 className="text-sm font-semibold text-gray-700">Knowledge Base</h2>
           </div>
-          <div className="p-5 space-y-4">
+          <div className="p-4 sm:p-5 space-y-4">
             {manualsLoading ? (
               <div className="space-y-3">
                 {[1, 2, 3].map((i) => (
@@ -264,9 +263,9 @@ export default function Dashboard() {
                 ))}
               </div>
             ) : (
-              <div className="flex flex-col items-center justify-center py-10 text-center">
-                <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mb-3">
-                  <BookOpen className="w-6 h-6 text-gray-300" />
+              <div className="flex flex-col items-center justify-center py-8 text-center">
+                <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center mb-3">
+                  <BookOpen className="w-5 h-5 text-gray-300" />
                 </div>
                 <p className="text-sm text-gray-500 font-medium">No documents uploaded yet</p>
                 <p className="text-xs text-gray-400 mt-1">Upload a PDF to get started</p>
@@ -281,15 +280,15 @@ export default function Dashboard() {
 
         {/* Recent Questions */}
         <div className="lg:col-span-2 bg-white rounded-lg border border-gray-200">
-          <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
+          <div className="flex items-center gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
             <MessageSquare className="w-4 h-4 text-gray-500" />
             <h2 className="text-sm font-semibold text-gray-700">Recent Questions</h2>
           </div>
           <div className="divide-y divide-gray-50">
             {recentQs.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-10 text-center px-5">
-                <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mb-3">
-                  <MessageSquare className="w-6 h-6 text-gray-300" />
+              <div className="flex flex-col items-center justify-center py-8 text-center px-5">
+                <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center mb-3">
+                  <MessageSquare className="w-5 h-5 text-gray-300" />
                 </div>
                 <p className="text-sm text-gray-500 font-medium">No questions yet</p>
                 <p className="text-xs text-gray-400 mt-1">Use Ask Engineer to query your documents</p>
@@ -302,7 +301,7 @@ export default function Dashboard() {
               </div>
             ) : (
               recentQs.slice(0, 12).map((q) => (
-                <div key={q.id} className="px-5 py-3">
+                <div key={q.id} className="px-4 sm:px-5 py-3">
                   <p className="text-sm text-gray-700 leading-snug">{q.question}</p>
                   <div className="flex items-center gap-1.5 mt-1">
                     <Clock className="w-3 h-3 text-gray-300" />
@@ -315,7 +314,7 @@ export default function Dashboard() {
             )}
           </div>
           {recentQs.length > 0 && (
-            <div className="px-5 py-3 border-t border-gray-100">
+            <div className="px-4 sm:px-5 py-3 border-t border-gray-100">
               <Link href="/ask">
                 <Button variant="ghost" size="sm" className="text-xs text-gray-500 gap-1.5 w-full justify-center hover:text-blue-600">
                   Open Ask Engineer

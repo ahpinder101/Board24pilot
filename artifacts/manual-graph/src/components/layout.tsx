@@ -17,12 +17,12 @@ export function Layout({ children }: LayoutProps) {
   return (
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
           <div className="flex items-center">
-            <img src="/logo.svg" alt="Machine Mesh" className="h-12 w-auto" />
+            <img src="/logo.svg" alt="Machine Mesh" className="h-8 sm:h-10 w-auto" />
           </div>
 
-          <nav className="flex items-center gap-1">
+          <nav className="flex items-center gap-0.5">
             {navItems.map((item) => {
               const active = location === item.href;
               return (
@@ -30,14 +30,14 @@ export function Layout({ children }: LayoutProps) {
                   key={item.href}
                   href={item.href}
                   className={cn(
-                    "flex items-center gap-2 px-4 py-1.5 rounded-md text-sm font-medium transition-colors",
+                    "flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors",
                     active
                       ? "bg-blue-50 text-blue-700"
                       : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
                   )}
                 >
-                  <item.icon className="w-4 h-4" />
-                  {item.label}
+                  <item.icon className="w-4 h-4 shrink-0" />
+                  <span className="hidden sm:inline">{item.label}</span>
                 </Link>
               );
             })}
