@@ -1,0 +1,112 @@
+Analyzing database query performance
+Running all queries in parallel now.
+
+
+8 actions
+Some column names don't match. Let me inspect the actual table schemas first, then re-run everything correctly.
+
+
+2 actions
+Good — now I have the real schema. Running all remaining queries in parallel with the correct column names.
+
+
+5 actions
+Here are the raw results from every query.
+
+1 — Manual Record
+field	value
+id	1
+name	EASYVAC25_Sirman-Easyvac-25.30.40-User-Manual
+status	completed
+processing_pass	7
+document_type	Engineering Manual
+total_pages	21
+Note: The PDF has 22 physical pages but page 2 returned empty text (it's a blank/image-only page), so 21 pages have row content in manual_pages.
+
+2 — Pages (21 rows, manual_pages)
+page	first 100 chars of raw_text
+1	25\n30\n40\nVACUUM PACKAGING MACHINE\nEnglish\n01.2018\nUSE AND MAINTENANCE MANUAL\nVer. 003\n1
+3	INDEX\n1. Delivery and warranty 5\n1.1 Foreword.\n1.2 Preservation and use of this manual\n1.3 War
+4	5. Controls and maintenance 17\n5.1 Controls and maintenance\n5.2 Maintenance\n5.2.1 Vacuum pump\n6.
+5	1 Delivery and warranty\n1.1 - Foreword\nATTENTION!\nThe symbols used in this manual intend to call the
+6	1.3 - Warranty\nThe Manufacturer is committed for 12 (twelve) months, from the date of shipping and d
+7	The Manufacturer is not deemed liable for the consequences caused by the user's failure\nto comply wi
+8	6 always use protection fuses that are in compliance with the Safety Standards in\nforce, with the co
+9	1.8.1 - Warning and danger plates (Fig. 1.8.2)\nFig. 1.8.2\nA\nA\nB\nC\nEnglish\nC\nB\n2 Technical features\n2
+10	2.2 - Technical features\nPower Vacuum Sealing Cavity Power supply Oil tank capacity\nKw pum
+11	2.4 - Wiring diagram\nEnglish\nWire map legend\n1 = Black\n2 = Red\n3 = White\n4 = Orange\n5 = Gray\n6 = Blu
+12	3 Inspection, transport, delivery and installation\n3.1 - Inspection\nThe machine you own has been ins
+13	Before carrying out any check that leads to the removal of some items, the plug must be\nremoved from
+14	4B Use of the machine\n4.1 - Control Panel Legend\n4 3 2 1\nFig. 4.1.1\n1. ON-OFF\n- Turning the machin
+15	4.2 Chamber Vacuum Packing Cycle\n1 - Press the general switch (right side of machine)\nRef. 1 Fig. 4.
+16	4.4 - Packaging liquids or semi-liquids\nWith the vacuum packing machines we produce, it is possible
+17	4.5 - Cleaning the machine\nATTENTION!\nDisconnect the machine from the mains electricity before clean
+18	5.2- Maintenance\n1. Clean the sealing bars and the silicon counter-bar more or less every 15 days us
+19	6 Obligations in the event of malfunctioning and/or potential\ndangers\nThe operators must inform thei
+20	INFORMAZIONE AGLI UTENTI\nIn compliance with art.13 of the Legislative Decree n. 151 dated 25 July 20
+21	English\nC\nFig. 1.8.2A\nFig. 2.1.1\n1. Control panel2. Cavity3. Power supply cable4. Master switch5. Tr
+22	English\nFig. 2.4.1\nWire map legend1 = Black2 = Red3 = White4 = Orange5 = Gray6 = Blue\n11\n2.4 - Wirin
+3 — Tabular Pages
+has_tables = 1: 0 rows — no pages were flagged during ingestion.
+
+The has_tables column is populated by a regex check in the PDF extractor (/(\t| {3,})/.test(text) || /\|.*\|/.test(text)). The technical-features table on pages 10/22 uses space-separated columns without explicit tabs or pipe characters, so the detector missed them. The data is present in the chunks, just not flagged.
+
+4 — Chunks
+metric	value
+Total count	88
+Average length	390 characters
+5 — Entities (103 total)
+Top 20 by order_index:
+
+#	name	type
+1	VACUUM PACKAGING MACHINE	machine
+2	USE AND MAINTENANCE MANUAL	document_section
+3	Delivery and warranty	document_section
+4	Technical features	document_section
+5	Inspection, transport, delivery and installation	document_section
+6	Using the machine	document_section
+7	Controls and maintenance	document_section
+8	Obligations in case of malfunctioning and/or potential dangers	document_section
+9	Troubleshooting	document_section
+10	Wiring diagram	document_section
+11	Cavity vacuum packing cycle	process
+12	External vacuum packing cycle	process
+13	Packaging of liquid or semi-liquid products	process
+14	Vacuum pump	component
+15	Warranty	document_section
+16	Electric resistances	component
+17	Teflon	material
+18	Sealing gaskets	part
+19	Sealing membrane	part
+20	Air filters	component
+6 — Relationships (35 total)
+10 examples:
+
+entity_a	type	label	entity_b
+Manufacturer	feeds_into	The Manufacturer produces and provides updates for the vacuum packaging machine.	VACUUM PACKAGING MACHINE
+VACUUM PACKAGING MACHINE	contains	(empty)	USE AND MAINTENANCE MANUAL
+Delivery and warranty	part_of	The manual contains sections about delivery and warranty.	USE AND MAINTENANCE MANUAL
+USE AND MAINTENANCE MANUAL	contains	(empty)	Delivery and warranty
+USE AND MAINTENANCE MANUAL	contains	(empty)	Technical features
+USE AND MAINTENANCE MANUAL	contains	(empty)	Inspection, transport, delivery and installation
+USE AND MAINTENANCE MANUAL	contains	(empty)	Using the machine
+USE AND MAINTENANCE MANUAL	contains	(empty)	Controls and maintenance
+USE AND MAINTENANCE MANUAL	contains	(empty)	Obligations in case of malfunctioning and/or potential dangers
+USE AND MAINTENANCE MANUAL	depends_on	The manual provides prescriptions and essential criteria for the machine's transport, handling, use, and maintenance.	VACUUM PACKAGING MACHINE
+7 — Specific Content Checks
+check	result
+"12 months" (warranty)	✅ FOUND — pg 18 (also pg 6 in manual_pages raw_text). In chunks the text appears on pg 18 chunk; full warranty clause is in pg 6 page record.
+"410" (sealing bar 410 mm)	✅ FOUND — pg 10 chunk: …0,35 Kw 8 mc/h 410 mm 426… and pg 22
+"42,5" (net weight, European comma)	✅ FOUND — pg 10: …40 494 637 755 315 395 308 426 810 42,5 and pg 22
+"42.5" (dot notation)	❌ NOT FOUND — stored as 42,5 (European notation preserved from PDF)
+"SURPLUS BAG"	❌ NOT FOUND — figure label was not captured in text extraction
+"SEALING BAR"	✅ FOUND — pg 9 (main parts list) and pg 15 (packing cycle)
+"BEEF"	✅ FOUND — pg 16: preservation table mentioning BEEF
+"30/40" (days)	✅ FOUND — pg 16, same preservation table chunk
+"White" (wire colour)	✅ FOUND — pg 11: Wire map legend 1 = Black 2 = Red 3 = White 4 = Orange…
+Summary of gaps to note:
+
+Page 2 is absent (blank/image-only — no text extracted)
+has_tables flag is 0 for all pages — the regex heuristic doesn't catch space-separated columns
+"SURPLUS BAG" (a figure callout label) was not captured — figure labels embedded in vector graphics are invisible to pdfjs text extraction
+Net weight stored as 42,5 not 42.5 — European decimal notation preserved as-is from the PDF
