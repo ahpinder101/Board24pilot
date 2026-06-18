@@ -11,7 +11,6 @@ import {
   RefreshCw,
   Clock,
   FileText,
-  Network,
   Trash2,
   CheckCircle2,
   AlertTriangle,
@@ -94,13 +93,6 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
         {manual.status === "processing" && (
           <Clock className="w-4 h-4 text-blue-400 animate-spin" />
         )}
-        <Link href={`/manuals/${manual.id}`}>
-          <Button variant="ghost" size="sm" className="text-xs text-gray-500 hover:text-blue-600 gap-1 h-7 px-2">
-            <Network className="w-3 h-3" />
-            Graph
-            <ChevronRight className="w-3 h-3" />
-          </Button>
-        </Link>
         <Button
           variant="ghost"
           size="icon"

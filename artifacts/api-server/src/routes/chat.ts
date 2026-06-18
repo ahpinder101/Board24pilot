@@ -486,7 +486,7 @@ router.post("/chat", async (req: Request, res: Response) => {
         )
         .join("\n");
 
-      graphContext = `KNOWLEDGE GRAPH ENTITIES:\n${entitySummary}\n\nKNOWLEDGE GRAPH RELATIONSHIPS:\n${relSummary}`;
+      graphContext = `RELATED ENTITIES:\n${entitySummary}\n\nRELATED CONNECTIONS:\n${relSummary}`;
     }
 
     // ── 4. Build RAG context ────────────────────────────────────────────────
@@ -503,7 +503,7 @@ router.post("/chat", async (req: Request, res: Response) => {
     // ── 5. Synthesise with GPT-4o ───────────────────────────────────────────
     const systemPrompt = `You are an expert engineering assistant. Engineers ask you questions about industrial machines, components, systems, and procedures described in their uploaded manuals.
 
-Answer the question clearly and precisely using ONLY the information from the provided manual excerpts and knowledge graph data.
+Answer the question clearly and precisely using ONLY the information from the provided manual excerpts.
 
 CRITICAL RULES FOR ACCURACY:
 1. Scope labels: excerpts may begin with a scope qualifier like [Valid only for Sq machines] or [Not valid for Sq machines]. These tell you which machine type the content applies to. Always respect these when answering about specific machine variants. If an excerpt is scoped [Not valid for Sq machines], its values do NOT apply to Sq machines — look in other excerpts for the Sq-specific values.
@@ -517,7 +517,6 @@ CRITICAL RULES FOR ACCURACY:
 Structure your answer with:
 - A direct answer to the question
 - Supporting technical details from the manuals
-- Relevant component relationships if applicable
 
 Be concise but thorough. Use technical terminology appropriate for engineers.`;
 
