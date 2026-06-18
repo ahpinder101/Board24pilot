@@ -264,9 +264,82 @@ export function chunkPageSemantically(pageText: string): string[] {
     if (current.trim()) finalChunks.push(current.trim());
   }
 
+  // ── Pass 5: enrich spec-table chunks with canonical measurement vocabulary ─
+  //
+  // WHY THIS EXISTS:
+  //   FTS is lexical — it only retrieves chunks whose stored text contains the
+  //   words from the query.  Engineering spec tables contain no prose: just
+  //   column letters (A B C), units (mm, Kg, kW), and numbers (230, 268, 416).
+  //   A question using any natural-language measurement word ("height",
+  //   "clearance", "suction capacity", "operating temperature") will miss the
+  //   table chunk unless that word appears in its section heading.
+  //
+  //   The fix must be at WRITE TIME, not query time.  We detect chunks that are
+  //   primarily tabular (high ratio of numeric/unit lines) and append a
+  //   standardised vocabulary tag so that every spec table is discoverable from
+  //   any measurement-type question, with no per-question synonym rules needed.
+  //
+  // DETECTION HEURISTIC — token-based, not character-class:
+  //   A token is "spec-like" if it is:
+  //     • Purely numeric (integers, decimals, ranges like 0,15): /^\d+([.,]\d+)*$/
+  //     • A short alphanumeric token (≤4 chars) likely to be a unit or column
+  //       letter: mm, cm, kg, kW, Hz, V, L, A-Z single letter, mc/h, 4mc, …
+  //     • A combined dimension string: 324x60x250, 230V/50Hz
+  //   A line is "tabular" if it has ≥ 2 tokens and ≥ 50 % are spec-like.
+  //   A chunk is a spec table if ≥ 35 % of its non-empty lines are tabular
+  //   AND it has ≥ 3 lines.
+
+  /**
+   * Returns true if a whitespace-separated token looks like a numeric spec value,
+   * a dimension label, or an SI unit abbreviation.  Deliberately excludes common
+   * short English words ("the", "and", "knob", "bar") that the old catch-all
+   * ≤4-char rule was matching.
+   */
+  function isSpecToken(tok: string): boolean {
+    if (!tok) return false;
+    // Pure number (integer or decimal, comma/dot separator): 230, 0.25, 1,5
+    if (/^\d+([.,]\d+)*$/.test(tok)) return true;
+    // Number with optional leading ± and a unit suffix: 230V, 0.25kW, 50Hz, ±1mm
+    if (/^[±]?\d+([.,x×]\d+)*[A-Za-z°%/]*$/.test(tok) && tok.length <= 12) return true;
+    // Compound dimension strings: 324x60x250, 60×60, 230/50Hz
+    if (/^\d+[x×/]\d+/.test(tok)) return true;
+    // Single uppercase letter — column/dimension label in a figure: A, B, C … Z
+    if (/^[A-Z]$/.test(tok)) return true;
+    // Common engineering / SI unit abbreviations (exact match, case-insensitive)
+    if (
+      /^(mm|cm|dm|m|km|g|kg|mg|kw|w|mw|mw|kwh|wh|hz|khz|mhz|rpm|bar|kpa|mpa|pa|nm|°c|°f|m3|dm3|l|ml|kva|va|kv|mv|ma|kΩ|Ω|in|ft|lb|lbs|psi|cfm|gpm)$/i.test(
+        tok,
+      )
+    )
+      return true;
+    return false;
+  }
+
+  function isTabularLine(line: string): boolean {
+    const tokens = line.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length < 2) return false;
+    const specCount = tokens.filter(isSpecToken).length;
+    // Require ≥ 60 % spec-like tokens (raised from 50 %) to avoid prose lines
+    // with just a number or two (e.g. section headings like "1.5 - Machine description")
+    return specCount / tokens.length >= 0.6;
+  }
+
+  const SPEC_TAG =
+    "\n[Specification table: technical data, dimensions, height, width, depth, length, clearance, stroke, capacity, performance, weight, measurements, specifications, ratings]";
+
+  const enrichedChunks = finalChunks.map((chunk) => {
+    const lines = chunk.split("\n").filter((l) => l.trim().length > 0);
+    if (lines.length < 3) return chunk;
+    const tabularLines = lines.filter(isTabularLine);
+    if (tabularLines.length / lines.length >= 0.35) {
+      return chunk + SPEC_TAG;
+    }
+    return chunk;
+  });
+
   // Fallback: nothing passed the length threshold — return whole filtered page.
-  return finalChunks.length > 0
-    ? finalChunks
+  return enrichedChunks.length > 0
+    ? enrichedChunks
     : [prefix + contentLines.join("\n")];
 }
 

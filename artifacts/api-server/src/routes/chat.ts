@@ -14,7 +14,9 @@ import { randomUUID } from "crypto";
 const router = Router();
 
 const CHAT_MODEL = "gpt-4o";
-const TOP_K_CHUNKS = 8;
+const TOP_K_CHUNKS = 8;         // cross-manual global FTS limit
+const TOP_K_SCOPED = 14;        // domain-scoped second-pass — can be higher because
+                                 // we're already within one manual and want full coverage
 const TOP_K_ENTITIES = 10;
 
 // ── Identifier token extraction ────────────────────────────────────────────
@@ -302,24 +304,6 @@ router.post("/chat", async (req: Request, res: Response) => {
     // may have been outranked globally by chunks from other manuals that happen
     // to share query tokens.  After narrowing the domain, re-run FTS scoped to
     // the classified manual(s) and merge any new top-K chunks into ragChunks.
-    // This is the primary fix for dimension/spec tables that only partially
-    // overlap with question vocabulary (e.g. "height of box" vs "A B C mm 515").
-    //
-    // Query expansion for measurement questions: when the question asks about a
-    // physical dimension (height, width, depth, size, weight), also search for
-    // "dimension | specification | weight" so that section headers like
-    // "2.3 - Machine dimensions and weight" are boosted into the result set even
-    // when the exact measurement word ("height") doesn't appear in that chunk.
-    const MEASUREMENT_WORDS = new Set([
-      "height", "width", "depth", "length", "weight",
-      "size", "dimension", "measurement", "thickness",
-    ]);
-    const qWords = trimmedQuestion.toLowerCase().split(/\s+/);
-    const hasMeasurementWord = qWords.some((w) => MEASUREMENT_WORDS.has(w));
-    const scopedPassQuery = hasMeasurementWord
-      ? `${tsQuery} | dimension | specification | weight`
-      : tsQuery;
-
     if (scopedManualIds.length <= 2 && tsQuery.length > 0) {
       const scopedFtsResult = await db.execute<ChunkRow>(sql`
         SELECT
@@ -329,13 +313,13 @@ router.post("/chat", async (req: Request, res: Response) => {
           c.page_number,
           c.chunk_index,
           c.content,
-          ts_rank(c.fts_vector, to_tsquery('english', ${scopedPassQuery})) AS rank
+          ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
         FROM chunks c
         JOIN manuals m ON m.id = c.manual_id
         WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
-          AND c.fts_vector @@ to_tsquery('english', ${scopedPassQuery})
+          AND c.fts_vector @@ to_tsquery('english', ${tsQuery})
         ORDER BY rank DESC
-        LIMIT ${TOP_K_CHUNKS}
+        LIMIT ${TOP_K_SCOPED}
       `);
 
       const existingIds = new Set(ragChunks.map((c) => c.id));
@@ -382,6 +366,31 @@ router.post("/chat", async (req: Request, res: Response) => {
             a.page_number - b.page_number ||
             a.chunk_index - b.chunk_index
         );
+      }
+
+      // ── 2d. Spec-table targeted retrieval ───────────────────────────────────
+      // FTS ranking is lexical: if the machine's name contains generic words like
+      // "PACKAGING" those words boost packaging-section prose chunks above the
+      // spec/dimension table, which is the most relevant chunk for measurement
+      // questions.  Since spec-table chunks are tagged at write time with
+      // "[Specification table: ...]", we can fetch them directly (bypassing FTS
+      // rank) whenever the domain is known.  This guarantees spec tables are
+      // always in context when the user asks about dimensions, weights, or specs.
+      const specTagQuery = await db.execute<ChunkRow>(sql`
+        SELECT c.id, c.manual_id, m.name AS manual_name,
+               c.page_number, c.chunk_index, c.content, 0::float AS rank
+        FROM chunks c JOIN manuals m ON m.id = c.manual_id
+        WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+          AND c.content LIKE '%[Specification table%'
+        ORDER BY c.page_number, c.chunk_index
+        LIMIT 6
+      `);
+      const existingIds2 = new Set(ragChunks.map((c) => c.id));
+      for (const row of specTagQuery.rows) {
+        if (!existingIds2.has(row.id)) {
+          ragChunks.push(row);
+          existingIds2.add(row.id);
+        }
       }
     }
 
