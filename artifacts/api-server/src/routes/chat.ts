@@ -299,6 +299,13 @@ router.post("/chat", async (req: Request, res: Response) => {
     const scopedManualIds = classifyDomain(trimmedQuestion, allManuals, ragChunks, machineEntities);
     const scopedManualArray = `{${scopedManualIds.join(",")}}`;
 
+    // Filter out cross-manual noise: the initial FTS ran before domain
+    // classification and can include high-ranking chunks from unrelated manuals
+    // that happen to share query tokens.  Now that we know the domain, drop them.
+    if (scopedManualIds.length > 0) {
+      ragChunks = ragChunks.filter((c) => scopedManualIds.includes(c.manual_id));
+    }
+
     // ── 2c. Domain-scoped second-pass chunk retrieval ─────────────────────────
     // The initial FTS ran cross-manual, so relevant chunks in the target manual
     // may have been outranked globally by chunks from other manuals that happen
@@ -548,6 +555,7 @@ Please answer the question based on the above information from the engineering m
     const citations: ChatCitation[] = [];
 
     for (const chunk of ragChunks) {
+      if (citations.length >= 5) break;
       const key = `${chunk.manual_id}:${chunk.page_number}`;
       if (seenManualPages.has(key)) continue;
       seenManualPages.add(key);
