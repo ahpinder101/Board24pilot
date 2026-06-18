@@ -372,6 +372,77 @@ Return a JSON object with:
 // Each page is split at alphabetic step markers (e.g. a), b), f), g)) with
 // validity-scope labels prepended to every chunk, so machine-type discriminators
 // ("Valid only for Sq machines") always travel with their values tables.
+//
+// Tabular OCR pages (wiring tables, pin assignments, parts lists) are
+// pre-processed by restructureTabularContent() before chunking.  This step
+// reconstructs the row-level relationships destroyed when OCR linearises a
+// multi-column table into disconnected lists.
+
+/**
+ * Detects pages that appear to be OCR-linearised schematic tables or wiring
+ * diagrams.  Signal: ≥65% of non-empty lines are very short (< 25 chars) AND
+ * the page has ≥ 20 lines total.  Normal prose pages have long lines; schematic
+ * annotation pages have one token per line.
+ */
+function isTabularOcrPage(text: string): boolean {
+  const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 20) return false;
+  const shortLines = lines.filter((l) => l.length > 0 && l.length < 25);
+  return shortLines.length / lines.length > 0.65;
+}
+
+/**
+ * Calls GPT to reconstruct relational meaning from OCR-linearised tabular pages.
+ *
+ * Problem: a wiring table encodes relationships spatially (each table row pairs
+ * a pin number with a signal name and wire colour).  OCR reads columns
+ * sequentially, so the pairing is lost.  This function asks the model to
+ * identify co-located items and write each relationship explicitly, e.g.:
+ *   "Pin 1: AM+, Black wire"
+ *   "Output Q1:01 → TOP BAR DOWN VALVE (via SSR)"
+ *
+ * Falls back to the original text on any error so rechunking always completes.
+ */
+async function restructureTabularContent(rawText: string): Promise<string> {
+  try {
+    const response = await openai.chat.completions.create({
+      model: MODEL,
+      max_completion_tokens: 2000,
+      temperature: 0,
+      messages: [
+        {
+          role: "system",
+          content: `You are a technical document analyst specialising in engineering schematics and wiring diagrams. You receive OCR text from a page that was originally a multi-column table, wiring diagram, or parts list. OCR has linearised it, so spatially related items (e.g. a pin number and its signal name in the same row) appear as separate lines in a disconnected order.
+
+Reconstruct the relational structure. Identify groups of related data and write each relationship as a clear, self-contained statement. Examples:
+- "Pin 1: AM+ signal, Black wire"
+- "Pin 2: AM- signal, White/Black wire"
+- "Output Q1:01 controls TOP BAR DOWN VALVE"
+- "Part 9688 SE-1/2-B: Quick Exhaust Valve, Festo, qty 3"
+- "Cylinder DSBC-50-80-T-PPVA-N3T1: connected to QST-5/16-12 fittings (190589)"
+- "Thermocouple IN 0+/IN 0-: TOP BAR, Type J, Red/White wires"
+
+Rules:
+- Preserve ALL identifiers, part numbers, catalogue codes, pin numbers, and wire colours EXACTLY as written — do not normalise, abbreviate or correct them
+- Do not fabricate or infer data not present in the source text
+- Do not omit any data item present in the source
+- Ignore pure diagram grid coordinates (single letters A-H, standalone digits 0-4) that carry no data meaning
+- Output only the reconstructed relational statements, one per line, no commentary`,
+        },
+        {
+          role: "user",
+          content: `Reconstruct the relational structure from this OCR-linearised schematic page:\n\n${rawText.slice(0, 3500)}`,
+        },
+      ],
+    });
+    const result = response.choices[0]?.message?.content?.trim();
+    if (!result || result.length < 20) return rawText;
+    return result;
+  } catch (err) {
+    logger.warn({ err }, "Table restructuring failed, using original text");
+    return rawText;
+  }
+}
 
 async function pass7EmbedChunks(
   manualId: number,
@@ -383,10 +454,24 @@ async function pass7EmbedChunks(
   await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
 
   let totalChunks = 0;
+  let restructuredPages = 0;
   for (const page of pages) {
     if (!page.text || page.text.trim().length < 20) continue;
 
-    const semanticChunks = chunkPageSemantically(page.text);
+    // Pre-process tabular/schematic pages: reconstruct the row-level
+    // relationships that OCR linearisation destroyed.  Prose pages pass through
+    // unchanged (isTabularOcrPage returns false for them).
+    let textToChunk = page.text;
+    if (isTabularOcrPage(page.text)) {
+      textToChunk = await restructureTabularContent(page.text);
+      restructuredPages++;
+      logger.info(
+        { manualId, pageNumber: page.pageNumber },
+        "Pass 7: tabular page restructured"
+      );
+    }
+
+    const semanticChunks = chunkPageSemantically(textToChunk);
 
     for (let ci = 0; ci < semanticChunks.length; ci++) {
       const content = semanticChunks[ci]!.trim();
@@ -409,7 +494,7 @@ async function pass7EmbedChunks(
     }
   }
 
-  logger.info({ manualId, totalChunks }, "Pass 7: semantic chunks stored");
+  logger.info({ manualId, totalChunks, restructuredPages }, "Pass 7: semantic chunks stored");
 }
 
 // ─── VISION OCR: ISO/IEC-guided page interpretation ──────────────────────────

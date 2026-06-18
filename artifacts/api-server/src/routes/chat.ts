@@ -17,6 +17,20 @@ const CHAT_MODEL = "gpt-4o";
 const TOP_K_CHUNKS = 8;
 const TOP_K_ENTITIES = 10;
 
+// ── Identifier token extraction ────────────────────────────────────────────
+// Extracts part numbers / catalogue codes from the question — alphanumeric
+// tokens containing hyphens or slashes (e.g. QST-5/16-12, MFH-5-1/2,
+// 1492-SPM1D160).  These are destroyed by FTS tokenisation, so they need a
+// separate ILIKE search path backed by the trigram GIN index.
+function extractIdentifierTokens(text: string): string[] {
+  // Pattern: at least two alphanumeric segments separated by - or /
+  const pattern = /\b[A-Z0-9]{2,}(?:[-\/][A-Z0-9]+){1,}\b/gi;
+  const matches = [...text.matchAll(pattern)].map((m) => m[0]);
+  // Also bare long numeric part numbers (5+ digits, e.g. catalogue numbers)
+  const numeric = [...text.matchAll(/\b\d{5,}\b/g)].map((m) => m[0]);
+  return [...new Set([...matches, ...numeric])].slice(0, 6);
+}
+
 // Words too generic to use as manual-name signals for domain detection
 const GENERIC_NAME_WORDS = new Set([
   "manual", "unit", "machine", "system", "maintenance",
@@ -141,6 +155,39 @@ router.post("/chat", async (req: Request, res: Response) => {
         LIMIT ${TOP_K_CHUNKS}
       `);
       ragChunks = fallback.rows;
+    }
+
+    // ── 1b. Identifier search: ILIKE via trigram GIN index ─────────────────
+    // FTS tokenisation destroys structured identifiers (part numbers, model
+    // codes) by splitting on hyphens and slashes.  When the question contains
+    // such tokens, run a parallel ILIKE search backed by the pg_trgm GIN index
+    // and merge any new chunks into ragChunks before domain classification.
+    const identifierTokens = extractIdentifierTokens(trimmedQuestion);
+    if (identifierTokens.length > 0) {
+      const ilikeConditions = identifierTokens.map(
+        (tok) => sql`c.content ILIKE ${"%" + tok + "%"}`
+      );
+      const identResult = await db.execute<ChunkRow>(sql`
+        SELECT
+          c.id,
+          c.manual_id,
+          m.name AS manual_name,
+          c.page_number,
+          c.chunk_index,
+          c.content,
+          0.3::float AS rank
+        FROM chunks c
+        JOIN manuals m ON m.id = c.manual_id
+        WHERE ${sql.join(ilikeConditions, sql` OR `)}
+        LIMIT ${TOP_K_CHUNKS}
+      `);
+      const existingIds = new Set(ragChunks.map((c) => c.id));
+      for (const row of identResult.rows) {
+        if (!existingIds.has(row.id)) {
+          ragChunks.push(row);
+          existingIds.add(row.id);
+        }
+      }
     }
 
     // ── 2. Window expansion: fetch adjacent chunks ────────────────────────────
@@ -317,7 +364,8 @@ CRITICAL RULES FOR ACCURACY:
 1. Scope labels: excerpts may begin with a scope qualifier like [Valid only for Sq machines] or [Not valid for Sq machines]. These tell you which machine type the content applies to. Always respect these when answering about specific machine variants. If an excerpt is scoped [Not valid for Sq machines], its values do NOT apply to Sq machines — look in other excerpts for the Sq-specific values.
 2. Numeric tables: when an excerpt contains a table of numbers (rows with ± notation, column headers like "Package", "C (mm)", "D (mm)"), read the values directly from that table. Do NOT say a value is unavailable if the table is present in the source excerpts — extract the specific row that matches the question.
 3. PDF table formatting: in PDF-extracted text, table values are sometimes concatenated directly to the row label without spaces. For example "TBA 1000 S3" means the TBA 1000 S row has a value of 3; "TBA 750 S250 ±185 ±1" means TBA 750 S: C=250 ±1, D=85 ±1. Parse such rows by reading trailing numbers as the value for the preceding label.
-4. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
+4. Repeated identifier lists: when a part number, catalogue code, or component name appears as a repeated list in an excerpt (the same identifier on consecutive lines, e.g. "QST-5/16-12\nQST-5/16-12\nQST-5/16-12…"), each repetition represents one physical instance. Count them — that count IS the answer to "how many" questions about that item. Then look at context lines immediately after the list to identify which assemblies they serve.
+5. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
 
 Structure your answer with:
 - A direct answer to the question
