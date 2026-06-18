@@ -70,7 +70,6 @@ export default function ManualGraphPage() {
   const manualId = parseInt(id, 10);
   const queryClient = useQueryClient();
 
-  const [pollInterval, setPollInterval] = useState<number | undefined>(undefined);
   const [selectedTier, setSelectedTier] = useState<TierId>("recommended");
   const [customPages, setCustomPages] = useState<number>(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -81,7 +80,8 @@ export default function ManualGraphPage() {
     query: {
       enabled: !!manualId,
       queryKey: getGetManualQueryKey(manualId),
-      refetchInterval: pollInterval,
+      refetchInterval: (query) =>
+        query.state.data?.status === "processing" ? 3000 : false,
     }
   });
 
@@ -91,14 +91,6 @@ export default function ManualGraphPage() {
       enabled: !!manualId && manual?.status === "structure_complete",
     }
   });
-
-  useEffect(() => {
-    if (manual?.status === "processing") {
-      setPollInterval(3000);
-    } else {
-      setPollInterval(undefined);
-    }
-  }, [manual?.status]);
 
   // Initialise custom page slider from plan data
   useEffect(() => {
@@ -159,7 +151,6 @@ export default function ManualGraphPage() {
         const body = await res.json().catch(() => ({}));
         throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
       }
-      setPollInterval(3000);
       queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) });
     } catch (err) {
       setExtractError(err instanceof Error ? err.message : "Failed to start extraction");
