@@ -1,5 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { readFile, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { db } from "@workspace/db";
 import {
   manualsTable,
@@ -20,8 +22,14 @@ import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reproc
 import { logger } from "../lib/logger.js";
 
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
+  storage: multer.diskStorage({
+    destination: tmpdir(),
+    filename: (_req, file, cb) => {
+      const unique = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      cb(null, `upload-${unique}.pdf`);
+    },
+  }),
+  limits: { fileSize: 300 * 1024 * 1024 }, // 300MB
   fileFilter: (_req, file, cb) => {
     if (file.mimetype === "application/pdf") {
       cb(null, true);
@@ -54,7 +62,7 @@ function getPdfBuffer(manual: { pdfData?: Buffer | null }): Buffer {
   return Buffer.isBuffer(manual.pdfData) ? manual.pdfData : Buffer.from(manual.pdfData as unknown as string, "hex");
 }
 
-// POST /manuals/upload — combined: receive PDF → store in GCS → create record → kick off processing
+// POST /manuals/upload — combined: receive PDF → store in DB → create record → kick off processing
 router.post("/manuals/upload", upload.single("file"), async (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: "No PDF file provided" });
@@ -62,7 +70,20 @@ router.post("/manuals/upload", upload.single("file"), async (req, res) => {
   }
 
   const filename = req.file.originalname;
-  const buffer = req.file.buffer;
+  const tempPath = (req.file as Express.Multer.File & { path: string }).path;
+
+  // Read from temp file on disk (avoids holding 250MB+ in RAM during upload)
+  let buffer: Buffer;
+  try {
+    buffer = await readFile(tempPath);
+  } catch (err) {
+    req.log.error({ err }, "Failed to read uploaded temp file");
+    res.status(500).json({ error: "Failed to read uploaded file" });
+    return;
+  } finally {
+    // Clean up temp file regardless of outcome
+    unlink(tempPath).catch(() => {});
+  }
 
   // PDF is stored directly in the database (GCS sidecar auth is unavailable)
   const objectPath = `/db/${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
@@ -382,7 +403,7 @@ router.post("/manuals/:id/rechunk", async (req, res) => {
 
 // GET /manuals/:id/pdf — serve PDF stored in the database
 router.get("/manuals/:id/pdf", async (req: Request, res: Response) => {
-  const id = parseInt(req.params.id, 10);
+  const id = parseInt(String(req.params.id), 10);
   if (isNaN(id)) {
     res.status(400).json({ error: "Invalid manual ID" });
     return;
