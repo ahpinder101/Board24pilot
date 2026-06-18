@@ -112,15 +112,21 @@ function classifyDomain(
 
 // POST /chat
 router.post("/chat", async (req: Request, res: Response) => {
-  const { question, sessionId: incomingSession } = req.body as {
+  const { question, sessionId: incomingSession, imageDataUrl } = req.body as {
     question?: string;
     sessionId?: string;
+    imageDataUrl?: string;
   };
 
   if (!question || typeof question !== "string" || question.trim().length === 0) {
     res.status(400).json({ error: "question is required" });
     return;
   }
+
+  const hasImage =
+    typeof imageDataUrl === "string" &&
+    imageDataUrl.startsWith("data:image/") &&
+    imageDataUrl.length > 100;
 
   const sessionId = incomingSession ?? randomUUID();
   const trimmedQuestion = question.trim();
@@ -531,7 +537,19 @@ Structure your answer with:
 - A direct answer to the question
 - Supporting technical details from the manuals
 
-Be concise but thorough. Use technical terminology appropriate for engineers.`;
+Be concise but thorough. Use technical terminology appropriate for engineers.${
+  hasImage
+    ? `
+
+IMAGE ANALYSIS:
+The user has attached a photo along with their question. Analyse the image carefully:
+- Identify any visible components, parts, labels, damage, wear, or anomalies.
+- Cross-reference what you see with the manual excerpts provided.
+- If you can identify the part or component from the image, say so and explain what the manual says about it.
+- If the image shows damage or abnormal condition, describe it and refer to any relevant maintenance or troubleshooting guidance in the manuals.
+- If you cannot identify the part from the image alone, describe what you see and ask clarifying follow-up questions.`
+    : ""
+}`;
 
     const userPrompt = `QUESTION: ${trimmedQuestion}
 
@@ -542,11 +560,19 @@ ${graphContext}
 
 Please answer the question based on the above information from the engineering manuals.`;
 
+    const userMessageContent: Parameters<typeof openai.chat.completions.create>[0]["messages"][number]["content"] =
+      hasImage
+        ? [
+            { type: "text", text: userPrompt },
+            { type: "image_url", image_url: { url: imageDataUrl!, detail: "high" } },
+          ]
+        : userPrompt;
+
     const completion = await openai.chat.completions.create({
       model: CHAT_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
+        { role: "user", content: userMessageContent },
       ],
       max_tokens: 1500,
       temperature: 0.2,

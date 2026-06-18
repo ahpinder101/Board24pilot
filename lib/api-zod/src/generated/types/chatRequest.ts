@@ -9,4 +9,6 @@
 export interface ChatRequest {
   question: string;
   sessionId?: string;
+  /** Optional base64 data URL of an image to include with the question (e.g. data:image/jpeg;base64,...) */
+  imageDataUrl?: string;
 }

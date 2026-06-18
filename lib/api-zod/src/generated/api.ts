@@ -13,7 +13,8 @@ import * as zod from 'zod';
  */
 export const SendChatMessageBody = zod.object({
   "question": zod.string(),
-  "sessionId": zod.string().optional()
+  "sessionId": zod.string().optional(),
+  "imageDataUrl": zod.string().optional().describe('Optional base64 data URL of an image to include with the question (e.g. data:image\/jpeg;base64,...)')
 })
 
 export const SendChatMessageResponse = zod.object({
