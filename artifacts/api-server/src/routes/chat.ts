@@ -6,6 +6,7 @@ import {
   entitiesTable,
   pathsTable,
   manualsTable,
+  feedbackTable,
   type ChatCitation,
 } from "@workspace/db";
 import { openai } from "@workspace/integrations-openai-ai-server";
@@ -607,6 +608,33 @@ router.post("/chat", async (req: Request, res: Response) => {
             .join("\n\n---\n\n")
         : "No relevant manual excerpts found.";
 
+    // ── 4b. Feedback corrections ─────────────────────────────────────────────
+    // Search engineer-submitted corrections from previous thumbs-down feedback.
+    // Corrections whose question+correction text matches the current query are
+    // injected into the prompt as ground-truth overrides.
+    let feedbackContext = "";
+    if (tsQuery.length > 0) {
+      type CorrectionRow = { question: string; correction: string };
+      const correctionResult = await db.execute<CorrectionRow>(sql`
+        SELECT question, correction
+        FROM feedback
+        WHERE rating = 'negative'
+          AND correction IS NOT NULL
+          AND correction <> ''
+          AND to_tsvector('english', question || ' ' || correction)
+              @@ to_tsquery('english', ${tsQuery})
+        ORDER BY created_at DESC
+        LIMIT 5
+      `);
+      if (correctionResult.rows.length > 0) {
+        feedbackContext =
+          "ENGINEER CORRECTIONS (submitted by engineers who found previous answers wrong or incomplete — treat these as ground truth that takes priority over manual excerpts if they conflict):\n" +
+          correctionResult.rows
+            .map((r, i) => `[Correction ${i + 1}]\nOriginal question: ${r.question}\nCorrection: ${r.correction}`)
+            .join("\n\n");
+      }
+    }
+
     // ── 5. Synthesise with GPT-4o ───────────────────────────────────────────
     const systemPrompt = `You are an expert engineering assistant. Engineers ask you questions about industrial machines, components, systems, and procedures described in their uploaded manuals.
 
@@ -647,7 +675,7 @@ The user has attached a photo along with their question. Analyse the image caref
 
     const userPrompt = `QUESTION: ${trimmedQuestion}
 
-MANUAL EXCERPTS (from text search):
+${feedbackContext ? feedbackContext + "\n\n" : ""}MANUAL EXCERPTS (from text search):
 ${ragContext}
 
 ${graphContext}
