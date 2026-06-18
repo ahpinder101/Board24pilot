@@ -8,7 +8,7 @@ import {
   type ChatCitation,
 } from "@workspace/db";
 import { openai } from "@workspace/integrations-openai-ai-server";
-import { eq, sql, ilike, or, inArray } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { randomUUID } from "crypto";
 
 const router = Router();
@@ -16,6 +16,50 @@ const router = Router();
 const CHAT_MODEL = "gpt-4o";
 const TOP_K_CHUNKS = 8;
 const TOP_K_ENTITIES = 10;
+
+// Words too generic to use as manual-name signals for domain detection
+const GENERIC_NAME_WORDS = new Set([
+  "manual", "unit", "machine", "system", "maintenance",
+  "document", "guide", "handbook", "instruction",
+]);
+
+// ── Domain classification ──────────────────────────────────────────────────
+// Returns the manual IDs the question is most likely about.
+// Two signals, in priority order:
+//   A. Explicit: manual name keywords appear verbatim in the question text.
+//      Handles "In the Maverick…" / "on the Tetra Pak machine…" style questions.
+//   B. Implicit: which manuals did the FTS chunk search already return hits from?
+//      Handles domain-specific terminology that maps naturally to one manual.
+// Falls back to all manuals when neither signal fires (e.g. cross-cutting questions).
+function classifyDomain(
+  question: string,
+  allManuals: Array<{ id: number; name: string }>,
+  ftsChunks: Array<{ manual_id: number; rank: number }>
+): number[] {
+  const qLower = question.toLowerCase();
+
+  // Signal A — explicit name match
+  const explicit = new Set<number>();
+  for (const m of allManuals) {
+    const tokens = m.name
+      .toLowerCase()
+      .split(/[\s/\-_]+/)
+      .filter((t) => t.length > 3 && !GENERIC_NAME_WORDS.has(t));
+    if (tokens.some((t) => qLower.includes(t))) {
+      explicit.add(m.id);
+    }
+  }
+  if (explicit.size > 0) return Array.from(explicit);
+
+  // Signal B — chunk result manual IDs (only from genuinely ranked results)
+  const fromChunks = new Set(
+    ftsChunks.filter((c) => c.rank > 0).map((c) => c.manual_id)
+  );
+  if (fromChunks.size > 0) return Array.from(fromChunks);
+
+  // Fallback — search all
+  return allManuals.map((m) => m.id);
+}
 
 // POST /chat
 router.post("/chat", async (req: Request, res: Response) => {
@@ -33,6 +77,11 @@ router.post("/chat", async (req: Request, res: Response) => {
   const trimmedQuestion = question.trim();
 
   try {
+    // ── 0. Load manuals (needed for domain classification) ───────────────────
+    const allManuals = await db
+      .select({ id: manualsTable.id, name: manualsTable.name })
+      .from(manualsTable);
+
     // ── 1. RAG: full-text search over chunks ─────────────────────────────────
     // Include 2-char tokens (Sq, mm, LH, RH …) — critical abbreviations in
     // engineering manuals that would otherwise be silently dropped.
@@ -110,7 +159,6 @@ router.post("/chat", async (req: Request, res: Response) => {
       }
 
       if (adjacentIds.size > 0) {
-        // Build OR conditions for (manual_id, page_number, chunk_index) triples
         const conditions = Array.from(adjacentIds).map((key) => {
           const [mid, pg, ci] = key.split(":").map(Number);
           return sql`(c.manual_id = ${mid} AND c.page_number = ${pg} AND c.chunk_index = ${ci})`;
@@ -137,18 +185,37 @@ router.post("/chat", async (req: Request, res: Response) => {
           }
         }
 
-        // Sort: higher-ranked FTS results first, then adjacents by page order
-        ragChunks.sort((a, b) => b.rank - a.rank || a.page_number - b.page_number || a.chunk_index - b.chunk_index);
+        ragChunks.sort(
+          (a, b) =>
+            b.rank - a.rank ||
+            a.page_number - b.page_number ||
+            a.chunk_index - b.chunk_index
+        );
       }
     }
 
-    // ── 3. Graph: keyword entity search ────────────────────────────────────
-    const keywords = trimmedQuestion
-      .toLowerCase()
-      .replace(/[^a-z0-9 ]/g, " ")
-      .split(" ")
-      .filter((w) => w.length > 3)
-      .slice(0, 6);
+    // ── 2b. Domain classification ─────────────────────────────────────────────
+    // Determine which manual(s) this question is about, using two signals:
+    //   A. Explicit mention of a manual name in the question text.
+    //   B. Which manuals produced the top-ranked FTS chunk hits.
+    // All graph/entity retrieval below is scoped to these manual IDs.
+    const scopedManualIds = classifyDomain(trimmedQuestion, allManuals, ragChunks);
+    const scopedManualArray = `{${scopedManualIds.join(",")}}`;
+
+    // ── 3. Graph: FTS entity search scoped to classified domain ──────────────
+    // Uses the same FTS relevance model as chunk retrieval (ts_rank + @@ operator)
+    // instead of keyword-presence ILIKE, and is scoped to the classified manuals.
+    // This ensures entities from unrelated machines are never surfaced.
+    const entityFtsQuery = tsQuery; // reuse the same query tokens
+
+    type EntityRow = {
+      id: number;
+      name: string;
+      type: string;
+      description: string;
+      manual_name: string;
+      rank: number;
+    };
 
     let graphEntities: Array<{
       id: number;
@@ -158,33 +225,34 @@ router.post("/chat", async (req: Request, res: Response) => {
       manualName: string;
     }> = [];
 
-    if (keywords.length > 0) {
-      const conditions = keywords.map((kw) =>
-        or(
-          ilike(entitiesTable.name, `%${kw}%`),
-          ilike(entitiesTable.description, `%${kw}%`)
-        )
-      );
+    if (entityFtsQuery.length > 0) {
+      const entityResult = await db.execute<EntityRow>(sql`
+        SELECT
+          e.id,
+          e.name,
+          e.type,
+          COALESCE(e.description, '') AS description,
+          m.name AS manual_name,
+          ts_rank(
+            to_tsvector('english', e.name || ' ' || COALESCE(e.description, '')),
+            to_tsquery('english', ${entityFtsQuery})
+          ) AS rank
+        FROM entities e
+        JOIN manuals m ON m.id = e.manual_id
+        WHERE
+          e.manual_id = ANY(${scopedManualArray}::integer[])
+          AND to_tsvector('english', e.name || ' ' || COALESCE(e.description, ''))
+              @@ to_tsquery('english', ${entityFtsQuery})
+        ORDER BY rank DESC
+        LIMIT ${TOP_K_ENTITIES}
+      `);
 
-      const entityRows = await db
-        .select({
-          id: entitiesTable.id,
-          name: entitiesTable.name,
-          type: entitiesTable.type,
-          description: entitiesTable.description,
-          manualName: manualsTable.name,
-        })
-        .from(entitiesTable)
-        .leftJoin(manualsTable, eq(entitiesTable.manualId, manualsTable.id))
-        .where(or(...conditions))
-        .limit(TOP_K_ENTITIES);
-
-      graphEntities = entityRows.map((r) => ({
+      graphEntities = entityResult.rows.map((r) => ({
         id: r.id,
         name: r.name,
         type: r.type,
         description: r.description,
-        manualName: r.manualName ?? "Unknown",
+        manualName: r.manual_name,
       }));
     }
 
@@ -327,6 +395,13 @@ Please answer the question based on the above information from the engineering m
       citations,
       sessionId,
       graphEntities: graphEntities.map((e) => e.name),
+      // Debug info: which manuals were searched
+      _scope: {
+        manualIds: scopedManualIds,
+        manualNames: allManuals
+          .filter((m) => scopedManualIds.includes(m.id))
+          .map((m) => m.name),
+      },
     });
   } catch (err) {
     req.log.error({ err }, "Chat endpoint error");
@@ -336,7 +411,7 @@ Please answer the question based on the above information from the engineering m
 
 // GET /chat/:sessionId/history
 router.get("/chat/:sessionId/history", async (req: Request, res: Response) => {
-  const { sessionId } = req.params;
+  const sessionId = String(req.params.sessionId);
   const messages = await db
     .select()
     .from(chatMessagesTable)
