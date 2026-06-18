@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   ChevronRight,
   UploadCloud,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -83,7 +84,7 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
           </div>
         )}
       </div>
-      <div className="flex items-center gap-2 shrink-0">
+      <div className="flex items-center gap-1.5 shrink-0">
         {manual.status === "completed" && (
           <CheckCircle2 className="w-4 h-4 text-green-500" />
         )}
@@ -92,6 +93,23 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
         )}
         {manual.status === "processing" && (
           <Clock className="w-4 h-4 text-blue-400 animate-spin" />
+        )}
+        {manual.status === "completed" && (
+          <a
+            href={`/api/manuals/${manual.id}/pdf`}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open PDF"
+          >
+            <Button
+              variant="ghost"
+              size="icon"
+              className="w-7 h-7 text-gray-300 hover:text-blue-600 hover:bg-blue-50 opacity-0 group-hover:opacity-100 transition-opacity"
+              asChild={false}
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+            </Button>
+          </a>
         )}
         <Button
           variant="ghost"
