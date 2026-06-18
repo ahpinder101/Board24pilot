@@ -26,7 +26,7 @@ import {
   type InsertRelationship,
 } from "@workspace/db";
 import { eq, and, count } from "drizzle-orm";
-import { extractPdfText, renderPdfPageToBase64, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
+import { extractPdfText, renderPdfPageToBase64, hasDiagramImage, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
 
@@ -538,9 +538,51 @@ Rules:
   }
 }
 
+/**
+ * Sends a single page image to GPT-4o with the full ISO/IEC-guided prompt and
+ * returns the structured description.  Used in Pass 7 to replace garbled OCR
+ * on pages whose embedded images are detected as diagrams/schematics.
+ *
+ * Returns null on any error so the caller can fall back to the original text.
+ */
+async function describePageWithVision(
+  pdfBuffer: Buffer,
+  pageNumber: number
+): Promise<string | null> {
+  try {
+    const base64Image = await renderPdfPageToBase64(pdfBuffer, pageNumber);
+    const response = await openai.chat.completions.create({
+      model: MODEL,
+      max_completion_tokens: 4096,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${base64Image}`, detail: "high" },
+            },
+            {
+              type: "text",
+              text: buildPageInterpretationPrompt(pageNumber),
+            },
+          ],
+        },
+      ],
+    });
+    const text = response.choices[0]?.message?.content?.trim() ?? "";
+    if (!text || text === "[diagram only]" || text.length < 30) return null;
+    return text;
+  } catch (err) {
+    logger.warn({ err, pageNumber }, "Pass 7: vision description failed, keeping OCR text");
+    return null;
+  }
+}
+
 async function pass7EmbedChunks(
   manualId: number,
-  pages: Array<{ pageNumber: number; text: string }>
+  pages: Array<{ pageNumber: number; text: string }>,
+  pdfBuffer?: Buffer
 ): Promise<void> {
   await updateManualPass(manualId, 7);
 
@@ -549,14 +591,31 @@ async function pass7EmbedChunks(
 
   let totalChunks = 0;
   let restructuredPages = 0;
+  let diagramPages = 0;
   for (const page of pages) {
     if (!page.text || page.text.trim().length < 20) continue;
 
-    // Pre-process tabular/schematic pages: reconstruct the row-level
-    // relationships that OCR linearisation destroyed.  Prose pages pass through
-    // unchanged (isTabularOcrPage returns false for them).
     let textToChunk = page.text;
-    if (isTabularOcrPage(page.text)) {
+
+    // Diagram gate: if pdfBuffer is available, check whether any embedded image
+    // on this page is a line drawing or schematic (midtone pixel fraction < 25%).
+    // If so, replace the garbled OCR with a structured vision description that
+    // correctly interprets the diagram per the relevant ISO/IEC standard.
+    // This takes priority over the tabular restructuring path below.
+    if (pdfBuffer && await hasDiagramImage(pdfBuffer, page.pageNumber)) {
+      const visionText = await describePageWithVision(pdfBuffer, page.pageNumber);
+      if (visionText) {
+        textToChunk = visionText;
+        diagramPages++;
+        logger.info(
+          { manualId, pageNumber: page.pageNumber },
+          "Pass 7: diagram page replaced with vision description"
+        );
+      }
+    } else if (isTabularOcrPage(page.text)) {
+      // Pre-process tabular/schematic pages: reconstruct the row-level
+      // relationships that OCR linearisation destroyed.  Prose pages pass through
+      // unchanged (isTabularOcrPage returns false for them).
       textToChunk = await restructureTabularContent(page.text);
       restructuredPages++;
       logger.info(
@@ -588,7 +647,7 @@ async function pass7EmbedChunks(
     }
   }
 
-  logger.info({ manualId, totalChunks, restructuredPages }, "Pass 7: semantic chunks stored");
+  logger.info({ manualId, totalChunks, restructuredPages, diagramPages }, "Pass 7: semantic chunks stored");
 }
 
 // ─── VISION OCR: ISO/IEC-guided page interpretation ──────────────────────────
@@ -1196,8 +1255,10 @@ export async function runExtractionPipeline(
       pdfContent.fullText = ocrPages.map((p) => p.text).join("\n\n");
     }
 
-    // Pass 7: RAG chunking — runs automatically so search is ready immediately
-    await pass7EmbedChunks(manualId, pdfContent.pages);
+    // Pass 7: RAG chunking — runs automatically so search is ready immediately.
+    // pdfBuffer is passed so the diagram gate can run pixel analysis and replace
+    // garbled OCR on wiring-diagram / schematic pages with a vision description.
+    await pass7EmbedChunks(manualId, pdfContent.pages, pdfBuffer);
 
     // Stop here — entity/relationship extraction is triggered manually by the user
     // so they can choose how much of the document to cover before incurring cost.

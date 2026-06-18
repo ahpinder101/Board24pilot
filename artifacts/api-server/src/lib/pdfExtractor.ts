@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { writeFile, readFile, readdir, rm, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import sharp from "sharp";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,6 +39,69 @@ export async function renderPdfPageToBase64(
 
     const imageBuffer = await readFile(join(tempDir, pngFile));
     return imageBuffer.toString("base64");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Returns true if any embedded image on `pageNumber` has a low midtone pixel
+ * fraction, which is a reliable signal for line drawings, wiring diagrams,
+ * schematics, and assembly drawings.
+ *
+ * Metric: pixels whose luminance falls in the 80–180 range ("midtones").
+ * Diagrams are bimodal — nearly all pixels are near-black ink or near-white
+ * paper, so midtone% < 25%.  Photos of metal machinery are dominated by
+ * gradients, shadows, and reflections, all in the mid-luminance band, so
+ * midtone% > 40%.  The empirical gap (validated on Warco WM-12 manual) makes
+ * 25% a robust threshold with no observed false positives.
+ *
+ * Uses pdfimages to extract embedded raster images, then sharp for pixel
+ * analysis.  Returns false on any extraction error so the caller degrades
+ * gracefully.
+ */
+export async function hasDiagramImage(
+  pdfBuffer: Buffer,
+  pageNumber: number
+): Promise<boolean> {
+  const tempDir = await mkdtemp(join(tmpdir(), "pdfdiag-"));
+  const pdfPath = join(tempDir, "input.pdf");
+  const outPrefix = join(tempDir, "img");
+
+  try {
+    await writeFile(pdfPath, pdfBuffer);
+    await execFileAsync("pdfimages", [
+      "-f", String(pageNumber),
+      "-l", String(pageNumber),
+      "-png",
+      pdfPath,
+      outPrefix,
+    ]);
+
+    const files = await readdir(tempDir);
+    const pngs = files.filter((f) => f.endsWith(".png"));
+    if (pngs.length === 0) return false;
+
+    for (const file of pngs) {
+      const { data, info } = await sharp(join(tempDir, file))
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      const totalPixels = info.width * info.height;
+      const ch = info.channels;
+      let midtoneCount = 0;
+
+      for (let i = 0; i < data.length; i += ch) {
+        const lum = ((data[i] ?? 255) + (data[i + 1] ?? 255) + (data[i + 2] ?? 255)) / 3;
+        if (lum >= 80 && lum <= 180) midtoneCount++;
+      }
+
+      if (midtoneCount / totalPixels < 0.25) return true;
+    }
+    return false;
+  } catch {
+    return false;
   } finally {
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
