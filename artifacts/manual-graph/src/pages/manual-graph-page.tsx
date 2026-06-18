@@ -14,174 +14,137 @@ import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Clock, CheckCircle2, AlertTriangle, FileText, Database, Network,
-  Layers, Play, Lightbulb, DollarSign, Zap,
+  Layers, Play, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 // ─── Token-based cost model ────────────────────────────────────────────────────
-//
-// Computed from actual prompt character counts in extractionPipeline.ts:
-//
-//  Pass 4 (entity, 5 000-char chunks):
-//    Input  = system prompt (~1 320 chars incl. docType+overview) +
-//             user prefix (~70 chars) + chunk (5 000 chars)
-//           = ~6 390 chars / 3.5 chars·token⁻¹ = ~1 826 tokens
-//    Output = max_completion_tokens 8 192; typical 20 entities × ~80 tok = ~1 600;
-//             dense doc (35 entities) = ~2 800; sparse (8 entities) = ~640
-//
-//  Pass 5 (relationship, 4 000-char chunks):
-//    Input  = system base (~820 chars) + entity list (~20 chars × entity count)
-//             + user prefix (~80 chars) + chunk (4 000 chars)
-//           ≈ ~2 314 tokens at 160 entities (grows ~6 tok per additional entity)
-//    Output = max 8 192; typical 25 rels × ~50 tok = ~1 250; dense = ~2 500
-//
-//  Pass 1 (structure, 1 call): ~2 400 input + ~600 output
-//  Pass 6 (hierarchy, 1 call): ~1 528 input + ~600 output
-//
-// Reference pricing: gpt-4o public rates ($2.50 / 1M input, $10.00 / 1M output).
-// Model "gpt-5.4" is Replit's internal alias — actual billing rate is unknown;
-// the table below shows the gpt-4o baseline. Multiply as needed.
+// Computed from actual prompt character counts in extractionPipeline.ts.
+// Reference pricing: gpt-4o public rates ($2.50/1M input, $10/1M output).
+// gpt-5.4 is Replit's internal alias — token counts are exact, dollar rate is reference-only.
 
-const INPUT_PER_TOKEN  = 2.50  / 1_000_000;  // gpt-4o reference
+const INPUT_PER_TOKEN  = 2.50  / 1_000_000;
 const OUTPUT_PER_TOKEN = 10.00 / 1_000_000;
 
-// Per-call token budgets (from prompt analysis above)
-const ENTITY_INPUT_TOKENS    = 1826;
-const ENTITY_OUTPUT_LOW      = 640;    // sparse doc
-const ENTITY_OUTPUT_TYPICAL  = 1600;   // avg
-const ENTITY_OUTPUT_HIGH     = 2800;   // dense doc
+const ENTITY_INPUT_TOKENS   = 1826;
+const ENTITY_OUTPUT_TYPICAL = 1600;
+const ENTITY_OUTPUT_HIGH    = 2800;
 
-const REL_INPUT_BASE_TOKENS  = 1360;   // without entity list
-const REL_INPUT_PER_ENTITY   = 6;      // ~20 chars / 3.5 chars·token⁻¹
-const REL_OUTPUT_LOW         = 500;
-const REL_OUTPUT_TYPICAL     = 1250;
-const REL_OUTPUT_HIGH        = 2500;
+const REL_INPUT_BASE    = 1360;
+const REL_INPUT_PER_ENT = 6;       // ~20 chars per entity name / 3.5 chars·tok⁻¹
+const REL_OUTPUT_TYPICAL = 1250;
+const REL_OUTPUT_HIGH    = 2500;
 
-// Fixed calls (Pass 1 + Pass 6)
-const PASS1_COST = (2400 * INPUT_PER_TOKEN) + (600  * OUTPUT_PER_TOKEN);  // ~$0.012
-const PASS6_COST = (1528 * INPUT_PER_TOKEN) + (600  * OUTPUT_PER_TOKEN);  // ~$0.010
+const FIXED_COST = ((2400 + 1528) * INPUT_PER_TOKEN) + ((600 + 600) * OUTPUT_PER_TOKEN);
 
 function pagesToEntityChunks(pages: number) {
-  return Math.max(1, Math.ceil(pages / 12)); // 5,000 chars / ~400 chars per page
+  return Math.max(1, Math.ceil(pages / 12));
 }
-function entityChunksToRelChunks(entityChunks: number) {
-  return Math.max(1, Math.ceil(entityChunks * 0.75));
-}
-
-interface CostBreakdown {
-  entityChunks: number;
-  relChunks: number;
-  entityInputTokens: number;
-  relInputTokens: number;
-  entityOutputRange: [number, number];  // [typical, high]
-  relOutputRange: [number, number];
-  entityCostLow: number;
-  entityCostHigh: number;
-  relCostLow: number;
-  relCostHigh: number;
-  fixedCost: number;
-  totalLow: number;       // low output density scenario
-  totalTypical: number;
-  totalHigh: number;      // high output density scenario
+function entityChunksToRelChunks(ec: number) {
+  return Math.max(1, Math.ceil(ec * 0.75));
 }
 
-function computeCost(pages: number): CostBreakdown {
-  const entityChunks = pagesToEntityChunks(pages);
-  const relChunks = entityChunksToRelChunks(entityChunks);
+interface Cost { low: number; typical: number; high: number; entityChunks: number; relChunks: number; relInputTokens: number; }
 
-  // Entity list grows with entity chunk count: ~20 entities/chunk × 6 tokens/entity
-  const estimatedEntities = entityChunks * 20;
-  const relInputTokens = REL_INPUT_BASE_TOKENS + (estimatedEntities * REL_INPUT_PER_ENTITY);
+function computeCost(pages: number): Cost {
+  const ec = pagesToEntityChunks(pages);
+  const rc = entityChunksToRelChunks(ec);
+  const estEntities = ec * 20;
+  const relIn = REL_INPUT_BASE + estEntities * REL_INPUT_PER_ENT;
 
-  const entityCostLow  = entityChunks * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_LOW     * OUTPUT_PER_TOKEN));
-  const entityCostHigh = entityChunks * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_HIGH    * OUTPUT_PER_TOKEN));
-  const entityCostTyp  = entityChunks * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_TYPICAL * OUTPUT_PER_TOKEN));
-
-  const relCostLow     = relChunks * ((relInputTokens * INPUT_PER_TOKEN) + (REL_OUTPUT_LOW     * OUTPUT_PER_TOKEN));
-  const relCostHigh    = relChunks * ((relInputTokens * INPUT_PER_TOKEN) + (REL_OUTPUT_HIGH    * OUTPUT_PER_TOKEN));
-  const relCostTyp     = relChunks * ((relInputTokens * INPUT_PER_TOKEN) + (REL_OUTPUT_TYPICAL * OUTPUT_PER_TOKEN));
-
-  const fixedCost = PASS1_COST + PASS6_COST;
+  const eTyp  = ec * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_TYPICAL * OUTPUT_PER_TOKEN));
+  const eHigh = ec * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_HIGH    * OUTPUT_PER_TOKEN));
+  const rTyp  = rc * ((relIn * INPUT_PER_TOKEN) + (REL_OUTPUT_TYPICAL * OUTPUT_PER_TOKEN));
+  const rHigh = rc * ((relIn * INPUT_PER_TOKEN) + (REL_OUTPUT_HIGH    * OUTPUT_PER_TOKEN));
 
   return {
-    entityChunks,
-    relChunks,
-    entityInputTokens: ENTITY_INPUT_TOKENS,
-    relInputTokens,
-    entityOutputRange: [ENTITY_OUTPUT_TYPICAL, ENTITY_OUTPUT_HIGH],
-    relOutputRange:    [REL_OUTPUT_TYPICAL,    REL_OUTPUT_HIGH],
-    entityCostLow,
-    entityCostHigh,
-    relCostLow,
-    relCostHigh,
-    fixedCost,
-    totalLow:     entityCostLow  + relCostLow  + fixedCost,
-    totalTypical: entityCostTyp  + relCostTyp  + fixedCost,
-    totalHigh:    entityCostHigh + relCostHigh + fixedCost,
+    low: eTyp * 0.4 + rTyp * 0.4 + FIXED_COST,
+    typical: eTyp + rTyp + FIXED_COST,
+    high: eHigh + rHigh + FIXED_COST,
+    entityChunks: ec,
+    relChunks: rc,
+    relInputTokens: relIn,
   };
 }
 
 // ─── Recommendation engine ─────────────────────────────────────────────────────
-interface Recommendation {
-  pages: number;
-  label: string;
-  rationale: string;
-  confidence: "high" | "medium";
-}
+interface TierPages { quick: number; recommended: number; full: number }
 
-function getRecommendation(
-  documentType: string | null | undefined,
-  totalPages: number
-): Recommendation {
+function computeTierPages(documentType: string | null | undefined, totalPages: number): TierPages {
   const type = documentType?.toLowerCase() ?? "other";
-
-  // Coverage ratios — how much of a doc of this type typically needs scanning
-  // before entity uniqueness plateaus
-  const coverageByType: Record<string, { ratio: number; cap: number; label: string }> = {
-    maintenance_manual:       { ratio: 0.35, cap: 400, label: "Maintenance Manual" },
-    service_manual:           { ratio: 0.35, cap: 400, label: "Service Manual" },
-    installation_manual:      { ratio: 0.45, cap: 350, label: "Installation Manual" },
-    operation_manual:         { ratio: 0.30, cap: 300, label: "Operation Manual" },
-    system_manual:            { ratio: 0.30, cap: 350, label: "System Manual" },
-    technical_specification:  { ratio: 0.25, cap: 250, label: "Technical Specification" },
-    parts_catalog:            { ratio: 0.20, cap: 200, label: "Parts Catalog" },
-    user_guide:               { ratio: 0.20, cap: 150, label: "User Guide" },
+  const coverageByType: Record<string, { ratio: number; cap: number }> = {
+    maintenance_manual:      { ratio: 0.35, cap: 400 },
+    service_manual:          { ratio: 0.35, cap: 400 },
+    installation_manual:     { ratio: 0.45, cap: 350 },
+    operation_manual:        { ratio: 0.30, cap: 300 },
+    system_manual:           { ratio: 0.30, cap: 350 },
+    technical_specification: { ratio: 0.25, cap: 250 },
+    parts_catalog:           { ratio: 0.20, cap: 200 },
+    user_guide:              { ratio: 0.20, cap: 150 },
   };
 
-  const cfg = coverageByType[type];
+  const cfg = coverageByType[type] ?? { ratio: 0.25, cap: 250 };
 
   if (totalPages <= 80) {
-    return {
-      pages: totalPages,
-      label: "Full document",
-      rationale: "Short document — covering all pages gives the most complete graph at low cost.",
-      confidence: "high",
-    };
+    return { quick: totalPages, recommended: totalPages, full: totalPages };
   }
 
-  if (!cfg) {
-    const pages = Math.min(Math.round(totalPages * 0.25 / 10) * 10, 250);
-    return {
-      pages,
-      label: "Starter scan",
-      rationale: `Unknown document type — starting with ${pages} pages. You can always re-run with more pages to expand coverage.`,
-      confidence: "medium",
-    };
-  }
+  const quick = Math.min(Math.max(30, Math.round(totalPages * 0.10 / 10) * 10), 80);
+  const recRaw = Math.round((totalPages * cfg.ratio) / 10) * 10;
+  const recommended = Math.min(recRaw, cfg.cap, totalPages);
+  const full = totalPages;
 
-  const raw = Math.round((totalPages * cfg.ratio) / 10) * 10;
-  const pages = Math.min(raw, cfg.cap, totalPages);
-
-  let rationale: string;
-  if (totalPages > 500) {
-    rationale = `Large ${cfg.label} (${totalPages} pages). Entity types tend to plateau after ~${pages} pages — start here to validate quality, then expand if you need deeper component coverage.`;
-  } else {
-    rationale = `${cfg.label} — ${Math.round(cfg.ratio * 100)}% coverage (~${pages} pages) typically captures 75–85% of unique entities. Efficient balance of cost and completeness.`;
-  }
-
-  return { pages, label: `Recommended (${pages} pages)`, rationale, confidence: "high" };
+  return { quick, recommended, full };
 }
+
+type TierId = "quick" | "recommended" | "full";
+
+interface TierConfig {
+  id: TierId;
+  label: string;
+  emoji: string;
+  tagline: string;
+  outcomes: string[];
+  cautionNote?: string;
+}
+
+const TIER_CONFIG: TierConfig[] = [
+  {
+    id: "quick",
+    label: "Quick Scan",
+    emoji: "⚡",
+    tagline: "First chapter only",
+    outcomes: [
+      "Top-level machines and main systems",
+      "Primary connections between systems",
+      "Good for a first look or simple documents",
+    ],
+  },
+  {
+    id: "recommended",
+    label: "Recommended",
+    emoji: "★",
+    tagline: "Smart coverage for this document",
+    outcomes: [
+      "All major components and subsystems",
+      "Most processes and their relationships",
+      "Best balance of cost and completeness",
+    ],
+  },
+  {
+    id: "full",
+    label: "Full Analysis",
+    emoji: "🔬",
+    tagline: "Every page, every entity",
+    outcomes: [
+      "Complete part and sensor inventory",
+      "All procedures and their sequences",
+      "Maximum detail — takes longer and costs more",
+    ],
+    cautionNote: "High cost for large documents",
+  },
+];
 
 export default function ManualGraphPage() {
   const { id } = useParams<{ id: string }>();
@@ -189,10 +152,11 @@ export default function ManualGraphPage() {
   const queryClient = useQueryClient();
 
   const [pollInterval, setPollInterval] = useState<number | undefined>(undefined);
-  const [pagesToCover, setPagesToCover] = useState<number>(100);
+  const [selectedTier, setSelectedTier] = useState<TierId>("recommended");
+  const [customPages, setCustomPages] = useState<number>(100);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [isTriggering, setIsTriggering] = useState(false);
   const [extractError, setExtractError] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
 
   const { data: manual, isLoading: isLoadingManual } = useGetManual(manualId, {
     query: {
@@ -205,19 +169,16 @@ export default function ManualGraphPage() {
   useEffect(() => {
     if (manual?.status === "processing") {
       setPollInterval(3000);
-      setConfirmed(false);
     } else {
       setPollInterval(undefined);
     }
   }, [manual?.status]);
 
-  // Set slider default once we know total pages
   useEffect(() => {
-    if (manual?.totalPages && manual.status === "structure_complete") {
-      const rec = getRecommendation(manual.documentType, manual.totalPages);
-      setPagesToCover(rec.pages);
+    if (manual?.totalPages) {
+      setCustomPages(Math.min(150, manual.totalPages));
     }
-  }, [manual?.totalPages, manual?.status]);
+  }, [manual?.totalPages]);
 
   const { data: graphData, isLoading: isLoadingGraph } = useGetManualGraph(manualId, {
     query: {
@@ -234,9 +195,17 @@ export default function ManualGraphPage() {
   });
 
   const totalPages = manual?.totalPages ?? 0;
-  const clampedPages = Math.min(pagesToCover, totalPages || pagesToCover);
-  const cost = computeCost(clampedPages);
-  const rec = totalPages > 0 ? getRecommendation(manual?.documentType, totalPages) : null;
+  const tierPages = computeTierPages(manual?.documentType, totalPages);
+
+  // Pages to use based on selection
+  const pagesForTier: Record<TierId, number> = {
+    quick: tierPages.quick,
+    recommended: tierPages.recommended,
+    full: tierPages.full,
+  };
+  const activeTier = showAdvanced ? "recommended" : selectedTier;
+  const pages = showAdvanced ? Math.min(customPages, totalPages) : pagesForTier[selectedTier];
+  const cost = computeCost(pages);
 
   async function handleExtractEntities() {
     setIsTriggering(true);
@@ -255,7 +224,6 @@ export default function ManualGraphPage() {
       queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) });
     } catch (err) {
       setExtractError(err instanceof Error ? err.message : "Failed to start extraction");
-      setConfirmed(false);
     } finally {
       setIsTriggering(false);
     }
@@ -274,7 +242,7 @@ export default function ManualGraphPage() {
 
   return (
     <div className="h-full flex flex-col space-y-4 relative">
-      {/* Header */}
+      {/* ── Header ── */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 shrink-0">
         <div>
           <div className="flex items-center gap-3 mb-2">
@@ -348,190 +316,202 @@ export default function ManualGraphPage() {
           </Card>
         )}
 
-        {/* ── Structure complete — choose extraction depth ── */}
-        {manual.status === "structure_complete" && rec && (
+        {/* ── Structure complete — tier picker ── */}
+        {manual.status === "structure_complete" && (
           <div className="h-full overflow-y-auto">
             <div className="max-w-2xl mx-auto py-6 px-2 space-y-5">
 
-              {/* Recommendation banner */}
-              <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
-                <div className="flex items-start gap-3">
-                  <Lightbulb className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="font-semibold text-amber-900 text-sm mb-1">Recommendation</p>
-                    <p className="text-amber-800 text-sm leading-relaxed">{rec.rationale}</p>
-                    {clampedPages !== rec.pages && (
+              {/* Intro */}
+              <div>
+                <h2 className="text-base font-semibold text-foreground mb-1">
+                  Document indexed — now extract the knowledge graph
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  Search and chat are already working. Choose how deeply to analyse this document for the interactive graph.
+                </p>
+              </div>
+
+              {/* Tier cards */}
+              {!showAdvanced && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {TIER_CONFIG.map((tier) => {
+                    const tPages = pagesForTier[tier.id];
+                    const tCost = computeCost(tPages);
+                    const isSelected = selectedTier === tier.id;
+                    const isRec = tier.id === "recommended";
+
+                    return (
                       <button
-                        onClick={() => { setPagesToCover(rec.pages); setConfirmed(false); }}
-                        className="mt-2 text-xs font-medium text-amber-700 underline underline-offset-2 hover:text-amber-900"
+                        key={tier.id}
+                        onClick={() => setSelectedTier(tier.id)}
+                        className={[
+                          "relative text-left rounded-xl border-2 p-4 transition-all",
+                          isSelected
+                            ? "border-slate-800 bg-slate-800 text-white shadow-lg"
+                            : "border-border bg-card hover:border-slate-400 text-foreground",
+                        ].join(" ")}
                       >
-                        Reset to recommended ({rec.pages.toLocaleString()} pages)
+                        {isRec && (
+                          <span className={[
+                            "absolute -top-2.5 left-3 text-xs font-bold px-2 py-0.5 rounded-full",
+                            isSelected ? "bg-amber-400 text-amber-900" : "bg-amber-100 text-amber-700 border border-amber-200",
+                          ].join(" ")}>
+                            ★ Recommended
+                          </span>
+                        )}
+
+                        <div className="text-2xl mb-2">{tier.emoji}</div>
+                        <div className="font-semibold text-sm mb-0.5">{tier.label}</div>
+                        <div className={["text-xs mb-3", isSelected ? "text-white/70" : "text-muted-foreground"].join(" ")}>
+                          {tier.tagline}
+                        </div>
+
+                        <ul className="space-y-1 mb-4">
+                          {tier.outcomes.map((o, i) => (
+                            <li key={i} className={["text-xs flex items-start gap-1.5", isSelected ? "text-white/80" : "text-muted-foreground"].join(" ")}>
+                              <span className="mt-0.5 shrink-0">·</span>
+                              <span>{o}</span>
+                            </li>
+                          ))}
+                        </ul>
+
+                        {tier.cautionNote && !isSelected && (
+                          <div className="text-xs text-orange-600 mb-2">⚠ {tier.cautionNote}</div>
+                        )}
+
+                        <div className={["text-xs font-mono border-t pt-2", isSelected ? "border-white/20" : "border-border"].join(" ")}>
+                          <div className={isSelected ? "text-white/60" : "text-muted-foreground"}>
+                            ~{tPages.toLocaleString()} pages
+                          </div>
+                          <div className={["font-bold text-sm", isSelected ? "text-white" : "text-foreground"].join(" ")}>
+                            ~${tCost.typical.toFixed(2)}
+                            <span className={["font-normal text-xs ml-1", isSelected ? "text-white/50" : "text-muted-foreground"].join(" ")}>
+                              (${tCost.low.toFixed(2)}–${tCost.high.toFixed(2)})
+                            </span>
+                          </div>
+                        </div>
                       </button>
-                    )}
-                  </div>
+                    );
+                  })}
                 </div>
-              </div>
+              )}
 
-              {/* Slider */}
-              <div className="rounded-xl border border-border bg-card p-5 space-y-4">
-                <div className="flex justify-between items-center">
-                  <h3 className="font-semibold text-foreground text-sm">Pages to cover for entity extraction</h3>
-                  <span className="font-mono text-sm font-bold text-primary">
-                    {clampedPages.toLocaleString()} / {totalPages.toLocaleString()}
-                  </span>
-                </div>
+              {/* Advanced / custom pages */}
+              <div>
+                <button
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showAdvanced ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  {showAdvanced ? "Hide advanced settings" : "Advanced: set exact page count"}
+                </button>
 
-                <input
-                  type="range"
-                  min={Math.min(30, totalPages)}
-                  max={totalPages}
-                  step={10}
-                  value={clampedPages}
-                  onChange={(e) => { setPagesToCover(Number(e.target.value)); setConfirmed(false); }}
-                  className="w-full accent-slate-700"
-                />
-
-                <div className="flex justify-between text-xs text-muted-foreground">
-                  <span>30 pages · quick</span>
-                  <button
-                    onClick={() => { setPagesToCover(rec.pages); setConfirmed(false); }}
-                    className="text-amber-600 font-medium hover:text-amber-800 underline underline-offset-2"
-                  >
-                    ★ recommended: {rec.pages.toLocaleString()}
-                  </button>
-                  <span>full: {totalPages.toLocaleString()}</span>
-                </div>
-              </div>
-
-              {/* Cost breakdown */}
-              <div className="rounded-xl border border-border bg-card p-5 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <DollarSign className="w-4 h-4 text-muted-foreground" />
-                    <h3 className="font-semibold text-foreground text-sm">Cost estimate</h3>
-                  </div>
-                  <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">gpt-4o reference rates</span>
-                </div>
-
-                {/* Per-call token breakdown */}
-                <div className="rounded-lg border border-border overflow-hidden text-xs font-mono">
-                  <div className="grid grid-cols-4 bg-muted/60 px-3 py-1.5 text-muted-foreground font-semibold">
-                    <span>Call type</span>
-                    <span className="text-right">Input tok</span>
-                    <span className="text-right">Output tok</span>
-                    <span className="text-right">$/call range</span>
-                  </div>
-                  <div className="divide-y divide-border">
-                    <div className="grid grid-cols-4 px-3 py-2 bg-background">
-                      <span className="text-muted-foreground">Entity (×{cost.entityChunks})</span>
-                      <span className="text-right">{cost.entityInputTokens.toLocaleString()}</span>
-                      <span className="text-right">{ENTITY_OUTPUT_LOW}–{ENTITY_OUTPUT_HIGH.toLocaleString()}</span>
-                      <span className="text-right">
-                        ${(cost.entityCostLow / cost.entityChunks).toFixed(3)}–${(cost.entityCostHigh / cost.entityChunks).toFixed(3)}
+                {showAdvanced && (
+                  <div className="mt-3 rounded-xl border border-border bg-card p-5 space-y-4">
+                    <div className="flex justify-between items-center">
+                      <label className="text-sm font-medium text-foreground">Pages to cover</label>
+                      <span className="font-mono text-sm font-bold text-primary">
+                        {Math.min(customPages, totalPages).toLocaleString()} / {totalPages.toLocaleString()}
                       </span>
                     </div>
-                    <div className="grid grid-cols-4 px-3 py-2 bg-background">
-                      <span className="text-muted-foreground">Relation (×{cost.relChunks})</span>
-                      <span className="text-right">{cost.relInputTokens.toLocaleString()}</span>
-                      <span className="text-right">{REL_OUTPUT_LOW}–{REL_OUTPUT_HIGH.toLocaleString()}</span>
-                      <span className="text-right">
-                        ${(cost.relCostLow / cost.relChunks).toFixed(3)}–${(cost.relCostHigh / cost.relChunks).toFixed(3)}
-                      </span>
+                    <input
+                      type="range"
+                      min={Math.min(30, totalPages)}
+                      max={totalPages || 1}
+                      step={10}
+                      value={Math.min(customPages, totalPages)}
+                      onChange={(e) => setCustomPages(Number(e.target.value))}
+                      className="w-full accent-slate-700"
+                    />
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>30 pages</span>
+                      <button
+                        onClick={() => setCustomPages(tierPages.recommended)}
+                        className="text-amber-600 underline underline-offset-2 hover:text-amber-800"
+                      >
+                        ★ recommended: {tierPages.recommended}
+                      </button>
+                      <span>{totalPages.toLocaleString()} pages</span>
                     </div>
-                    <div className="grid grid-cols-4 px-3 py-2 bg-background">
-                      <span className="text-muted-foreground">Fixed (×2)</span>
-                      <span className="text-right">~1,960</span>
-                      <span className="text-right">~600</span>
-                      <span className="text-right text-muted-foreground">${(cost.fixedCost / 2).toFixed(3)}</span>
-                    </div>
-                  </div>
-                </div>
 
-                {/* Total row */}
-                <div className="flex items-end justify-between border-t border-border pt-3">
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-0.5">
-                      {cost.entityChunks + cost.relChunks + 2} total AI calls
-                      · {((cost.entityChunks * cost.entityInputTokens) + (cost.relChunks * cost.relInputTokens) + 3960).toLocaleString()} input tokens
-                    </p>
+                    {/* Token breakdown table */}
+                    <div className="rounded-lg border border-border overflow-hidden text-xs font-mono mt-2">
+                      <div className="grid grid-cols-4 bg-muted/60 px-3 py-1.5 text-muted-foreground font-semibold">
+                        <span>Call type</span>
+                        <span className="text-right">Input tok</span>
+                        <span className="text-right">Output tok</span>
+                        <span className="text-right">$/call</span>
+                      </div>
+                      <div className="divide-y divide-border">
+                        <div className="grid grid-cols-4 px-3 py-2 bg-background">
+                          <span className="text-muted-foreground">Entity (×{cost.entityChunks})</span>
+                          <span className="text-right">{ENTITY_INPUT_TOKENS.toLocaleString()}</span>
+                          <span className="text-right">{ENTITY_OUTPUT_TYPICAL}–{ENTITY_OUTPUT_HIGH}</span>
+                          <span className="text-right">$0.017–$0.033</span>
+                        </div>
+                        <div className="grid grid-cols-4 px-3 py-2 bg-background">
+                          <span className="text-muted-foreground">Relation (×{cost.relChunks})</span>
+                          <span className="text-right">{cost.relInputTokens.toLocaleString()}</span>
+                          <span className="text-right">{REL_OUTPUT_TYPICAL}–{REL_OUTPUT_HIGH}</span>
+                          <span className="text-right">$0.013–$0.026</span>
+                        </div>
+                        <div className="grid grid-cols-4 px-3 py-2 bg-background">
+                          <span className="text-muted-foreground">Fixed (×2)</span>
+                          <span className="text-right">~1,960</span>
+                          <span className="text-right">~600</span>
+                          <span className="text-right text-muted-foreground">$0.011</span>
+                        </div>
+                      </div>
+                    </div>
                     <p className="text-xs text-muted-foreground">
-                      Output varies by document density (range = sparse → dense content)
+                      Token counts computed from actual prompt sizes. Dollar rates use gpt-4o as reference —{" "}
+                      <code className="bg-muted px-1 rounded">gpt-5.4</code> (Replit's model alias) may differ.
                     </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Cost summary + CTA */}
+              <div className="rounded-xl border-2 border-slate-200 bg-slate-50 p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-foreground">
+                      {showAdvanced
+                        ? `Custom · ${Math.min(customPages, totalPages).toLocaleString()} pages`
+                        : `${TIER_CONFIG.find(t => t.id === selectedTier)?.label} · ${pagesForTier[selectedTier].toLocaleString()} pages`}
+                    </div>
+                    <div className="text-xs text-muted-foreground mt-0.5">
+                      {cost.entityChunks + cost.relChunks + 2} AI calls · ~{cost.entityChunks * 20} entities expected
+                    </div>
                   </div>
                   <div className="text-right">
-                    <div className="text-xs text-muted-foreground mb-0.5">Sparse → Dense</div>
-                    <div className="font-mono font-bold text-foreground text-lg">
-                      ${cost.totalLow.toFixed(2)} – ${cost.totalHigh.toFixed(2)}
+                    <div className="text-xs text-muted-foreground">Estimated cost</div>
+                    <div className="text-xl font-bold font-mono text-foreground">
+                      ~${cost.typical.toFixed(2)}
                     </div>
-                    <div className="text-xs text-muted-foreground">typical: ~${cost.totalTypical.toFixed(2)}</div>
+                    <div className="text-xs text-muted-foreground font-mono">
+                      ${cost.low.toFixed(2)} – ${cost.high.toFixed(2)}
+                    </div>
                   </div>
                 </div>
 
-                {/* Model pricing disclaimer */}
-                <div className="flex items-start gap-2 text-xs text-muted-foreground bg-muted/50 rounded-lg px-3 py-2 border border-border">
-                  <span className="shrink-0 font-semibold text-foreground/60">⚠</span>
-                  <span>
-                    Model <code className="bg-muted px-1 rounded">gpt-5.4</code> is Replit's internal alias — actual per-token billing may differ from these gpt-4o reference rates.
-                    Token counts are exact (computed from real prompt sizes); only the dollar rate is uncertain.
-                  </span>
-                </div>
+                {extractError && (
+                  <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    {extractError}
+                  </div>
+                )}
+
+                <button
+                  onClick={handleExtractEntities}
+                  disabled={isTriggering}
+                  className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white font-semibold text-sm transition-all active:scale-[0.98] shadow"
+                >
+                  <Play className="w-4 h-4" />
+                  {isTriggering ? "Starting…" : "Extract Knowledge Graph"}
+                </button>
               </div>
 
-              {/* Confirm + Extract */}
-              {extractError && (
-                <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded-lg px-4 py-3">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  {extractError}
-                </div>
-              )}
-
-              {!confirmed ? (
-                <button
-                  onClick={() => setConfirmed(true)}
-                  className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm transition-all active:scale-[0.98] shadow"
-                >
-                  <Zap className="w-4 h-4" />
-                  Review &amp; Confirm ({clampedPages.toLocaleString()} pages · ~${cost.totalTypical.toFixed(2)} typical)
-                </button>
-              ) : (
-                <div className="rounded-xl border-2 border-slate-800 bg-slate-50 p-5 space-y-3">
-                  <p className="text-sm font-semibold text-slate-800">Confirm extraction settings</p>
-                  <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-                    <div className="bg-white border border-border rounded-lg p-3">
-                      <div className="text-muted-foreground">Pages covered</div>
-                      <div className="font-bold text-foreground text-base">{clampedPages.toLocaleString()}</div>
-                    </div>
-                    <div className="bg-white border border-border rounded-lg p-3">
-                      <div className="text-muted-foreground">Total AI calls</div>
-                      <div className="font-bold text-foreground text-base">{cost.entityChunks + cost.relChunks + 2}</div>
-                    </div>
-                    <div className="bg-white border border-border rounded-lg p-3">
-                      <div className="text-muted-foreground">Est. cost (low)</div>
-                      <div className="font-bold text-green-700 text-base">${cost.totalLow.toFixed(2)}</div>
-                    </div>
-                    <div className="bg-white border border-border rounded-lg p-3">
-                      <div className="text-muted-foreground">Est. cost (high)</div>
-                      <div className="font-bold text-orange-600 text-base">${cost.totalHigh.toFixed(2)}</div>
-                    </div>
-                  </div>
-                  <div className="flex gap-3 pt-1">
-                    <button
-                      onClick={() => setConfirmed(false)}
-                      className="flex-1 py-2.5 rounded-lg border border-border text-sm font-medium text-muted-foreground hover:bg-muted transition-colors"
-                    >
-                      Back
-                    </button>
-                    <button
-                      onClick={handleExtractEntities}
-                      disabled={isTriggering}
-                      className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white font-semibold text-sm transition-all active:scale-[0.98]"
-                    >
-                      <Play className="w-4 h-4" />
-                      {isTriggering ? "Starting…" : "Start Extraction"}
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         )}
