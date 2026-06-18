@@ -16,6 +16,8 @@ import {
   AlertTriangle,
   ChevronRight,
   ExternalLink,
+  Layers,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -61,10 +63,21 @@ function StatCard({
 }
 
 function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) => void }) {
+  const isReady = manual.status === "structure_complete";
+
   return (
-    <div className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0">
-      <div className="w-8 h-8 bg-blue-50 rounded flex items-center justify-center shrink-0">
-        <FileText className="w-4 h-4 text-blue-500" />
+    <div className={cn(
+      "flex items-center gap-3 py-3 border-b border-gray-100 last:border-0",
+      isReady && "bg-amber-50 -mx-4 px-4 sm:-mx-5 sm:px-5 rounded-lg border-amber-100"
+    )}>
+      <div className={cn(
+        "w-8 h-8 rounded flex items-center justify-center shrink-0",
+        isReady ? "bg-amber-100" : "bg-blue-50"
+      )}>
+        {isReady
+          ? <Layers className="w-4 h-4 text-amber-600" />
+          : <FileText className="w-4 h-4 text-blue-500" />
+        }
       </div>
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium text-gray-800 truncate">{manual.name}</p>
@@ -82,6 +95,14 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
             <p className="text-[10px] text-gray-400 mt-0.5">Pass {manual.processingPass || 1}/7</p>
           </div>
         )}
+        {isReady && (
+          <Link href={`/manuals/${manual.id}`}>
+            <button className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-amber-700 hover:text-amber-900">
+              <Sparkles className="w-3 h-3" />
+              See cost estimate &amp; extract graph →
+            </button>
+          </Link>
+        )}
       </div>
       <div className="flex items-center gap-1 shrink-0">
         {manual.status === "completed" && (
@@ -92,6 +113,17 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
         )}
         {manual.status === "processing" && (
           <Clock className="w-4 h-4 text-blue-400 animate-spin" />
+        )}
+        {isReady && (
+          <Link href={`/manuals/${manual.id}`}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="w-8 h-8 text-amber-400 hover:text-amber-700 hover:bg-amber-100"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </Button>
+          </Link>
         )}
         {manual.status === "completed" && (
           <a
