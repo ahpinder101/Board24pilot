@@ -180,6 +180,7 @@ export default function ManualGraphPage() {
   if (!manual) return <div>Manual not found</div>;
 
   const totalPages = manual.totalPages ?? 0;
+  const customPageCount = Math.min(customPages !== 0 ? customPages : (plan?.tiers.recommended.pages ?? 0), totalPages);
 
   return (
     <div className="h-full flex flex-col space-y-4 relative">
@@ -449,7 +450,7 @@ export default function ManualGraphPage() {
                     <div>
                       <div className="text-sm font-semibold text-foreground">
                         {showAdvanced
-                          ? `Custom · ${Math.min(customPages || (plan?.tiers.recommended.pages ?? 0), totalPages).toLocaleString()} pages`
+                          ? `Custom · ${customPageCount.toLocaleString()} pages`
                           : `${TIER_META.find(t => t.id === selectedTier)?.label} · ${activeTierData.pages.toLocaleString()} pages`}
                       </div>
                       <div className="text-xs text-muted-foreground mt-0.5">
