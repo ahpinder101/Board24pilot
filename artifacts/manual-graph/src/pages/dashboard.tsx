@@ -1,27 +1,319 @@
-import { GlobalStatsDashboard } from "@/components/stats";
+import { useState, useEffect } from "react";
+import { useGetGlobalStats, useListManuals, useDeleteManual, getListManualsQueryKey } from "@workspace/api-client-react";
 import { UploadPDF } from "@/components/upload-pdf";
-import { ManualList } from "@/components/manual-list";
+import { Link } from "wouter";
+import { formatDistanceToNow } from "date-fns";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import {
+  BookOpen,
+  MessageSquare,
+  RefreshCw,
+  Clock,
+  FileText,
+  Network,
+  Trash2,
+  CheckCircle2,
+  AlertTriangle,
+  ChevronRight,
+  UploadCloud,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
+import {
+  getRecentQuestions,
+  countQuestionsThisWeek,
+  type RecentQuestion,
+} from "@/hooks/use-recent-questions";
+
+function greeting(): string {
+  const h = new Date().getHours();
+  if (h < 12) return "Good morning";
+  if (h < 17) return "Good afternoon";
+  return "Good evening";
+}
+
+function StatCard({
+  value,
+  label,
+  sub,
+  accent,
+}: {
+  value: React.ReactNode;
+  label: string;
+  sub?: string;
+  accent?: "blue" | "purple" | "orange" | "teal";
+}) {
+  const colours = {
+    blue: "text-blue-600",
+    purple: "text-purple-600",
+    orange: "text-orange-500",
+    teal: "text-teal-600",
+  };
+  return (
+    <div className="bg-white rounded-lg border border-gray-200 p-5 flex flex-col gap-1.5">
+      <div className={cn("text-3xl font-bold", colours[accent ?? "blue"])}>{value}</div>
+      <div className="text-sm font-medium text-gray-700">{label}</div>
+      {sub && <div className="text-xs text-gray-400">{sub}</div>}
+    </div>
+  );
+}
+
+function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) => void }) {
+  return (
+    <div className="flex items-center gap-3 py-3 border-b border-gray-100 last:border-0 group">
+      <div className="w-8 h-8 bg-blue-50 rounded flex items-center justify-center shrink-0">
+        <FileText className="w-4 h-4 text-blue-500" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-medium text-gray-800 truncate">{manual.name}</p>
+        <p className="text-xs text-gray-400 mt-0.5">
+          Added {formatDistanceToNow(new Date(manual.createdAt))} ago
+        </p>
+        {manual.status === "processing" && (
+          <div className="mt-1.5">
+            <div className="h-1 bg-gray-100 rounded-full overflow-hidden w-32">
+              <div
+                className="h-full bg-blue-500 transition-all duration-500 rounded-full"
+                style={{ width: `${((manual.processingPass || 1) / 7) * 100}%` }}
+              />
+            </div>
+            <p className="text-[10px] text-gray-400 mt-0.5">Pass {manual.processingPass || 1}/7</p>
+          </div>
+        )}
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        {manual.status === "completed" && (
+          <CheckCircle2 className="w-4 h-4 text-green-500" />
+        )}
+        {manual.status === "failed" && (
+          <AlertTriangle className="w-4 h-4 text-red-500" />
+        )}
+        {manual.status === "processing" && (
+          <Clock className="w-4 h-4 text-blue-400 animate-spin" />
+        )}
+        <Link href={`/manuals/${manual.id}`}>
+          <Button variant="ghost" size="sm" className="text-xs text-gray-500 hover:text-blue-600 gap-1 h-7 px-2">
+            <Network className="w-3 h-3" />
+            Graph
+            <ChevronRight className="w-3 h-3" />
+          </Button>
+        </Link>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="w-7 h-7 text-gray-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-opacity"
+          onClick={() => onDelete(manual.id)}
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 export default function Dashboard() {
+  const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useGetGlobalStats();
+  const { data: manuals, isLoading: manualsLoading, refetch: refetchManuals } = useListManuals();
+  const deleteManual = useDeleteManual();
+  const queryClient = useQueryClient();
+  const [recentQs, setRecentQs] = useState<RecentQuestion[]>([]);
+  const [weekCount, setWeekCount] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  useEffect(() => {
+    setRecentQs(getRecentQuestions());
+    setWeekCount(countQuestionsThisWeek());
+  }, []);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    await Promise.all([refetchStats(), refetchManuals()]);
+    setRecentQs(getRecentQuestions());
+    setWeekCount(countQuestionsThisWeek());
+    setIsRefreshing(false);
+  };
+
+  const handleDelete = async (id: number) => {
+    try {
+      await deleteManual.mutateAsync({ id });
+      queryClient.invalidateQueries({ queryKey: getListManualsQueryKey() });
+      toast.success("Manual deleted");
+    } catch {
+      toast.error("Failed to delete manual");
+    }
+  };
+
+  const lastQ = recentQs[0];
+
   return (
-    <div className="max-w-6xl mx-auto space-y-8">
-      <div>
-        <h1 className="text-3xl font-bold font-mono tracking-tight text-foreground">SYSTEM_DASHBOARD</h1>
-        <p className="text-muted-foreground font-mono mt-2">Engineering Manual Knowledge Graph status and operations.</p>
+    <div className="max-w-7xl mx-auto px-6 py-8 w-full space-y-6">
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">
+            {greeting()}, Engineer.
+          </h1>
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-sm text-gray-400">Knowledge Base</span>
+            <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100 text-[10px] px-1.5 py-0 font-medium">
+              Admin
+            </Badge>
+          </div>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-2 text-gray-600"
+          onClick={handleRefresh}
+          disabled={isRefreshing}
+        >
+          <RefreshCw className={cn("w-3.5 h-3.5", isRefreshing && "animate-spin")} />
+          Refresh
+        </Button>
       </div>
 
-      <GlobalStatsDashboard />
+      {/* Stat cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {statsLoading ? (
+          [1, 2, 3, 4].map((i) => (
+            <div key={i} className="bg-white rounded-lg border border-gray-200 p-5">
+              <Skeleton className="h-8 w-16 mb-2" />
+              <Skeleton className="h-4 w-24" />
+            </div>
+          ))
+        ) : (
+          <>
+            <StatCard
+              value={stats?.totalManuals ?? 0}
+              label="Documents"
+              sub={`${stats?.completedManuals ?? 0} completed`}
+              accent="blue"
+            />
+            <StatCard
+              value={weekCount}
+              label="Questions this week"
+              sub={weekCount === 0 ? "None yet" : "From Ask Engineer"}
+              accent="purple"
+            />
+            <StatCard
+              value={(stats?.totalEntities ?? 0).toLocaleString()}
+              label="Entities extracted"
+              sub={`${(stats?.totalRelationships ?? 0).toLocaleString()} relationships`}
+              accent="orange"
+            />
+            <div className="bg-teal-50 rounded-lg border border-teal-100 p-5 flex flex-col gap-1.5">
+              <div className="flex items-center gap-1.5 text-teal-600 text-xs font-semibold mb-1">
+                <MessageSquare className="w-3.5 h-3.5" />
+                Last question
+              </div>
+              {lastQ ? (
+                <>
+                  <p className="text-sm font-medium text-gray-800 line-clamp-2 leading-snug">
+                    "{lastQ.question}"
+                  </p>
+                  <p className="text-xs text-teal-500">
+                    {formatDistanceToNow(new Date(lastQ.timestamp))} ago
+                  </p>
+                </>
+              ) : (
+                <p className="text-sm text-gray-400 italic">No questions asked yet</p>
+              )}
+            </div>
+          </>
+        )}
+      </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-1">
-          <UploadPDF />
-        </div>
-        <div className="lg:col-span-2 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-mono font-bold text-foreground">INGESTED_MANUALS</h2>
-            <div className="h-px flex-1 bg-border ml-4"></div>
+      {/* Main panels */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        {/* Knowledge Base */}
+        <div className="lg:col-span-3 bg-white rounded-lg border border-gray-200">
+          <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
+            <BookOpen className="w-4 h-4 text-gray-500" />
+            <h2 className="text-sm font-semibold text-gray-700">Knowledge Base</h2>
           </div>
-          <ManualList />
+          <div className="p-5 space-y-4">
+            {manualsLoading ? (
+              <div className="space-y-3">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="flex gap-3 items-center">
+                    <Skeleton className="w-8 h-8 rounded" />
+                    <div className="flex-1">
+                      <Skeleton className="h-4 w-3/4 mb-1" />
+                      <Skeleton className="h-3 w-1/3" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : manuals?.length ? (
+              <div>
+                {manuals.map((manual) => (
+                  <ManualRow key={manual.id} manual={manual} onDelete={handleDelete} />
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center py-10 text-center">
+                <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mb-3">
+                  <BookOpen className="w-6 h-6 text-gray-300" />
+                </div>
+                <p className="text-sm text-gray-500 font-medium">No documents uploaded yet</p>
+                <p className="text-xs text-gray-400 mt-1">Upload a PDF to get started</p>
+              </div>
+            )}
+
+            <div className="pt-2 border-t border-gray-100">
+              <UploadPDF />
+            </div>
+          </div>
+        </div>
+
+        {/* Recent Questions */}
+        <div className="lg:col-span-2 bg-white rounded-lg border border-gray-200">
+          <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
+            <MessageSquare className="w-4 h-4 text-gray-500" />
+            <h2 className="text-sm font-semibold text-gray-700">Recent Questions</h2>
+          </div>
+          <div className="divide-y divide-gray-50">
+            {recentQs.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-10 text-center px-5">
+                <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mb-3">
+                  <MessageSquare className="w-6 h-6 text-gray-300" />
+                </div>
+                <p className="text-sm text-gray-500 font-medium">No questions yet</p>
+                <p className="text-xs text-gray-400 mt-1">Use Ask Engineer to query your documents</p>
+                <Link href="/ask">
+                  <Button variant="outline" size="sm" className="mt-4 text-xs gap-1.5">
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    Go to Ask Engineer
+                  </Button>
+                </Link>
+              </div>
+            ) : (
+              recentQs.slice(0, 12).map((q) => (
+                <div key={q.id} className="px-5 py-3">
+                  <p className="text-sm text-gray-700 leading-snug">{q.question}</p>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <Clock className="w-3 h-3 text-gray-300" />
+                    <span className="text-[11px] text-gray-400">
+                      {formatDistanceToNow(new Date(q.timestamp))} ago
+                    </span>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+          {recentQs.length > 0 && (
+            <div className="px-5 py-3 border-t border-gray-100">
+              <Link href="/ask">
+                <Button variant="ghost" size="sm" className="text-xs text-gray-500 gap-1.5 w-full justify-center hover:text-blue-600">
+                  Open Ask Engineer
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </Button>
+              </Link>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -5,6 +5,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { saveRecentQuestion } from "@/hooks/use-recent-questions";
 
 interface Citation {
   manualId: number;
@@ -39,6 +40,8 @@ export default function AskPage() {
   const handleSend = async () => {
     const question = input.trim();
     if (!question || isLoading) return;
+
+    saveRecentQuestion(question);
 
     const userMsg: Message = {
       id: crypto.randomUUID(),
@@ -108,168 +111,173 @@ export default function AskPage() {
   };
 
   return (
-    <div className="h-full flex gap-6">
-      {/* Chat panel */}
-      <div className="flex-1 flex flex-col min-h-0">
-        <div className="mb-4 shrink-0">
-          <h1 className="text-2xl font-bold font-mono tracking-tight text-foreground">ASK_ENGINEER</h1>
-          <p className="text-sm text-muted-foreground font-mono mt-1">
-            Ask anything about your uploaded manuals. Answers draw from both manual text (RAG) and the knowledge graph.
-          </p>
-        </div>
+    <div className="h-full flex flex-col max-w-7xl mx-auto w-full px-6 py-6">
+      {/* Header */}
+      <div className="mb-5 shrink-0">
+        <h1 className="text-xl font-bold text-gray-900">Ask Engineer</h1>
+        <p className="text-sm text-gray-500 mt-0.5">
+          Ask anything about your uploaded manuals. Answers draw from both manual text and the knowledge graph.
+        </p>
+      </div>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto space-y-4 pr-1 min-h-0">
-          {messages.length === 0 && (
-            <div className="flex flex-col items-center justify-center h-full text-center space-y-4 opacity-60">
-              <MessageSquare className="w-12 h-12 text-muted-foreground" />
-              <div className="font-mono text-sm text-muted-foreground">
-                <p className="font-medium text-foreground">Ready to answer engineering questions</p>
-                <p className="mt-2">Examples:</p>
-                <p className="mt-1 italic">"What are the main components of the hydraulic system?"</p>
-                <p className="italic">"How does the cooling subsystem connect to the engine?"</p>
-                <p className="italic">"What safety procedures apply before maintenance?"</p>
+      <div className="flex-1 flex gap-5 min-h-0">
+        {/* Chat panel */}
+        <div className="flex-1 flex flex-col min-h-0 bg-white rounded-lg border border-gray-200">
+          {/* Messages */}
+          <div className="flex-1 overflow-y-auto space-y-4 p-5 min-h-0">
+            {messages.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full text-center space-y-3">
+                <div className="w-14 h-14 bg-blue-50 rounded-full flex items-center justify-center">
+                  <MessageSquare className="w-7 h-7 text-blue-400" />
+                </div>
+                <div>
+                  <p className="font-medium text-gray-700">Ready to answer engineering questions</p>
+                  <p className="mt-3 text-sm text-gray-400">Examples:</p>
+                  <p className="mt-1 text-sm text-gray-400 italic">"What are the main components of the hydraulic system?"</p>
+                  <p className="text-sm text-gray-400 italic">"How does the cooling subsystem connect to the engine?"</p>
+                  <p className="text-sm text-gray-400 italic">"What safety procedures apply before maintenance?"</p>
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={cn("flex gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
-            >
-              {msg.role === "assistant" && (
-                <div className="w-8 h-8 rounded-md bg-primary/10 border border-primary/30 flex items-center justify-center shrink-0 mt-0.5">
-                  <Bot className="w-4 h-4 text-primary" />
-                </div>
-              )}
+            {messages.map((msg) => (
+              <div
+                key={msg.id}
+                className={cn("flex gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
+              >
+                {msg.role === "assistant" && (
+                  <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0 mt-0.5">
+                    <Bot className="w-4 h-4 text-blue-600" />
+                  </div>
+                )}
 
-              <div className={cn("max-w-[80%] space-y-2", msg.role === "user" ? "items-end" : "items-start")}>
-                <div
-                  className={cn(
-                    "rounded-lg px-4 py-3 text-sm font-mono leading-relaxed",
-                    msg.role === "user"
-                      ? "bg-primary text-primary-foreground"
-                      : "bg-card border border-border text-foreground"
-                  )}
-                >
-                  {msg.pending ? (
-                    <span className="flex items-center gap-2 text-muted-foreground">
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      Searching manuals and graph...
-                    </span>
-                  ) : (
-                    <span className="whitespace-pre-wrap">{msg.content}</span>
-                  )}
-                </div>
-
-                {/* Citations & graph entities */}
-                {!msg.pending && msg.role === "assistant" && (
-                  <div className="flex flex-wrap gap-2">
-                    {msg.citations && msg.citations.length > 0 && (
-                      <button
-                        onClick={() =>
-                          setSelectedCitations(
-                            selectedCitations === msg.citations ? null : msg.citations!
-                          )
-                        }
-                        className="flex items-center gap-1.5 text-[10px] font-mono text-muted-foreground hover:text-foreground transition-colors border border-border/50 hover:border-border rounded px-2 py-1 bg-background"
-                      >
-                        <BookOpen className="w-3 h-3" />
-                        {msg.citations.length} source{msg.citations.length !== 1 ? "s" : ""}
-                      </button>
+                <div className={cn("max-w-[80%] space-y-2", msg.role === "user" ? "items-end" : "items-start")}>
+                  <div
+                    className={cn(
+                      "rounded-xl px-4 py-3 text-sm leading-relaxed",
+                      msg.role === "user"
+                        ? "bg-blue-600 text-white"
+                        : "bg-gray-50 border border-gray-200 text-gray-800"
                     )}
-                    {msg.graphEntities && msg.graphEntities.length > 0 && (
-                      <span className="flex items-center gap-1.5 text-[10px] font-mono text-muted-foreground border border-border/50 rounded px-2 py-1 bg-background">
-                        <Network className="w-3 h-3" />
-                        {msg.graphEntities.length} graph node{msg.graphEntities.length !== 1 ? "s" : ""}
+                  >
+                    {msg.pending ? (
+                      <span className="flex items-center gap-2 text-gray-400">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Searching manuals and graph...
                       </span>
+                    ) : (
+                      <span className="whitespace-pre-wrap">{msg.content}</span>
                     )}
+                  </div>
+
+                  {/* Citations & graph entities */}
+                  {!msg.pending && msg.role === "assistant" && (
+                    <div className="flex flex-wrap gap-2">
+                      {msg.citations && msg.citations.length > 0 && (
+                        <button
+                          onClick={() =>
+                            setSelectedCitations(
+                              selectedCitations === msg.citations ? null : msg.citations!
+                            )
+                          }
+                          className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-blue-600 transition-colors border border-gray-200 hover:border-blue-300 rounded-full px-3 py-1 bg-white"
+                        >
+                          <BookOpen className="w-3 h-3" />
+                          {msg.citations.length} source{msg.citations.length !== 1 ? "s" : ""}
+                        </button>
+                      )}
+                      {msg.graphEntities && msg.graphEntities.length > 0 && (
+                        <span className="flex items-center gap-1.5 text-xs text-gray-500 border border-gray-200 rounded-full px-3 py-1 bg-white">
+                          <Network className="w-3 h-3" />
+                          {msg.graphEntities.length} graph node{msg.graphEntities.length !== 1 ? "s" : ""}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {msg.role === "user" && (
+                  <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5">
+                    <User className="w-4 h-4 text-gray-500" />
                   </div>
                 )}
               </div>
-
-              {msg.role === "user" && (
-                <div className="w-8 h-8 rounded-md bg-secondary border border-border flex items-center justify-center shrink-0 mt-0.5">
-                  <User className="w-4 h-4 text-muted-foreground" />
-                </div>
-              )}
-            </div>
-          ))}
-          <div ref={bottomRef} />
-        </div>
-
-        {/* Input */}
-        <div className="shrink-0 pt-4 border-t border-border mt-4">
-          <div className="flex gap-2 items-end">
-            <Textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask a question about your engineering manuals... (Enter to send)"
-              className="resize-none font-mono text-sm min-h-[60px] max-h-[160px] bg-card border-border"
-              disabled={isLoading}
-              rows={2}
-            />
-            <Button
-              onClick={handleSend}
-              disabled={!input.trim() || isLoading}
-              size="icon"
-              className="h-[60px] w-[60px] shrink-0"
-            >
-              {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-            </Button>
-          </div>
-          <p className="text-[10px] font-mono text-muted-foreground mt-2">
-            Shift+Enter for new line • Answers cite manual pages and graph nodes
-          </p>
-        </div>
-      </div>
-
-      {/* Citations panel */}
-      {selectedCitations && selectedCitations.length > 0 && (
-        <div className="w-80 shrink-0 flex flex-col min-h-0">
-          <div className="flex items-center justify-between mb-3 shrink-0">
-            <h2 className="text-sm font-mono font-bold text-foreground uppercase tracking-wider">Sources</h2>
-            <button
-              onClick={() => setSelectedCitations(null)}
-              className="text-xs font-mono text-muted-foreground hover:text-foreground"
-            >
-              close
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto space-y-3 min-h-0">
-            {selectedCitations.map((c, i) => (
-              <Card key={i} className="bg-card border-border text-xs font-mono">
-                <CardHeader className="pb-2 pt-3 px-3">
-                  <CardTitle className="text-xs flex items-center gap-2 text-foreground">
-                    <BookOpen className="w-3 h-3 text-primary shrink-0" />
-                    <span className="truncate">{c.manualName}</span>
-                    {c.pageNumber && (
-                      <Badge variant="secondary" className="ml-auto text-[10px] shrink-0">
-                        p.{c.pageNumber}
-                      </Badge>
-                    )}
-                  </CardTitle>
-                </CardHeader>
-                <CardContent className="px-3 pb-3 space-y-2">
-                  <p className="text-muted-foreground leading-relaxed line-clamp-4">{c.excerpt}</p>
-                  {c.entityNames && c.entityNames.length > 0 && (
-                    <div className="flex flex-wrap gap-1 pt-1">
-                      {c.entityNames.map((name) => (
-                        <Badge key={name} variant="outline" className="text-[9px] text-primary border-primary/30">
-                          {name}
-                        </Badge>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
             ))}
+            <div ref={bottomRef} />
+          </div>
+
+          {/* Input */}
+          <div className="shrink-0 px-5 pb-5 border-t border-gray-100 pt-4">
+            <div className="flex gap-2 items-end">
+              <Textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask a question about your engineering manuals... (Enter to send)"
+                className="resize-none text-sm min-h-[52px] max-h-[160px] bg-gray-50 border-gray-200 rounded-xl text-gray-800 placeholder:text-gray-400"
+                disabled={isLoading}
+                rows={2}
+              />
+              <Button
+                onClick={handleSend}
+                disabled={!input.trim() || isLoading}
+                size="icon"
+                className="h-[52px] w-[52px] shrink-0 rounded-xl bg-blue-600 hover:bg-blue-700"
+              >
+                {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              </Button>
+            </div>
+            <p className="text-xs text-gray-400 mt-2">
+              Shift+Enter for new line · Answers cite manual pages and graph nodes
+            </p>
           </div>
         </div>
-      )}
+
+        {/* Citations panel */}
+        {selectedCitations && selectedCitations.length > 0 && (
+          <div className="w-80 shrink-0 flex flex-col min-h-0 bg-white rounded-lg border border-gray-200">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 shrink-0">
+              <h2 className="text-sm font-semibold text-gray-700">Sources</h2>
+              <button
+                onClick={() => setSelectedCitations(null)}
+                className="text-xs text-gray-400 hover:text-gray-600"
+              >
+                close
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+              {selectedCitations.map((c, i) => (
+                <Card key={i} className="bg-gray-50 border-gray-200 text-xs shadow-none">
+                  <CardHeader className="pb-2 pt-3 px-3">
+                    <CardTitle className="text-xs flex items-center gap-2 text-gray-700">
+                      <BookOpen className="w-3 h-3 text-blue-500 shrink-0" />
+                      <span className="truncate">{c.manualName}</span>
+                      {c.pageNumber && (
+                        <Badge variant="secondary" className="ml-auto text-[10px] shrink-0 bg-gray-200 text-gray-600">
+                          p.{c.pageNumber}
+                        </Badge>
+                      )}
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="px-3 pb-3 space-y-2">
+                    <p className="text-gray-500 leading-relaxed line-clamp-4">{c.excerpt}</p>
+                    {c.entityNames && c.entityNames.length > 0 && (
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {c.entityNames.map((name) => (
+                          <Badge key={name} variant="outline" className="text-[9px] text-blue-600 border-blue-200">
+                            {name}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
