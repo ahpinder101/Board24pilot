@@ -19,16 +19,51 @@ import {
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-// ─── Cost model (gpt-4o-class pricing via Replit proxy) ───────────────────────
-// Entity chunk:   ~2,100 input tokens + up to 8,192 output tokens
-// Rel chunk:      ~2,600 input tokens (includes entity list) + up to 8,192 output tokens
-// Fixed calls:    Pass 1 (structure) + Pass 6 (hierarchy) ≈ 2 calls
-const COST_ENTITY_PER_CHUNK = 0.09;   // $
-const COST_REL_PER_CHUNK    = 0.11;   // $
-const COST_FIXED            = 0.18;   // 2 fixed calls
+// ─── Token-based cost model ────────────────────────────────────────────────────
+//
+// Computed from actual prompt character counts in extractionPipeline.ts:
+//
+//  Pass 4 (entity, 5 000-char chunks):
+//    Input  = system prompt (~1 320 chars incl. docType+overview) +
+//             user prefix (~70 chars) + chunk (5 000 chars)
+//           = ~6 390 chars / 3.5 chars·token⁻¹ = ~1 826 tokens
+//    Output = max_completion_tokens 8 192; typical 20 entities × ~80 tok = ~1 600;
+//             dense doc (35 entities) = ~2 800; sparse (8 entities) = ~640
+//
+//  Pass 5 (relationship, 4 000-char chunks):
+//    Input  = system base (~820 chars) + entity list (~20 chars × entity count)
+//             + user prefix (~80 chars) + chunk (4 000 chars)
+//           ≈ ~2 314 tokens at 160 entities (grows ~6 tok per additional entity)
+//    Output = max 8 192; typical 25 rels × ~50 tok = ~1 250; dense = ~2 500
+//
+//  Pass 1 (structure, 1 call): ~2 400 input + ~600 output
+//  Pass 6 (hierarchy, 1 call): ~1 528 input + ~600 output
+//
+// Reference pricing: gpt-4o public rates ($2.50 / 1M input, $10.00 / 1M output).
+// Model "gpt-5.4" is Replit's internal alias — actual billing rate is unknown;
+// the table below shows the gpt-4o baseline. Multiply as needed.
+
+const INPUT_PER_TOKEN  = 2.50  / 1_000_000;  // gpt-4o reference
+const OUTPUT_PER_TOKEN = 10.00 / 1_000_000;
+
+// Per-call token budgets (from prompt analysis above)
+const ENTITY_INPUT_TOKENS    = 1826;
+const ENTITY_OUTPUT_LOW      = 640;    // sparse doc
+const ENTITY_OUTPUT_TYPICAL  = 1600;   // avg
+const ENTITY_OUTPUT_HIGH     = 2800;   // dense doc
+
+const REL_INPUT_BASE_TOKENS  = 1360;   // without entity list
+const REL_INPUT_PER_ENTITY   = 6;      // ~20 chars / 3.5 chars·token⁻¹
+const REL_OUTPUT_LOW         = 500;
+const REL_OUTPUT_TYPICAL     = 1250;
+const REL_OUTPUT_HIGH        = 2500;
+
+// Fixed calls (Pass 1 + Pass 6)
+const PASS1_COST = (2400 * INPUT_PER_TOKEN) + (600  * OUTPUT_PER_TOKEN);  // ~$0.012
+const PASS6_COST = (1528 * INPUT_PER_TOKEN) + (600  * OUTPUT_PER_TOKEN);  // ~$0.010
 
 function pagesToEntityChunks(pages: number) {
-  return Math.max(1, Math.ceil(pages / 12)); // ~5,000 chars / 400 chars per page
+  return Math.max(1, Math.ceil(pages / 12)); // 5,000 chars / ~400 chars per page
 }
 function entityChunksToRelChunks(entityChunks: number) {
   return Math.max(1, Math.ceil(entityChunks * 0.75));
@@ -37,27 +72,53 @@ function entityChunksToRelChunks(entityChunks: number) {
 interface CostBreakdown {
   entityChunks: number;
   relChunks: number;
-  entityCost: number;
-  relCost: number;
+  entityInputTokens: number;
+  relInputTokens: number;
+  entityOutputRange: [number, number];  // [typical, high]
+  relOutputRange: [number, number];
+  entityCostLow: number;
+  entityCostHigh: number;
+  relCostLow: number;
+  relCostHigh: number;
   fixedCost: number;
-  totalLow: number;
-  totalHigh: number;
+  totalLow: number;       // low output density scenario
+  totalTypical: number;
+  totalHigh: number;      // high output density scenario
 }
 
 function computeCost(pages: number): CostBreakdown {
   const entityChunks = pagesToEntityChunks(pages);
   const relChunks = entityChunksToRelChunks(entityChunks);
-  const entityCost = entityChunks * COST_ENTITY_PER_CHUNK;
-  const relCost = relChunks * COST_REL_PER_CHUNK;
-  const totalMid = entityCost + relCost + COST_FIXED;
+
+  // Entity list grows with entity chunk count: ~20 entities/chunk × 6 tokens/entity
+  const estimatedEntities = entityChunks * 20;
+  const relInputTokens = REL_INPUT_BASE_TOKENS + (estimatedEntities * REL_INPUT_PER_ENTITY);
+
+  const entityCostLow  = entityChunks * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_LOW     * OUTPUT_PER_TOKEN));
+  const entityCostHigh = entityChunks * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_HIGH    * OUTPUT_PER_TOKEN));
+  const entityCostTyp  = entityChunks * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_TYPICAL * OUTPUT_PER_TOKEN));
+
+  const relCostLow     = relChunks * ((relInputTokens * INPUT_PER_TOKEN) + (REL_OUTPUT_LOW     * OUTPUT_PER_TOKEN));
+  const relCostHigh    = relChunks * ((relInputTokens * INPUT_PER_TOKEN) + (REL_OUTPUT_HIGH    * OUTPUT_PER_TOKEN));
+  const relCostTyp     = relChunks * ((relInputTokens * INPUT_PER_TOKEN) + (REL_OUTPUT_TYPICAL * OUTPUT_PER_TOKEN));
+
+  const fixedCost = PASS1_COST + PASS6_COST;
+
   return {
     entityChunks,
     relChunks,
-    entityCost,
-    relCost,
-    fixedCost: COST_FIXED,
-    totalLow: totalMid * 0.6,
-    totalHigh: totalMid * 1.5,
+    entityInputTokens: ENTITY_INPUT_TOKENS,
+    relInputTokens,
+    entityOutputRange: [ENTITY_OUTPUT_TYPICAL, ENTITY_OUTPUT_HIGH],
+    relOutputRange:    [REL_OUTPUT_TYPICAL,    REL_OUTPUT_HIGH],
+    entityCostLow,
+    entityCostHigh,
+    relCostLow,
+    relCostHigh,
+    fixedCost,
+    totalLow:     entityCostLow  + relCostLow  + fixedCost,
+    totalTypical: entityCostTyp  + relCostTyp  + fixedCost,
+    totalHigh:    entityCostHigh + relCostHigh + fixedCost,
   };
 }
 
@@ -343,43 +404,77 @@ export default function ManualGraphPage() {
               </div>
 
               {/* Cost breakdown */}
-              <div className="rounded-xl border border-border bg-card p-5 space-y-3">
-                <div className="flex items-center gap-2 mb-1">
-                  <DollarSign className="w-4 h-4 text-muted-foreground" />
-                  <h3 className="font-semibold text-foreground text-sm">Cost estimate</h3>
-                  <span className="text-xs text-muted-foreground">(based on gpt-4o-class pricing)</span>
+              <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <DollarSign className="w-4 h-4 text-muted-foreground" />
+                    <h3 className="font-semibold text-foreground text-sm">Cost estimate</h3>
+                  </div>
+                  <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">gpt-4o reference rates</span>
                 </div>
 
-                <div className="divide-y divide-border text-sm">
-                  <div className="flex justify-between py-2">
-                    <span className="text-muted-foreground">Entity extraction</span>
-                    <span className="font-mono">
-                      {cost.entityChunks} calls × ${ COST_ENTITY_PER_CHUNK.toFixed(2)}
-                      <span className="text-muted-foreground ml-2">= ${cost.entityCost.toFixed(2)}</span>
-                    </span>
+                {/* Per-call token breakdown */}
+                <div className="rounded-lg border border-border overflow-hidden text-xs font-mono">
+                  <div className="grid grid-cols-4 bg-muted/60 px-3 py-1.5 text-muted-foreground font-semibold">
+                    <span>Call type</span>
+                    <span className="text-right">Input tok</span>
+                    <span className="text-right">Output tok</span>
+                    <span className="text-right">$/call range</span>
                   </div>
-                  <div className="flex justify-between py-2">
-                    <span className="text-muted-foreground">Relationship extraction</span>
-                    <span className="font-mono">
-                      {cost.relChunks} calls × ${COST_REL_PER_CHUNK.toFixed(2)}
-                      <span className="text-muted-foreground ml-2">= ${cost.relCost.toFixed(2)}</span>
-                    </span>
+                  <div className="divide-y divide-border">
+                    <div className="grid grid-cols-4 px-3 py-2 bg-background">
+                      <span className="text-muted-foreground">Entity (×{cost.entityChunks})</span>
+                      <span className="text-right">{cost.entityInputTokens.toLocaleString()}</span>
+                      <span className="text-right">{ENTITY_OUTPUT_LOW}–{ENTITY_OUTPUT_HIGH.toLocaleString()}</span>
+                      <span className="text-right">
+                        ${(cost.entityCostLow / cost.entityChunks).toFixed(3)}–${(cost.entityCostHigh / cost.entityChunks).toFixed(3)}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-4 px-3 py-2 bg-background">
+                      <span className="text-muted-foreground">Relation (×{cost.relChunks})</span>
+                      <span className="text-right">{cost.relInputTokens.toLocaleString()}</span>
+                      <span className="text-right">{REL_OUTPUT_LOW}–{REL_OUTPUT_HIGH.toLocaleString()}</span>
+                      <span className="text-right">
+                        ${(cost.relCostLow / cost.relChunks).toFixed(3)}–${(cost.relCostHigh / cost.relChunks).toFixed(3)}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-4 px-3 py-2 bg-background">
+                      <span className="text-muted-foreground">Fixed (×2)</span>
+                      <span className="text-right">~1,960</span>
+                      <span className="text-right">~600</span>
+                      <span className="text-right text-muted-foreground">${(cost.fixedCost / 2).toFixed(3)}</span>
+                    </div>
                   </div>
-                  <div className="flex justify-between py-2">
-                    <span className="text-muted-foreground">Structure + hierarchy (fixed)</span>
-                    <span className="font-mono text-muted-foreground">${cost.fixedCost.toFixed(2)}</span>
+                </div>
+
+                {/* Total row */}
+                <div className="flex items-end justify-between border-t border-border pt-3">
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-0.5">
+                      {cost.entityChunks + cost.relChunks + 2} total AI calls
+                      · {((cost.entityChunks * cost.entityInputTokens) + (cost.relChunks * cost.relInputTokens) + 3960).toLocaleString()} input tokens
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Output varies by document density (range = sparse → dense content)
+                    </p>
                   </div>
-                  <div className="flex justify-between pt-3">
-                    <span className="font-semibold text-foreground">Estimated total</span>
-                    <span className="font-mono font-bold text-foreground text-base">
+                  <div className="text-right">
+                    <div className="text-xs text-muted-foreground mb-0.5">Sparse → Dense</div>
+                    <div className="font-mono font-bold text-foreground text-lg">
                       ${cost.totalLow.toFixed(2)} – ${cost.totalHigh.toFixed(2)}
-                    </span>
+                    </div>
+                    <div className="text-xs text-muted-foreground">typical: ~${cost.totalTypical.toFixed(2)}</div>
                   </div>
                 </div>
 
-                <p className="text-xs text-muted-foreground pt-1">
-                  Estimates assume average text density. Actual cost may vary ±40% depending on model pricing and token usage.
-                </p>
+                {/* Model pricing disclaimer */}
+                <div className="flex items-start gap-2 text-xs text-muted-foreground bg-muted/50 rounded-lg px-3 py-2 border border-border">
+                  <span className="shrink-0 font-semibold text-foreground/60">⚠</span>
+                  <span>
+                    Model <code className="bg-muted px-1 rounded">gpt-5.4</code> is Replit's internal alias — actual per-token billing may differ from these gpt-4o reference rates.
+                    Token counts are exact (computed from real prompt sizes); only the dollar rate is uncertain.
+                  </span>
+                </div>
               </div>
 
               {/* Confirm + Extract */}
@@ -396,7 +491,7 @@ export default function ManualGraphPage() {
                   className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm transition-all active:scale-[0.98] shadow"
                 >
                   <Zap className="w-4 h-4" />
-                  Review &amp; Confirm ({clampedPages.toLocaleString()} pages · ~${((cost.totalLow + cost.totalHigh) / 2).toFixed(2)})
+                  Review &amp; Confirm ({clampedPages.toLocaleString()} pages · ~${cost.totalTypical.toFixed(2)} typical)
                 </button>
               ) : (
                 <div className="rounded-xl border-2 border-slate-800 bg-slate-50 p-5 space-y-3">
