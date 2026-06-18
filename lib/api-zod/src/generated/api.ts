@@ -215,6 +215,53 @@ export const GetManualStatsResponse = zod.object({
 
 
 /**
+ * @summary Get AI-computed extraction plan based on actual document content
+ */
+export const GetExtractionPlanParams = zod.object({
+  "id": zod.coerce.number()
+})
+
+export const GetExtractionPlanResponse = zod.object({
+  "totalTextChars": zod.number(),
+  "contentPages": zod.number(),
+  "avgCharsPerPage": zod.number(),
+  "densityLabel": zod.string(),
+  "tiers": zod.object({
+  "quick": zod.object({
+  "pages": zod.number(),
+  "entityChunks": zod.number(),
+  "relChunks": zod.number(),
+  "totalInputTokens": zod.number(),
+  "outputTokensLow": zod.number(),
+  "outputTokensTypical": zod.number(),
+  "outputTokensHigh": zod.number(),
+  "rationale": zod.string()
+}),
+  "recommended": zod.object({
+  "pages": zod.number(),
+  "entityChunks": zod.number(),
+  "relChunks": zod.number(),
+  "totalInputTokens": zod.number(),
+  "outputTokensLow": zod.number(),
+  "outputTokensTypical": zod.number(),
+  "outputTokensHigh": zod.number(),
+  "rationale": zod.string()
+}),
+  "full": zod.object({
+  "pages": zod.number(),
+  "entityChunks": zod.number(),
+  "relChunks": zod.number(),
+  "totalInputTokens": zod.number(),
+  "outputTokensLow": zod.number(),
+  "outputTokensTypical": zod.number(),
+  "outputTokensHigh": zod.number(),
+  "rationale": zod.string()
+})
+})
+})
+
+
+/**
  * @summary Get the combined knowledge graph across all manuals
  */
 export const GetGlobalGraphResponse = zod.object({

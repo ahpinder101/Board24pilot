@@ -3,9 +3,12 @@ import {
   useGetManual,
   useGetManualGraph,
   useGetManualStats,
+  useGetExtractionPlan,
   getGetManualQueryKey,
   getGetManualGraphQueryKey,
   getGetManualStatsQueryKey,
+  getGetExtractionPlanQueryKey,
+  type ExtractionTier,
 } from "@workspace/api-client-react";
 import { GraphView } from "@/components/graph-view";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -14,135 +17,51 @@ import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Clock, CheckCircle2, AlertTriangle, FileText, Database, Network,
-  Layers, Play, ChevronDown, ChevronUp,
+  Layers, Play, ChevronDown, ChevronUp, Info,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-// ─── Token-based cost model ────────────────────────────────────────────────────
-// Computed from actual prompt character counts in extractionPipeline.ts.
-// Reference pricing: gpt-4o public rates ($2.50/1M input, $10/1M output).
-// gpt-5.4 is Replit's internal alias — token counts are exact, dollar rate is reference-only.
+// ─── Cost model ────────────────────────────────────────────────────────────────
+// Dollar amounts use gpt-4o public rates as a reference baseline.
+// gpt-5.4 is Replit's internal model alias — token counts from the API are exact,
+// the dollar rate is the only uncertain part.
+const INPUT_PRICE  = 2.50  / 1_000_000;   // $ per input token  (gpt-4o reference)
+const OUTPUT_PRICE = 10.00 / 1_000_000;   // $ per output token (gpt-4o reference)
 
-const INPUT_PER_TOKEN  = 2.50  / 1_000_000;
-const OUTPUT_PER_TOKEN = 10.00 / 1_000_000;
-
-const ENTITY_INPUT_TOKENS   = 1826;
-const ENTITY_OUTPUT_TYPICAL = 1600;
-const ENTITY_OUTPUT_HIGH    = 2800;
-
-const REL_INPUT_BASE    = 1360;
-const REL_INPUT_PER_ENT = 6;       // ~20 chars per entity name / 3.5 chars·tok⁻¹
-const REL_OUTPUT_TYPICAL = 1250;
-const REL_OUTPUT_HIGH    = 2500;
-
-const FIXED_COST = ((2400 + 1528) * INPUT_PER_TOKEN) + ((600 + 600) * OUTPUT_PER_TOKEN);
-
-function pagesToEntityChunks(pages: number) {
-  return Math.max(1, Math.ceil(pages / 12));
-}
-function entityChunksToRelChunks(ec: number) {
-  return Math.max(1, Math.ceil(ec * 0.75));
-}
-
-interface Cost { low: number; typical: number; high: number; entityChunks: number; relChunks: number; relInputTokens: number; }
-
-function computeCost(pages: number): Cost {
-  const ec = pagesToEntityChunks(pages);
-  const rc = entityChunksToRelChunks(ec);
-  const estEntities = ec * 20;
-  const relIn = REL_INPUT_BASE + estEntities * REL_INPUT_PER_ENT;
-
-  const eTyp  = ec * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_TYPICAL * OUTPUT_PER_TOKEN));
-  const eHigh = ec * ((ENTITY_INPUT_TOKENS * INPUT_PER_TOKEN) + (ENTITY_OUTPUT_HIGH    * OUTPUT_PER_TOKEN));
-  const rTyp  = rc * ((relIn * INPUT_PER_TOKEN) + (REL_OUTPUT_TYPICAL * OUTPUT_PER_TOKEN));
-  const rHigh = rc * ((relIn * INPUT_PER_TOKEN) + (REL_OUTPUT_HIGH    * OUTPUT_PER_TOKEN));
-
-  return {
-    low: eTyp * 0.4 + rTyp * 0.4 + FIXED_COST,
-    typical: eTyp + rTyp + FIXED_COST,
-    high: eHigh + rHigh + FIXED_COST,
-    entityChunks: ec,
-    relChunks: rc,
-    relInputTokens: relIn,
-  };
-}
-
-// ─── Recommendation engine ─────────────────────────────────────────────────────
-interface TierPages { quick: number; recommended: number; full: number }
-
-function computeTierPages(documentType: string | null | undefined, totalPages: number): TierPages {
-  const type = documentType?.toLowerCase() ?? "other";
-  const coverageByType: Record<string, { ratio: number; cap: number }> = {
-    maintenance_manual:      { ratio: 0.35, cap: 400 },
-    service_manual:          { ratio: 0.35, cap: 400 },
-    installation_manual:     { ratio: 0.45, cap: 350 },
-    operation_manual:        { ratio: 0.30, cap: 300 },
-    system_manual:           { ratio: 0.30, cap: 350 },
-    technical_specification: { ratio: 0.25, cap: 250 },
-    parts_catalog:           { ratio: 0.20, cap: 200 },
-    user_guide:              { ratio: 0.20, cap: 150 },
-  };
-
-  const cfg = coverageByType[type] ?? { ratio: 0.25, cap: 250 };
-
-  if (totalPages <= 80) {
-    return { quick: totalPages, recommended: totalPages, full: totalPages };
-  }
-
-  const quick = Math.min(Math.max(30, Math.round(totalPages * 0.10 / 10) * 10), 80);
-  const recRaw = Math.round((totalPages * cfg.ratio) / 10) * 10;
-  const recommended = Math.min(recRaw, cfg.cap, totalPages);
-  const full = totalPages;
-
-  return { quick, recommended, full };
+function tierCost(tier: ExtractionTier) {
+  const low     = tier.totalInputTokens * INPUT_PRICE + tier.outputTokensLow      * OUTPUT_PRICE;
+  const typical = tier.totalInputTokens * INPUT_PRICE + tier.outputTokensTypical  * OUTPUT_PRICE;
+  const high    = tier.totalInputTokens * INPUT_PRICE + tier.outputTokensHigh     * OUTPUT_PRICE;
+  return { low, typical, high };
 }
 
 type TierId = "quick" | "recommended" | "full";
 
-interface TierConfig {
-  id: TierId;
-  label: string;
-  emoji: string;
-  tagline: string;
-  outcomes: string[];
-  cautionNote?: string;
-}
+interface TierMeta { id: TierId; label: string; emoji: string; tagline: string; outcomes: string[]; warnLarge?: boolean }
 
-const TIER_CONFIG: TierConfig[] = [
+const TIER_META: TierMeta[] = [
   {
     id: "quick",
     label: "Quick Scan",
     emoji: "⚡",
-    tagline: "First chapter only",
-    outcomes: [
-      "Top-level machines and main systems",
-      "Primary connections between systems",
-      "Good for a first look or simple documents",
-    ],
+    tagline: "First section only",
+    outcomes: ["Top-level machines and main systems", "Primary connections between systems", "Fast — good for a first look"],
   },
   {
     id: "recommended",
     label: "Recommended",
     emoji: "★",
-    tagline: "Smart coverage for this document",
-    outcomes: [
-      "All major components and subsystems",
-      "Most processes and their relationships",
-      "Best balance of cost and completeness",
-    ],
+    tagline: "Balanced coverage",
+    outcomes: ["All major components and subsystems", "Most processes and their sequences", "Best balance of cost and completeness"],
   },
   {
     id: "full",
     label: "Full Analysis",
     emoji: "🔬",
     tagline: "Every page, every entity",
-    outcomes: [
-      "Complete part and sensor inventory",
-      "All procedures and their sequences",
-      "Maximum detail — takes longer and costs more",
-    ],
-    cautionNote: "High cost for large documents",
+    outcomes: ["Complete part and sensor inventory", "All procedures and their dependencies", "Maximum detail"],
+    warnLarge: true,
   },
 ];
 
@@ -153,7 +72,7 @@ export default function ManualGraphPage() {
 
   const [pollInterval, setPollInterval] = useState<number | undefined>(undefined);
   const [selectedTier, setSelectedTier] = useState<TierId>("recommended");
-  const [customPages, setCustomPages] = useState<number>(100);
+  const [customPages, setCustomPages] = useState<number>(0);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [isTriggering, setIsTriggering] = useState(false);
   const [extractError, setExtractError] = useState("");
@@ -166,6 +85,13 @@ export default function ManualGraphPage() {
     }
   });
 
+  const { data: plan, isLoading: isPlanLoading } = useGetExtractionPlan(manualId, {
+    query: {
+      queryKey: getGetExtractionPlanQueryKey(manualId),
+      enabled: !!manualId && manual?.status === "structure_complete",
+    }
+  });
+
   useEffect(() => {
     if (manual?.status === "processing") {
       setPollInterval(3000);
@@ -174,11 +100,12 @@ export default function ManualGraphPage() {
     }
   }, [manual?.status]);
 
+  // Initialise custom page slider from plan data
   useEffect(() => {
-    if (manual?.totalPages) {
-      setCustomPages(Math.min(150, manual.totalPages));
+    if (plan && customPages === 0) {
+      setCustomPages(plan.tiers.recommended.pages);
     }
-  }, [manual?.totalPages]);
+  }, [plan, customPages]);
 
   const { data: graphData, isLoading: isLoadingGraph } = useGetManualGraph(manualId, {
     query: {
@@ -194,27 +121,39 @@ export default function ManualGraphPage() {
     }
   });
 
-  const totalPages = manual?.totalPages ?? 0;
-  const tierPages = computeTierPages(manual?.documentType, totalPages);
+  // Active tier data — either from plan or a fallback custom page count
+  const activeTierData: ExtractionTier | null = plan
+    ? showAdvanced
+      ? (() => {
+          // Linearly interpolate between tiers based on custom page count
+          const cp = Math.min(customPages || plan.tiers.recommended.pages, manual?.totalPages ?? customPages);
+          const ratio = cp / (manual?.totalPages || 1);
+          const full = plan.tiers.full;
+          return {
+            pages: cp,
+            entityChunks: Math.max(1, Math.ceil(ratio * full.entityChunks)),
+            relChunks: Math.max(1, Math.ceil(ratio * full.relChunks)),
+            totalInputTokens: Math.round(ratio * full.totalInputTokens),
+            outputTokensLow: Math.round(ratio * full.outputTokensLow),
+            outputTokensTypical: Math.round(ratio * full.outputTokensTypical),
+            outputTokensHigh: Math.round(ratio * full.outputTokensHigh),
+            rationale: `Custom: ${cp.toLocaleString()} pages`,
+          };
+        })()
+      : plan.tiers[selectedTier]
+    : null;
 
-  // Pages to use based on selection
-  const pagesForTier: Record<TierId, number> = {
-    quick: tierPages.quick,
-    recommended: tierPages.recommended,
-    full: tierPages.full,
-  };
-  const activeTier = showAdvanced ? "recommended" : selectedTier;
-  const pages = showAdvanced ? Math.min(customPages, totalPages) : pagesForTier[selectedTier];
-  const cost = computeCost(pages);
+  const activeCost = activeTierData ? tierCost(activeTierData) : null;
 
   async function handleExtractEntities() {
+    if (!activeTierData) return;
     setIsTriggering(true);
     setExtractError("");
     try {
       const res = await fetch(`/api/manuals/${manualId}/extract-graph`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entityChunks: cost.entityChunks, relChunks: cost.relChunks }),
+        body: JSON.stringify({ entityChunks: activeTierData.entityChunks, relChunks: activeTierData.relChunks }),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -239,6 +178,8 @@ export default function ManualGraphPage() {
   }
 
   if (!manual) return <div>Manual not found</div>;
+
+  const totalPages = manual.totalPages ?? 0;
 
   return (
     <div className="h-full flex flex-col space-y-4 relative">
@@ -316,7 +257,7 @@ export default function ManualGraphPage() {
           </Card>
         )}
 
-        {/* ── Structure complete — tier picker ── */}
+        {/* ── Structure complete — plan picker ── */}
         {manual.status === "structure_complete" && (
           <div className="h-full overflow-y-auto">
             <div className="max-w-2xl mx-auto py-6 px-2 space-y-5">
@@ -331,19 +272,39 @@ export default function ManualGraphPage() {
                 </p>
               </div>
 
+              {/* Document stats summary (from real analysis) */}
+              {plan && (
+                <div className="flex items-start gap-2 text-xs bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-blue-800">
+                  <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-blue-400" />
+                  <span>
+                    Analysed your manual: <strong>{plan.contentPages.toLocaleString()} content pages</strong>{" "}
+                    · <strong>{plan.totalTextChars.toLocaleString()} chars</strong> of text
+                    · avg <strong>{plan.avgCharsPerPage.toLocaleString()} chars/page</strong> ({plan.densityLabel} content).
+                    Costs below are computed from your actual document.
+                  </span>
+                </div>
+              )}
+
               {/* Tier cards */}
-              {!showAdvanced && (
+              {isPlanLoading && (
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {TIER_CONFIG.map((tier) => {
-                    const tPages = pagesForTier[tier.id];
-                    const tCost = computeCost(tPages);
-                    const isSelected = selectedTier === tier.id;
-                    const isRec = tier.id === "recommended";
+                  {[0, 1, 2].map(i => <Skeleton key={i} className="h-52 rounded-xl" />)}
+                </div>
+              )}
+
+              {plan && !showAdvanced && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {TIER_META.map((meta) => {
+                    const tier = plan.tiers[meta.id];
+                    const cost = tierCost(tier);
+                    const isSelected = selectedTier === meta.id;
+                    const isRec = meta.id === "recommended";
+                    const isExpensive = meta.id === "full" && tier.pages > 400;
 
                     return (
                       <button
-                        key={tier.id}
-                        onClick={() => setSelectedTier(tier.id)}
+                        key={meta.id}
+                        onClick={() => setSelectedTier(meta.id)}
                         className={[
                           "relative text-left rounded-xl border-2 p-4 transition-all",
                           isSelected
@@ -360,39 +321,45 @@ export default function ManualGraphPage() {
                           </span>
                         )}
 
-                        <div className="text-2xl mb-2">{tier.emoji}</div>
-                        <div className="font-semibold text-sm mb-0.5">{tier.label}</div>
+                        <div className="text-2xl mb-2">{meta.emoji}</div>
+                        <div className="font-semibold text-sm mb-0.5">{meta.label}</div>
                         <div className={["text-xs mb-3", isSelected ? "text-white/70" : "text-muted-foreground"].join(" ")}>
-                          {tier.tagline}
+                          {tier.pages.toLocaleString()} pages · {tier.entityChunks + tier.relChunks + 2} AI calls
                         </div>
 
                         <ul className="space-y-1 mb-4">
-                          {tier.outcomes.map((o, i) => (
+                          {meta.outcomes.map((o, i) => (
                             <li key={i} className={["text-xs flex items-start gap-1.5", isSelected ? "text-white/80" : "text-muted-foreground"].join(" ")}>
-                              <span className="mt-0.5 shrink-0">·</span>
-                              <span>{o}</span>
+                              <span className="mt-0.5 shrink-0">·</span><span>{o}</span>
                             </li>
                           ))}
                         </ul>
 
-                        {tier.cautionNote && !isSelected && (
-                          <div className="text-xs text-orange-600 mb-2">⚠ {tier.cautionNote}</div>
+                        {isExpensive && !isSelected && (
+                          <div className="text-xs text-orange-600 mb-2">⚠ High cost for large doc</div>
                         )}
 
-                        <div className={["text-xs font-mono border-t pt-2", isSelected ? "border-white/20" : "border-border"].join(" ")}>
-                          <div className={isSelected ? "text-white/60" : "text-muted-foreground"}>
-                            ~{tPages.toLocaleString()} pages
-                          </div>
+                        <div className={["border-t pt-2 text-xs font-mono", isSelected ? "border-white/20" : "border-border"].join(" ")}>
                           <div className={["font-bold text-sm", isSelected ? "text-white" : "text-foreground"].join(" ")}>
-                            ~${tCost.typical.toFixed(2)}
-                            <span className={["font-normal text-xs ml-1", isSelected ? "text-white/50" : "text-muted-foreground"].join(" ")}>
-                              (${tCost.low.toFixed(2)}–${tCost.high.toFixed(2)})
-                            </span>
+                            ~${cost.typical.toFixed(2)}
+                          </div>
+                          <div className={["text-xs", isSelected ? "text-white/50" : "text-muted-foreground"].join(" ")}>
+                            ${cost.low.toFixed(2)} – ${cost.high.toFixed(2)} range
+                          </div>
+                          <div className={["text-xs mt-1", isSelected ? "text-white/40" : "text-muted-foreground/60"].join(" ")}>
+                            {tier.totalInputTokens.toLocaleString()} input tok
                           </div>
                         </div>
                       </button>
                     );
                   })}
+                </div>
+              )}
+
+              {/* Rationale from server */}
+              {plan && !showAdvanced && activeTierData && (
+                <div className="rounded-lg bg-muted/40 border border-border px-4 py-3 text-xs text-muted-foreground leading-relaxed">
+                  {activeTierData.rationale}
                 </div>
               )}
 
@@ -406,12 +373,12 @@ export default function ManualGraphPage() {
                   {showAdvanced ? "Hide advanced settings" : "Advanced: set exact page count"}
                 </button>
 
-                {showAdvanced && (
+                {showAdvanced && plan && (
                   <div className="mt-3 rounded-xl border border-border bg-card p-5 space-y-4">
                     <div className="flex justify-between items-center">
                       <label className="text-sm font-medium text-foreground">Pages to cover</label>
                       <span className="font-mono text-sm font-bold text-primary">
-                        {Math.min(customPages, totalPages).toLocaleString()} / {totalPages.toLocaleString()}
+                        {Math.min(customPages || plan.tiers.recommended.pages, totalPages).toLocaleString()} / {totalPages.toLocaleString()}
                       </span>
                     </div>
                     <input
@@ -419,98 +386,102 @@ export default function ManualGraphPage() {
                       min={Math.min(30, totalPages)}
                       max={totalPages || 1}
                       step={10}
-                      value={Math.min(customPages, totalPages)}
+                      value={Math.min(customPages || plan.tiers.recommended.pages, totalPages)}
                       onChange={(e) => setCustomPages(Number(e.target.value))}
                       className="w-full accent-slate-700"
                     />
                     <div className="flex justify-between text-xs text-muted-foreground">
-                      <span>30 pages</span>
+                      <span>{plan.tiers.quick.pages} pages (quick)</span>
                       <button
-                        onClick={() => setCustomPages(tierPages.recommended)}
+                        onClick={() => setCustomPages(plan.tiers.recommended.pages)}
                         className="text-amber-600 underline underline-offset-2 hover:text-amber-800"
                       >
-                        ★ recommended: {tierPages.recommended}
+                        ★ recommended: {plan.tiers.recommended.pages}
                       </button>
-                      <span>{totalPages.toLocaleString()} pages</span>
+                      <span>{totalPages.toLocaleString()} (full)</span>
                     </div>
 
-                    {/* Token breakdown table */}
-                    <div className="rounded-lg border border-border overflow-hidden text-xs font-mono mt-2">
-                      <div className="grid grid-cols-4 bg-muted/60 px-3 py-1.5 text-muted-foreground font-semibold">
-                        <span>Call type</span>
-                        <span className="text-right">Input tok</span>
-                        <span className="text-right">Output tok</span>
-                        <span className="text-right">$/call</span>
+                    {/* Token breakdown — from real numbers */}
+                    {activeTierData && (
+                      <div className="rounded-lg border border-border overflow-hidden text-xs font-mono mt-2">
+                        <div className="grid grid-cols-3 bg-muted/60 px-3 py-1.5 text-muted-foreground font-semibold">
+                          <span>Call type</span>
+                          <span className="text-right">AI calls</span>
+                          <span className="text-right">Input tokens</span>
+                        </div>
+                        <div className="divide-y divide-border">
+                          <div className="grid grid-cols-3 px-3 py-2 bg-background">
+                            <span className="text-muted-foreground">Entity extraction</span>
+                            <span className="text-right">{activeTierData.entityChunks}</span>
+                            <span className="text-right">{(activeTierData.entityChunks * 1826).toLocaleString()}</span>
+                          </div>
+                          <div className="grid grid-cols-3 px-3 py-2 bg-background">
+                            <span className="text-muted-foreground">Rel. extraction</span>
+                            <span className="text-right">{activeTierData.relChunks}</span>
+                            <span className="text-right">{(activeTierData.totalInputTokens - activeTierData.entityChunks * 1826 - 3928).toLocaleString()}</span>
+                          </div>
+                          <div className="grid grid-cols-3 px-3 py-2 bg-background">
+                            <span className="text-muted-foreground">Fixed (Pass 1+6)</span>
+                            <span className="text-right">2</span>
+                            <span className="text-right">3,928</span>
+                          </div>
+                          <div className="grid grid-cols-3 px-3 py-2 bg-muted/30 font-semibold">
+                            <span>Total</span>
+                            <span className="text-right">{activeTierData.entityChunks + activeTierData.relChunks + 2}</span>
+                            <span className="text-right">{activeTierData.totalInputTokens.toLocaleString()}</span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="divide-y divide-border">
-                        <div className="grid grid-cols-4 px-3 py-2 bg-background">
-                          <span className="text-muted-foreground">Entity (×{cost.entityChunks})</span>
-                          <span className="text-right">{ENTITY_INPUT_TOKENS.toLocaleString()}</span>
-                          <span className="text-right">{ENTITY_OUTPUT_TYPICAL}–{ENTITY_OUTPUT_HIGH}</span>
-                          <span className="text-right">$0.017–$0.033</span>
-                        </div>
-                        <div className="grid grid-cols-4 px-3 py-2 bg-background">
-                          <span className="text-muted-foreground">Relation (×{cost.relChunks})</span>
-                          <span className="text-right">{cost.relInputTokens.toLocaleString()}</span>
-                          <span className="text-right">{REL_OUTPUT_TYPICAL}–{REL_OUTPUT_HIGH}</span>
-                          <span className="text-right">$0.013–$0.026</span>
-                        </div>
-                        <div className="grid grid-cols-4 px-3 py-2 bg-background">
-                          <span className="text-muted-foreground">Fixed (×2)</span>
-                          <span className="text-right">~1,960</span>
-                          <span className="text-right">~600</span>
-                          <span className="text-right text-muted-foreground">$0.011</span>
-                        </div>
-                      </div>
-                    </div>
+                    )}
                     <p className="text-xs text-muted-foreground">
-                      Token counts computed from actual prompt sizes. Dollar rates use gpt-4o as reference —{" "}
-                      <code className="bg-muted px-1 rounded">gpt-5.4</code> (Replit's model alias) may differ.
+                      Input tokens are exact. Output tokens vary by content density — estimated{" "}
+                      {activeTierData?.outputTokensLow.toLocaleString()}–{activeTierData?.outputTokensHigh.toLocaleString()} total.
+                      Prices use gpt-4o as a reference rate; <code className="bg-muted px-1 rounded">gpt-5.4</code> (Replit's model) may differ.
                     </p>
                   </div>
                 )}
               </div>
 
               {/* Cost summary + CTA */}
-              <div className="rounded-xl border-2 border-slate-200 bg-slate-50 p-5 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="text-sm font-semibold text-foreground">
-                      {showAdvanced
-                        ? `Custom · ${Math.min(customPages, totalPages).toLocaleString()} pages`
-                        : `${TIER_CONFIG.find(t => t.id === selectedTier)?.label} · ${pagesForTier[selectedTier].toLocaleString()} pages`}
+              {activeTierData && activeCost && (
+                <div className="rounded-xl border-2 border-slate-200 bg-slate-50 p-5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm font-semibold text-foreground">
+                        {showAdvanced
+                          ? `Custom · ${Math.min(customPages || (plan?.tiers.recommended.pages ?? 0), totalPages).toLocaleString()} pages`
+                          : `${TIER_META.find(t => t.id === selectedTier)?.label} · ${activeTierData.pages.toLocaleString()} pages`}
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        {activeTierData.entityChunks + activeTierData.relChunks + 2} AI calls
+                        · {activeTierData.totalInputTokens.toLocaleString()} input tokens
+                        · ~{activeTierData.entityChunks * 20} entities expected
+                      </div>
                     </div>
-                    <div className="text-xs text-muted-foreground mt-0.5">
-                      {cost.entityChunks + cost.relChunks + 2} AI calls · ~{cost.entityChunks * 20} entities expected
+                    <div className="text-right">
+                      <div className="text-xs text-muted-foreground">Estimated cost (gpt-4o rates)</div>
+                      <div className="text-xl font-bold font-mono text-foreground">~${activeCost.typical.toFixed(2)}</div>
+                      <div className="text-xs text-muted-foreground font-mono">${activeCost.low.toFixed(2)} – ${activeCost.high.toFixed(2)}</div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <div className="text-xs text-muted-foreground">Estimated cost</div>
-                    <div className="text-xl font-bold font-mono text-foreground">
-                      ~${cost.typical.toFixed(2)}
+
+                  {extractError && (
+                    <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                      <AlertTriangle className="w-4 h-4 shrink-0" />
+                      {extractError}
                     </div>
-                    <div className="text-xs text-muted-foreground font-mono">
-                      ${cost.low.toFixed(2)} – ${cost.high.toFixed(2)}
-                    </div>
-                  </div>
+                  )}
+
+                  <button
+                    onClick={handleExtractEntities}
+                    disabled={isTriggering || isPlanLoading}
+                    className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white font-semibold text-sm transition-all active:scale-[0.98] shadow"
+                  >
+                    <Play className="w-4 h-4" />
+                    {isTriggering ? "Starting…" : "Extract Knowledge Graph"}
+                  </button>
                 </div>
-
-                {extractError && (
-                  <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                    <AlertTriangle className="w-4 h-4 shrink-0" />
-                    {extractError}
-                  </div>
-                )}
-
-                <button
-                  onClick={handleExtractEntities}
-                  disabled={isTriggering}
-                  className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white font-semibold text-sm transition-all active:scale-[0.98] shadow"
-                >
-                  <Play className="w-4 h-4" />
-                  {isTriggering ? "Starting…" : "Extract Knowledge Graph"}
-                </button>
-              </div>
+              )}
 
             </div>
           </div>

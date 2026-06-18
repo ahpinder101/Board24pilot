@@ -184,6 +184,31 @@ export interface ChatResponse {
   graphEntities?: string[];
 }
 
+export interface ExtractionTier {
+  pages: number;
+  entityChunks: number;
+  relChunks: number;
+  totalInputTokens: number;
+  outputTokensLow: number;
+  outputTokensTypical: number;
+  outputTokensHigh: number;
+  rationale: string;
+}
+
+export type ExtractionPlanTiers = {
+  quick: ExtractionTier;
+  recommended: ExtractionTier;
+  full: ExtractionTier;
+};
+
+export interface ExtractionPlan {
+  totalTextChars: number;
+  contentPages: number;
+  avgCharsPerPage: number;
+  densityLabel: string;
+  tiers: ExtractionPlanTiers;
+}
+
 export interface ChatHistoryMessage {
   id: number;
   role: string;

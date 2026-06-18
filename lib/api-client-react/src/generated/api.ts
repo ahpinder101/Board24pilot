@@ -24,6 +24,7 @@ import type {
   ChatRequest,
   ChatResponse,
   EntityDetail,
+  ExtractionPlan,
   GlobalStats,
   GraphData,
   HealthStatus,
@@ -849,6 +850,83 @@ export function useGetManualStats<TData = Awaited<ReturnType<typeof getManualSta
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetManualStatsQueryOptions(id,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getGetExtractionPlanUrl = (id: number,) => {
+
+
+
+
+  return `/api/manuals/${id}/extraction-plan`
+}
+
+/**
+ * @summary Get AI-computed extraction plan based on actual document content
+ */
+export const getExtractionPlan = async (id: number, options?: RequestInit): Promise<ExtractionPlan> => {
+
+  return customFetch<ExtractionPlan>(getGetExtractionPlanUrl(id),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetExtractionPlanQueryKey = (id: number,) => {
+    return [
+    `/api/manuals/${id}/extraction-plan`
+    ] as const;
+    }
+
+
+export const getGetExtractionPlanQueryOptions = <TData = Awaited<ReturnType<typeof getExtractionPlan>>, TError = ErrorType<void>>(id: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getExtractionPlan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetExtractionPlanQueryKey(id);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getExtractionPlan>>> = ({ signal }) => getExtractionPlan(id, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: !!(id), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getExtractionPlan>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetExtractionPlanQueryResult = NonNullable<Awaited<ReturnType<typeof getExtractionPlan>>>
+export type GetExtractionPlanQueryError = ErrorType<void>
+
+
+/**
+ * @summary Get AI-computed extraction plan based on actual document content
+ */
+
+export function useGetExtractionPlan<TData = Awaited<ReturnType<typeof getExtractionPlan>>, TError = ErrorType<void>>(
+ id: number, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getExtractionPlan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetExtractionPlanQueryOptions(id,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

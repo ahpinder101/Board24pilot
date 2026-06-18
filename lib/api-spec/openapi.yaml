@@ -214,6 +214,27 @@ paths:
               schema:
                 $ref: "#/components/schemas/ManualStats"
 
+  /manuals/{id}/extraction-plan:
+    get:
+      operationId: getExtractionPlan
+      tags: [manuals]
+      summary: Get AI-computed extraction plan based on actual document content
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Extraction plan with tier options derived from real text stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtractionPlan"
+        "404":
+          description: Not found
+
   /graph:
     get:
       operationId: getGlobalGraph
@@ -486,6 +507,50 @@ components:
           type: array
           items:
             type: string
+
+    ExtractionTier:
+      type: object
+      required: [pages, entityChunks, relChunks, totalInputTokens, outputTokensLow, outputTokensTypical, outputTokensHigh, rationale]
+      properties:
+        pages:
+          type: integer
+        entityChunks:
+          type: integer
+        relChunks:
+          type: integer
+        totalInputTokens:
+          type: integer
+        outputTokensLow:
+          type: integer
+        outputTokensTypical:
+          type: integer
+        outputTokensHigh:
+          type: integer
+        rationale:
+          type: string
+
+    ExtractionPlan:
+      type: object
+      required: [totalTextChars, contentPages, avgCharsPerPage, densityLabel, tiers]
+      properties:
+        totalTextChars:
+          type: integer
+        contentPages:
+          type: integer
+        avgCharsPerPage:
+          type: integer
+        densityLabel:
+          type: string
+        tiers:
+          type: object
+          required: [quick, recommended, full]
+          properties:
+            quick:
+              $ref: "#/components/schemas/ExtractionTier"
+            recommended:
+              $ref: "#/components/schemas/ExtractionTier"
+            full:
+              $ref: "#/components/schemas/ExtractionTier"
 
     ChatHistoryMessage:
       type: object
