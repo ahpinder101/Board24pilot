@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Database, LayoutDashboard, MessageSquare } from "lucide-react";
+import { LayoutDashboard, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface LayoutProps {
@@ -19,11 +19,9 @@ export function Layout({ children }: LayoutProps) {
       <header className="bg-white border-b border-gray-200 sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-6 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="bg-blue-600 p-1.5 rounded">
-              <Database className="w-4 h-4 text-white" />
-            </div>
+            <img src="/logo.png" alt="Machine Mesh" className="w-8 h-8 rounded object-cover" />
             <span className="font-semibold text-gray-900 text-sm tracking-tight">
-              Engineering Knowledge Base
+              Machine Mesh
             </span>
           </div>
 
