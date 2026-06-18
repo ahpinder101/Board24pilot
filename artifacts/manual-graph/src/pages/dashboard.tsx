@@ -104,7 +104,7 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
             <Button
               variant="ghost"
               size="icon"
-              className="w-7 h-7 text-gray-300 hover:text-blue-600 hover:bg-blue-50 opacity-0 group-hover:opacity-100 transition-opacity"
+              className="w-7 h-7 text-gray-300 hover:text-blue-600 hover:bg-blue-50 transition-opacity"
               asChild={false}
             >
               <ExternalLink className="w-3.5 h-3.5" />
@@ -114,7 +114,7 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
         <Button
           variant="ghost"
           size="icon"
-          className="w-7 h-7 text-gray-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-opacity"
+          className="w-7 h-7 text-gray-300 hover:text-red-500 hover:bg-red-50 transition-opacity"
           onClick={() => onDelete(manual.id)}
         >
           <Trash2 className="w-3.5 h-3.5" />
