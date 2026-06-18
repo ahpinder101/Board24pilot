@@ -1,5 +1,6 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import multer from "multer";
+import { Readable } from "stream";
 import { db } from "@workspace/db";
 import {
   manualsTable,
@@ -389,6 +390,51 @@ router.post("/manuals/:id/rechunk", async (req, res) => {
   } catch (err) {
     req.log.error({ err, manualId }, "Rechunk failed");
     res.status(500).json({ error: String(err) });
+  }
+});
+
+// GET /manuals/:id/pdf — stream the PDF from object storage inline (supports #page=N fragment)
+router.get("/manuals/:id/pdf", async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ error: "Invalid manual ID" });
+    return;
+  }
+
+  const [manual] = await db
+    .select()
+    .from(manualsTable)
+    .where(eq(manualsTable.id, id))
+    .limit(1);
+
+  if (!manual) {
+    res.status(404).json({ error: "Manual not found" });
+    return;
+  }
+
+  try {
+    const file = await storage.getObjectEntityFile(manual.objectPath);
+    const response = await storage.downloadObject(file, 3600);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(manual.filename)}"`);
+    res.setHeader("Cache-Control", "private, max-age=3600");
+
+    response.headers.forEach((value, key) => {
+      const lower = key.toLowerCase();
+      if (lower === "content-length") res.setHeader("Content-Length", value);
+      if (lower === "accept-ranges") res.setHeader("Accept-Ranges", value);
+    });
+
+    if (response.body) {
+      const nodeStream = Readable.fromWeb(response.body as import("stream/web").ReadableStream<Uint8Array>);
+      nodeStream.pipe(res);
+    } else {
+      res.end();
+    }
+  } catch (err) {
+    req.log.error({ err, manualId: id }, "Failed to serve PDF");
+    res.status(500).json({ error: "Failed to serve PDF" });
   }
 });
 
