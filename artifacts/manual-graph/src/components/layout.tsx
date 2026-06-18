@@ -20,8 +20,9 @@ export function Layout({ children }: LayoutProps) {
     <div className="h-screen bg-gray-50 flex flex-col overflow-hidden">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
-          <div className="flex items-center">
+          <div className="flex items-center gap-3">
             <img src="/logo.svg" alt="Machine Mesh" className="h-8 sm:h-10 w-auto" />
+            <img src="/board24-logo2.png" alt="Board24" className="h-7 sm:h-9 w-auto object-contain rounded" />
           </div>
 
           <nav className="flex items-center gap-0.5">
