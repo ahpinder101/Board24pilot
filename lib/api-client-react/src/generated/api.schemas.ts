@@ -28,6 +28,7 @@ export const ManualStatus = {
   processing: 'processing',
   completed: 'completed',
   failed: 'failed',
+  structure_complete: 'structure_complete',
 } as const;
 
 export interface Manual {

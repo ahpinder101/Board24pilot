@@ -366,18 +366,24 @@ router.post("/manuals/:id/reprocess-vision-pages", async (req, res) => {
 });
 
 // POST /manuals/:id/extract-graph — run entity/relationship extraction on existing OCR text
-// Responds 202 immediately; extraction runs in background (can take 2-5 min).
-// Poll GET /manuals/:id to check processingPass progress (1→4→5→6 = done).
+// Accepts optional body: { entityChunks?: number, relChunks?: number }
+// entityChunks controls how many 5,000-char chunks Pass 4 reads (~12 pages/chunk).
+// relChunks controls how many 4,000-char chunks Pass 5 reads (~10 pages/chunk).
+// Responds 202 immediately; extraction runs in background. Poll GET /manuals/:id for progress.
 router.post("/manuals/:id/extract-graph", async (req, res) => {
   const manualId = parseInt(req.params.id ?? "", 10);
   if (isNaN(manualId)) { res.status(400).json({ error: "Invalid manual id" }); return; }
   const [manual] = await db.select().from(manualsTable).where(eq(manualsTable.id, manualId));
   if (!manual) { res.status(404).json({ error: "Manual not found" }); return; }
-  res.status(202).json({ ok: true, manualId, message: "Graph extraction started — poll GET /api/manuals/:id for progress" });
+
+  const entityChunks = typeof req.body?.entityChunks === "number" ? Math.max(1, Math.min(req.body.entityChunks, 500)) : undefined;
+  const relChunks = typeof req.body?.relChunks === "number" ? Math.max(1, Math.min(req.body.relChunks, 500)) : undefined;
+
+  res.status(202).json({ ok: true, manualId, entityChunks, relChunks, message: "Graph extraction started — poll GET /api/manuals/:id for progress" });
   // Defer to next tick so the HTTP response flushes before the blocking AI work starts
   setImmediate(async () => {
     try {
-      const result = await extractGraphFromExistingText(manualId);
+      const result = await extractGraphFromExistingText(manualId, { entityChunks, relChunks });
       logger.info({ manualId, ...result }, "Graph extraction completed");
     } catch (err) {
       logger.error({ err, manualId }, "Graph extraction failed");

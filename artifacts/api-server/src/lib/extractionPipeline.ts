@@ -180,7 +180,8 @@ async function pass4EntityExtraction(
   manualId: number,
   fullText: string,
   documentType: string,
-  overview: string
+  overview: string,
+  maxChunks = 8
 ): Promise<ExtractedEntity[]> {
   await updateManualPass(manualId, 4);
 
@@ -188,7 +189,7 @@ async function pass4EntityExtraction(
   const chunks = chunkText(fullText, 5000);
   const seenNames = new Set<string>();
 
-  for (let ci = 0; ci < Math.min(chunks.length, 8); ci++) {
+  for (let ci = 0; ci < Math.min(chunks.length, maxChunks); ci++) {
     const chunk = chunks[ci];
     try {
       const response = await openai.chat.completions.create({
@@ -263,7 +264,8 @@ interface ExtractedRelationship {
 async function pass5RelationshipExtraction(
   manualId: number,
   fullText: string,
-  entities: ExtractedEntity[]
+  entities: ExtractedEntity[],
+  maxChunks = 6
 ): Promise<ExtractedRelationship[]> {
   await updateManualPass(manualId, 5);
 
@@ -271,7 +273,7 @@ async function pass5RelationshipExtraction(
   const allRelationships: ExtractedRelationship[] = [];
   const chunks = chunkText(fullText, 4000);
 
-  for (let ci = 0; ci < Math.min(chunks.length, 6); ci++) {
+  for (let ci = 0; ci < Math.min(chunks.length, maxChunks); ci++) {
     const chunk = chunks[ci];
     try {
       const response = await openai.chat.completions.create({
@@ -889,8 +891,14 @@ export async function reprocessPageRangeWithVision(
 // re-running the full pipeline or re-downloading the PDF.
 
 export async function extractGraphFromExistingText(
-  manualId: number
+  manualId: number,
+  opts?: { entityChunks?: number; relChunks?: number }
 ): Promise<{ entities: number; relationships: number }> {
+  const entityChunks = opts?.entityChunks ?? 8;
+  const relChunks = opts?.relChunks ?? 6;
+
+  await setManualStatus(manualId, "processing", { processingPass: 4 });
+
   const [manual] = await db
     .select({ documentType: manualsTable.documentType })
     .from(manualsTable)
@@ -909,6 +917,7 @@ export async function extractGraphFromExistingText(
     .join("\n\n");
 
   if (fullText.trim().length === 0) {
+    await setManualStatus(manualId, "structure_complete");
     throw new Error(`Manual ${manualId} has no OCR text — run vision OCR first`);
   }
 
@@ -923,12 +932,13 @@ export async function extractGraphFromExistingText(
     .set({ documentType: structure.documentType, updatedAt: new Date() })
     .where(eq(manualsTable.id, manualId));
 
-  // Pass 4: entity extraction
+  // Pass 4: entity extraction (configurable depth)
   const extractedEntities = await pass4EntityExtraction(
     manualId,
     fullText,
     structure.documentType,
-    structure.overview ?? ""
+    structure.overview ?? "",
+    entityChunks
   );
 
   const insertedEntities: Array<{ name: string; id: number }> = [];
@@ -952,11 +962,12 @@ export async function extractGraphFromExistingText(
     }
   }
 
-  // Pass 5: relationship extraction
+  // Pass 5: relationship extraction (configurable depth)
   const extractedRelationships = await pass5RelationshipExtraction(
     manualId,
     fullText,
-    extractedEntities
+    extractedEntities,
+    relChunks
   );
 
   const nameToId = new Map<string, number>();
@@ -986,8 +997,9 @@ export async function extractGraphFromExistingText(
   // Pass 6: ordering & hierarchy
   await pass6OrderingHierarchy(manualId, fullText, extractedEntities);
 
+  await setManualStatus(manualId, "completed", { processingPass: 7 });
   logger.info(
-    { manualId, entities: insertedEntities.length, relationships: relCount },
+    { manualId, entities: insertedEntities.length, relationships: relCount, entityChunks, relChunks },
     "Graph extraction from existing text complete"
   );
   return { entities: insertedEntities.length, relationships: relCount };
@@ -1070,77 +1082,13 @@ export async function runExtractionPipeline(
       pdfContent.fullText = ocrPages.map((p) => p.text).join("\n\n");
     }
 
-    // Pass 4: Entity extraction
-    const extractedEntities = await pass4EntityExtraction(
-      manualId,
-      pdfContent.fullText,
-      structure.documentType,
-      structure.overview ?? ""
-    );
-
-    // Insert entities into DB
-    const insertedEntities: Array<{ name: string; id: number }> = [];
-    for (const entity of extractedEntities) {
-      try {
-        const [inserted] = await db
-          .insert(entitiesTable)
-          .values({
-            manualId,
-            name: entity.name,
-            type: entity.type ?? "component",
-            description: entity.description ?? "",
-            properties: null,
-            pageReferences: entity.pageReferences ?? [],
-            orderIndex: entity.orderIndex ?? null,
-          })
-          .returning();
-        if (inserted) insertedEntities.push({ name: entity.name, id: inserted.id });
-      } catch (err) {
-        logger.warn({ err, entity: entity.name }, "Failed to insert entity");
-      }
-    }
-
-    // Pass 5: Relationship extraction
-    const extractedRelationships = await pass5RelationshipExtraction(
-      manualId,
-      pdfContent.fullText,
-      extractedEntities
-    );
-
-    // Build name→id map
-    const nameToId = new Map<string, number>();
-    for (const e of insertedEntities) {
-      if (e.id) nameToId.set(e.name.toLowerCase().trim(), e.id);
-    }
-
-    // Insert relationships
-    for (const rel of extractedRelationships) {
-      const sourceId = nameToId.get(rel.sourceName?.toLowerCase().trim() ?? "");
-      const targetId = nameToId.get(rel.targetName?.toLowerCase().trim() ?? "");
-      if (!sourceId || !targetId || sourceId === targetId) continue;
-      try {
-        await db.insert(relationshipsTable).values({
-          manualId,
-          sourceEntityId: sourceId,
-          targetEntityId: targetId,
-          type: rel.type ?? "connects_to",
-          label: rel.label ?? "",
-          orderIndex: rel.orderIndex ?? null,
-          properties: null,
-        });
-      } catch (err) {
-        logger.warn({ err }, "Failed to insert relationship");
-      }
-    }
-
-    // Pass 6: Ordering & hierarchy
-    await pass6OrderingHierarchy(manualId, pdfContent.fullText, extractedEntities);
-
-    // Pass 7: Embed chunks for RAG
+    // Pass 7: RAG chunking — runs automatically so search is ready immediately
     await pass7EmbedChunks(manualId, pdfContent.pages);
 
-    await setManualStatus(manualId, "completed", { processingPass: 7 });
-    logger.info({ manualId }, "Extraction pipeline completed");
+    // Stop here — entity/relationship extraction is triggered manually by the user
+    // so they can choose how much of the document to cover before incurring cost.
+    await setManualStatus(manualId, "structure_complete", { processingPass: 3 });
+    logger.info({ manualId }, "Structure passes complete — awaiting entity extraction");
   } catch (err) {
     logger.error({ err, manualId }, "Extraction pipeline failed");
     await setManualStatus(manualId, "failed", {
