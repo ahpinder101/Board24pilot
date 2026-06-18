@@ -1,9 +1,26 @@
 import { useState, useRef, useEffect } from "react";
-import { Bot, User, Send, BookOpen, Loader2, MessageSquare, ExternalLink, FileText, Paperclip, X, Image } from "lucide-react";
+import { Bot, User, Send, BookOpen, Loader2, MessageSquare, ExternalLink, FileText, Paperclip, X, Image, Globe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { saveRecentQuestion } from "@/hooks/use-recent-questions";
+
+const LANGUAGES = [
+  { code: "en",      label: "English",  native: "English"    },
+  { code: "pl",      label: "Polish",   native: "Polski"     },
+  { code: "es",      label: "Spanish",  native: "Español"    },
+  { code: "fr",      label: "French",   native: "Français"   },
+  { code: "de",      label: "German",   native: "Deutsch"    },
+  { code: "zh",      label: "Chinese",  native: "中文"        },
+] as const;
+
+type LangCode = (typeof LANGUAGES)[number]["code"];
+
+interface TranslationState {
+  lang: LangCode;
+  text: string | null;
+  loading: boolean;
+}
 
 interface Citation {
   manualId: number;
@@ -59,8 +76,44 @@ function CitationChip({ citation, index }: { citation: Citation; index: number }
   );
 }
 
+function TranslateBar({
+  messageId,
+  originalText,
+  translation,
+  onChange,
+}: {
+  messageId: string;
+  originalText: string;
+  translation: TranslationState | undefined;
+  onChange: (msgId: string, lang: LangCode, originalText: string) => void;
+}) {
+  const current = translation?.lang ?? "en";
+
+  return (
+    <div className="flex items-center gap-1.5 px-1 mt-1">
+      <Globe className="w-3 h-3 text-gray-400 shrink-0" />
+      <select
+        value={current}
+        onChange={(e) => onChange(messageId, e.target.value as LangCode, originalText)}
+        className="text-[11px] text-gray-500 bg-transparent border-none outline-none cursor-pointer hover:text-blue-600 transition-colors appearance-none pr-3 font-medium"
+        style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: "no-repeat", backgroundPosition: "right 2px center" }}
+      >
+        {LANGUAGES.map((l) => (
+          <option key={l.code} value={l.code}>
+            {l.native}
+          </option>
+        ))}
+      </select>
+      {translation?.loading && (
+        <Loader2 className="w-3 h-3 text-blue-400 animate-spin shrink-0" />
+      )}
+    </div>
+  );
+}
+
 export default function AskPage() {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [translations, setTranslations] = useState<Record<string, TranslationState>>({});
   const [input, setInput] = useState("");
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
@@ -72,6 +125,43 @@ export default function AskPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const handleTranslate = async (msgId: string, lang: LangCode, originalText: string) => {
+    if (lang === "en") {
+      setTranslations((prev) => {
+        const next = { ...prev };
+        delete next[msgId];
+        return next;
+      });
+      return;
+    }
+
+    const langLabel = LANGUAGES.find((l) => l.code === lang)?.label ?? lang;
+
+    setTranslations((prev) => ({
+      ...prev,
+      [msgId]: { lang, text: null, loading: true },
+    }));
+
+    try {
+      const res = await fetch("/api/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: originalText, targetLanguage: langLabel }),
+      });
+      if (!res.ok) throw new Error("Translation request failed");
+      const data = await res.json() as { translatedText: string };
+      setTranslations((prev) => ({
+        ...prev,
+        [msgId]: { lang, text: data.translatedText, loading: false },
+      }));
+    } catch {
+      setTranslations((prev) => ({
+        ...prev,
+        [msgId]: { lang, text: null, loading: false },
+      }));
+    }
+  };
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -196,72 +286,95 @@ export default function AskPage() {
             </div>
           )}
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={cn("flex gap-2 sm:gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
-            >
-              {msg.role === "assistant" && (
-                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0 mt-0.5">
-                  <Bot className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-600" />
-                </div>
-              )}
+          {messages.map((msg) => {
+            const translation = translations[msg.id];
+            const displayText =
+              msg.role === "assistant" && !msg.pending && translation?.text
+                ? translation.text
+                : msg.content;
 
-              <div className={cn("space-y-2", msg.role === "user" ? "max-w-[82%] items-end" : "flex-1 min-w-0 items-start")}>
-                {msg.role === "user" && msg.imageDataUrl && (
-                  <div className="flex justify-end">
-                    <img
-                      src={msg.imageDataUrl}
-                      alt="Attached photo"
-                      className="max-w-[200px] sm:max-w-[260px] max-h-[180px] rounded-xl border border-blue-200 object-cover shadow-sm"
+            return (
+              <div
+                key={msg.id}
+                className={cn("flex gap-2 sm:gap-3", msg.role === "user" ? "justify-end" : "justify-start")}
+              >
+                {msg.role === "assistant" && (
+                  <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0 mt-0.5">
+                    <Bot className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-600" />
+                  </div>
+                )}
+
+                <div className={cn("space-y-2", msg.role === "user" ? "max-w-[82%] items-end" : "flex-1 min-w-0 items-start")}>
+                  {msg.role === "user" && msg.imageDataUrl && (
+                    <div className="flex justify-end">
+                      <img
+                        src={msg.imageDataUrl}
+                        alt="Attached photo"
+                        className="max-w-[200px] sm:max-w-[260px] max-h-[180px] rounded-xl border border-blue-200 object-cover shadow-sm"
+                      />
+                    </div>
+                  )}
+
+                  {(msg.content || msg.pending) && (
+                    <div
+                      className={cn(
+                        "rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-sm leading-relaxed",
+                        msg.role === "user"
+                          ? "bg-blue-600 text-white"
+                          : "bg-gray-50 border border-gray-200 text-gray-800"
+                      )}
+                    >
+                      {msg.pending ? (
+                        <span className="flex items-center gap-2 text-gray-400">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Searching manuals…
+                        </span>
+                      ) : translation?.loading ? (
+                        <span className="flex items-center gap-2 text-gray-400">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Translating…
+                        </span>
+                      ) : (
+                        <span className="whitespace-pre-wrap">{displayText}</span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Translate bar — shown for completed assistant messages */}
+                  {!msg.pending && msg.role === "assistant" && msg.content && (
+                    <TranslateBar
+                      messageId={msg.id}
+                      originalText={msg.content}
+                      translation={translation}
+                      onChange={handleTranslate}
                     />
-                  </div>
-                )}
+                  )}
 
-                {(msg.content || msg.pending) && (
-                  <div
-                    className={cn(
-                      "rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-sm leading-relaxed",
-                      msg.role === "user"
-                        ? "bg-blue-600 text-white"
-                        : "bg-gray-50 border border-gray-200 text-gray-800"
-                    )}
-                  >
-                    {msg.pending ? (
-                      <span className="flex items-center gap-2 text-gray-400">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        Searching manuals…
-                      </span>
-                    ) : (
-                      <span className="whitespace-pre-wrap">{msg.content}</span>
-                    )}
-                  </div>
-                )}
-
-                {!msg.pending && msg.role === "assistant" && msg.citations && msg.citations.length > 0 && (
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-1.5 px-1">
-                      <BookOpen className="w-3 h-3 text-gray-400" />
-                      <span className="text-[11px] text-gray-400 font-medium">
-                        {msg.citations.length} source{msg.citations.length !== 1 ? "s" : ""} — tap to open PDF
-                      </span>
-                    </div>
+                  {!msg.pending && msg.role === "assistant" && msg.citations && msg.citations.length > 0 && (
                     <div className="space-y-1">
-                      {msg.citations.map((c, i) => (
-                        <CitationChip key={i} citation={c} index={i} />
-                      ))}
+                      <div className="flex items-center gap-1.5 px-1">
+                        <BookOpen className="w-3 h-3 text-gray-400" />
+                        <span className="text-[11px] text-gray-400 font-medium">
+                          {msg.citations.length} source{msg.citations.length !== 1 ? "s" : ""} — tap to open PDF
+                        </span>
+                      </div>
+                      <div className="space-y-1">
+                        {msg.citations.map((c, i) => (
+                          <CitationChip key={i} citation={c} index={i} />
+                        ))}
+                      </div>
                     </div>
+                  )}
+                </div>
+
+                {msg.role === "user" && (
+                  <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5">
+                    <User className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-gray-500" />
                   </div>
                 )}
               </div>
-
-              {msg.role === "user" && (
-                <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-gray-100 flex items-center justify-center shrink-0 mt-0.5">
-                  <User className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-gray-500" />
-                </div>
-              )}
-            </div>
-          ))}
+            );
+          })}
           <div ref={bottomRef} />
         </div>
 
