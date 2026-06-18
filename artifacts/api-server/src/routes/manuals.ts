@@ -418,9 +418,18 @@ router.get("/manuals/:id/extraction-plan", async (req, res) => {
     avgCharsPerPage > 1000 ? 0.42 :
     avgCharsPerPage > 500  ? 0.55 : 0.75;
 
-  // Tier page counts
-  const quickPages       = Math.min(Math.max(30, Math.round(totalPages * 0.08 / 10) * 10), 80);
-  const recommendedPages = totalPages <= 80 ? totalPages : Math.min(pageAtRatio(recRatio), 400, totalPages);
+  // Tier page counts — quick < recommended < full always
+  // Quick: ~20% of pages, min 3, max 30, never reaches full
+  const quickPages = Math.max(3, Math.min(
+    Math.round(totalPages * 0.20),
+    30,
+    Math.max(1, totalPages - 1)          // always less than full
+  ));
+  // Recommended: density-ratio for large docs; ~65% floor for small docs
+  const recommendedRaw = totalPages <= 30
+    ? Math.round(totalPages * 0.65)
+    : Math.min(pageAtRatio(recRatio), 400, totalPages);
+  const recommendedPages = Math.max(quickPages + 1, Math.min(recommendedRaw, totalPages));
   const fullPages        = totalPages;
 
   // Token model constants (computed from actual prompt sizes in extractionPipeline.ts)
