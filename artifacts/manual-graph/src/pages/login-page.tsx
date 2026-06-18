@@ -22,16 +22,16 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-slate-100 px-4 py-8">
       <div className="w-full max-w-sm">
-        <div className="flex flex-row items-center justify-center gap-5 mb-8">
-          <img
-            src="/machinemesh-logo.png"
-            alt="Machine Mesh AI"
-            className="h-10 w-auto object-contain"
-          />
+        <div className="flex flex-col items-center gap-5 mb-8">
           <img
             src="/board24-logo.png"
             alt="Board24"
-            className="h-12 w-auto object-contain rounded-md"
+            className="h-20 w-auto object-contain rounded-xl"
+          />
+          <img
+            src="/machinemesh-logo-black.svg"
+            alt="Machine Mesh AI"
+            className="h-8 w-auto object-contain"
           />
         </div>
 
