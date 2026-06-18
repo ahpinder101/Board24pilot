@@ -31,7 +31,7 @@ export default function LoginPage() {
           <img
             src="/machinemesh-logo-black.svg"
             alt="Machine Mesh AI"
-            className="h-8 w-auto object-contain"
+            className="h-14 w-auto object-contain"
           />
         </div>
 
