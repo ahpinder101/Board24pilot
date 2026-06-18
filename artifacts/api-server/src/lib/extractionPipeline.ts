@@ -316,7 +316,7 @@ For each path, return:
 - pathType: one of "procedure_step", "assembly_sequence", "decision_flow", "measurement_setting"
 - condition: EXACT text of any scope qualifier that limits when this path applies (e.g. "Not valid for Sq machines", "Valid only for Sq machines", "For MM edition 06"). Leave null if it applies to all machines/conditions.
 - stepSequence: ordered array of concise step descriptions
-- plainLanguage: single sentence summary of what this path achieves
+- plainLanguage: single sentence summary of what this path achieves. IMPORTANT: if the procedure targets a specific measurement or setting value (e.g. "C = 300 ±1 mm", "tension 30-50 N"), you MUST include that target value explicitly in plainLanguage (e.g. "Sets distance C to 300 ±1 mm on Sq machines by adjusting timing belt pulley (22).").
 - pageReferences: array of page numbers (estimate from context)
 
 Return a JSON object with a "paths" array.
