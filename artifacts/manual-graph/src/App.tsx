@@ -8,6 +8,8 @@ import ManualGraphPage from "@/pages/manual-graph-page";
 import GlobalGraphPage from "@/pages/global-graph-page";
 import AskPage from "@/pages/ask-page";
 import NotFound from "@/pages/not-found";
+import LoginPage from "@/pages/login-page";
+import { AuthProvider, useAuth } from "@/context/auth";
 
 const queryClient = new QueryClient();
 
@@ -23,16 +25,30 @@ function Router() {
   );
 }
 
+function AppShell() {
+  const { isAuthenticated } = useAuth();
+
+  if (!isAuthenticated) {
+    return <LoginPage />;
+  }
+
+  return (
+    <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+      <Layout>
+        <Router />
+      </Layout>
+    </WouterRouter>
+  );
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
-        <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-          <Layout>
-            <Router />
-          </Layout>
-        </WouterRouter>
-        <Toaster />
+        <AuthProvider>
+          <AppShell />
+          <Toaster />
+        </AuthProvider>
       </TooltipProvider>
     </QueryClientProvider>
   );

@@ -1,6 +1,7 @@
 import { Link, useLocation } from "wouter";
-import { LayoutDashboard, MessageSquare } from "lucide-react";
+import { LayoutDashboard, MessageSquare, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuth } from "@/context/auth";
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -8,6 +9,7 @@ interface LayoutProps {
 
 export function Layout({ children }: LayoutProps) {
   const [location] = useLocation();
+  const { logout } = useAuth();
 
   const navItems = [
     { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -41,6 +43,14 @@ export function Layout({ children }: LayoutProps) {
                 </Link>
               );
             })}
+            <button
+              onClick={logout}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-800 hover:bg-gray-100 transition-colors ml-1"
+              title="Sign out"
+            >
+              <LogOut className="w-4 h-4 shrink-0" />
+              <span className="hidden sm:inline">Sign out</span>
+            </button>
           </nav>
         </div>
       </header>
