@@ -18,6 +18,7 @@ import {
   entitiesTable,
   relationshipsTable,
   chunksTable,
+  pathsTable,
   type Manual,
   type ManualPage,
   type Entity,
@@ -168,12 +169,26 @@ async function pass3VisionDescriptions(
 
 // ─── PASS 4: Entity extraction ──────────────────────────────────────────────
 
+interface EntityAttribute {
+  value: string;
+  unit?: string;
+  tolerance?: string;
+  applicableTo?: string;
+}
+
+interface EntityProperties {
+  attributes?: EntityAttribute[];
+  conditions?: string[];
+  applicableTo?: string[];
+}
+
 interface ExtractedEntity {
   name: string;
   type: string;
   description: string;
   pageReferences: number[];
   orderIndex?: number;
+  properties?: EntityProperties;
 }
 
 async function pass4EntityExtraction(
@@ -209,6 +224,10 @@ Each entity must have:
 - description: 1-2 technical sentences explaining what this entity is and its function
 - pageReferences: array of page numbers where this entity is mentioned (estimate based on context)
 - orderIndex: integer indicating order/position in the document (use chunk offset: ${ci * 100})
+- properties: optional object containing structured facts about this entity:
+    - attributes: array of { value, unit, tolerance, applicableTo } — ALL specific measured values or specifications for this entity. If the same measurement has DIFFERENT values for different machine types/variants, list EACH as a separate attribute with "applicableTo" set to the machine type. Example: [{ "value": "250", "unit": "mm", "tolerance": "±1", "applicableTo": "TBA 750 S" }, { "value": "300", "unit": "mm", "tolerance": "±1", "applicableTo": "Sq machines" }]
+    - conditions: array of strings — ANY scope qualifiers that limit when/where this entity or its values apply. Copy the EXACT wording from the text (e.g. "Valid only for Sq machines", "Not valid for ReverseFin (LH outfeed)", "For MM edition 06"). These are critical for correctness.
+    - applicableTo: array of strings — which specific machine models, variants, or editions this entity applies to (e.g. ["TBA 750 S", "TBA 750 B"]) or ["all machines"] if universally applicable
 
 Guidelines:
 - machine: top-level equipment or device (e.g. "Hydraulic Press", "CNC Lathe")
@@ -222,7 +241,8 @@ Guidelines:
 - material: materials used (e.g. "Hydraulic Oil ISO 46", "Steel Grade S355")
 - document_section: major manual sections
 
-Be precise — use the exact names from the text. Do not invent entities not in the text.`,
+Be precise — use the exact names from the text. Do not invent entities not in the text.
+IMPORTANT: For measurement entities (distances, pressures, temperatures, tensions), always populate "properties.attributes" with all variant values and "properties.conditions" with any scope qualifiers present in the text.`,
           },
           {
             role: "user",
@@ -249,6 +269,78 @@ Be precise — use the exact names from the text. Do not invent entities not in 
   }
 
   return allEntities;
+}
+
+// ─── PASS 5b: Path extraction ────────────────────────────────────────────────
+// Extracts ordered procedural sequences with explicit scope conditions.
+// Each path captures a distinct sub-procedure (e.g. "fine-set distance C for
+// non-Sq machines") as a discrete, queryable record so competing facts from
+// different machine-type branches never collapse into the same retrieval unit.
+
+interface ExtractedPath {
+  name: string;
+  pathType: string;
+  condition?: string;
+  stepSequence: string[];
+  plainLanguage: string;
+  pageReferences: number[];
+}
+
+async function pass5ExtractPaths(
+  manualId: number,
+  fullText: string,
+  maxChunks = 6
+): Promise<ExtractedPath[]> {
+  const allPaths: ExtractedPath[] = [];
+  const chunks = chunkText(fullText, 4000);
+
+  for (let ci = 0; ci < Math.min(chunks.length, maxChunks); ci++) {
+    const chunk = chunks[ci];
+    try {
+      const response = await openai.chat.completions.create({
+        model: MODEL,
+        max_completion_tokens: MAX_TOKENS,
+        messages: [
+          {
+            role: "system",
+            content: `You are an expert at extracting procedural knowledge from engineering manuals.
+
+Extract ALL ordered procedural sequences from the text. These are:
+- Lettered or numbered procedure steps (a), b), c)... or 1. 2. 3.)
+- Fine-setting / basic-setting procedures for measurements or adjustments
+- Assembly or disassembly sequences
+- Any instruction with a defined order and an outcome
+
+For each path, return:
+- name: short unique name (e.g. "Fine setting distance C - non-Sq machines", "Basic setting distance D - Sq machines")
+- pathType: one of "procedure_step", "assembly_sequence", "decision_flow", "measurement_setting"
+- condition: EXACT text of any scope qualifier that limits when this path applies (e.g. "Not valid for Sq machines", "Valid only for Sq machines", "For MM edition 06"). Leave null if it applies to all machines/conditions.
+- stepSequence: ordered array of concise step descriptions
+- plainLanguage: single sentence summary of what this path achieves
+- pageReferences: array of page numbers (estimate from context)
+
+Return a JSON object with a "paths" array.
+
+CRITICAL: If the text contains two versions of the same procedure for different machine types (e.g. one section "Not valid for Sq machines" and another "Valid only for Sq machines"), extract them as SEPARATE paths with their respective conditions. This is essential for accuracy.`,
+          },
+          {
+            role: "user",
+            content: `Extract all procedural paths from this manual section:\n\n${chunk}`,
+          },
+        ],
+        response_format: { type: "json_object" },
+      });
+
+      const raw = response.choices[0]?.message?.content ?? "{}";
+      const parsed = JSON.parse(raw);
+      const paths: ExtractedPath[] = parsed.paths ?? [];
+      allPaths.push(...paths);
+    } catch (err) {
+      logger.warn({ err, chunk: ci }, "Path extraction failed for chunk");
+    }
+  }
+
+  return allPaths;
 }
 
 // ─── PASS 5: Relationship extraction ────────────────────────────────────────
@@ -924,6 +1016,7 @@ export async function extractGraphFromExistingText(
   // Clear existing graph data so re-runs are idempotent
   await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
   await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+  await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
 
   // Pass 1: document structure (needed for document type + overview context)
   const structure = await pass1DocumentStructure(manualId, fullText, pages.length);
@@ -951,7 +1044,7 @@ export async function extractGraphFromExistingText(
           name: entity.name,
           type: entity.type ?? "component",
           description: entity.description ?? "",
-          properties: null,
+          properties: entity.properties ?? null,
           pageReferences: entity.pageReferences ?? [],
           orderIndex: entity.orderIndex ?? null,
         })
@@ -994,12 +1087,33 @@ export async function extractGraphFromExistingText(
     }
   }
 
+  // Pass 5b: path extraction — ordered procedural sequences with scope conditions
+  const extractedPaths = await pass5ExtractPaths(manualId, fullText, relChunks);
+  let pathCount = 0;
+  for (const path of extractedPaths) {
+    if (!path.name || !path.plainLanguage) continue;
+    try {
+      await db.insert(pathsTable).values({
+        manualId,
+        name: path.name,
+        pathType: path.pathType ?? "procedure_step",
+        condition: path.condition ?? null,
+        stepSequence: path.stepSequence ?? [],
+        plainLanguage: path.plainLanguage,
+        pageReferences: path.pageReferences ?? [],
+      });
+      pathCount++;
+    } catch (err) {
+      logger.warn({ err, path: path.name }, "Path insert failed");
+    }
+  }
+
   // Pass 6: ordering & hierarchy
   await pass6OrderingHierarchy(manualId, fullText, extractedEntities);
 
   await setManualStatus(manualId, "completed", { processingPass: 7 });
   logger.info(
-    { manualId, entities: insertedEntities.length, relationships: relCount, entityChunks, relChunks },
+    { manualId, entities: insertedEntities.length, relationships: relCount, paths: pathCount, entityChunks, relChunks },
     "Graph extraction from existing text complete"
   );
   return { entities: insertedEntities.length, relationships: relCount };

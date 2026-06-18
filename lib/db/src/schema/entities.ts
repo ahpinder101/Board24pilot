@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, timestamp, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, timestamp, jsonb, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 import { manualsTable } from "./manuals";
@@ -34,3 +34,32 @@ export const relationshipsTable = pgTable("relationships", {
 export const insertRelationshipSchema = createInsertSchema(relationshipsTable).omit({ id: true, createdAt: true });
 export type InsertRelationship = z.infer<typeof insertRelationshipSchema>;
 export type Relationship = typeof relationshipsTable.$inferSelect;
+
+// ── Paths: ordered procedural sequences with scope conditions ────────────────
+// Each path captures a procedure step sequence (e.g. "fine-set distance C")
+// with an explicit condition/scope tag (e.g. "Not valid for Sq machines").
+// This is the primary fix for the sub-fact disambiguation problem: instead of
+// competing facts living in the same raw-text chunk, each scoped procedure is
+// stored as a discrete, queryable record.
+
+export const pathsTable = pgTable(
+  "paths",
+  {
+    id: serial("id").primaryKey(),
+    manualId: integer("manual_id")
+      .notNull()
+      .references(() => manualsTable.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    pathType: text("path_type").notNull().default("procedure_step"),
+    condition: text("condition"),
+    stepSequence: jsonb("step_sequence").$type<string[]>().default([]),
+    plainLanguage: text("plain_language").notNull().default(""),
+    pageReferences: jsonb("page_references").$type<number[]>().default([]),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (table) => [index("paths_manual_id_idx").on(table.manualId)]
+);
+
+export const insertPathSchema = createInsertSchema(pathsTable).omit({ id: true, createdAt: true });
+export type InsertPath = z.infer<typeof insertPathSchema>;
+export type Path = typeof pathsTable.$inferSelect;

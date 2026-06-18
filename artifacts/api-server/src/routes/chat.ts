@@ -4,6 +4,7 @@ import {
   chunksTable,
   chatMessagesTable,
   entitiesTable,
+  pathsTable,
   manualsTable,
   type ChatCitation,
 } from "@workspace/db";
@@ -418,6 +419,7 @@ router.post("/chat", async (req: Request, res: Response) => {
       name: string;
       type: string;
       description: string;
+      properties: Record<string, unknown> | null;
       manual_name: string;
       rank: number;
     };
@@ -427,6 +429,7 @@ router.post("/chat", async (req: Request, res: Response) => {
       name: string;
       type: string;
       description: string;
+      properties: Record<string, unknown> | null;
       manualName: string;
     }> = [];
 
@@ -437,6 +440,7 @@ router.post("/chat", async (req: Request, res: Response) => {
           e.name,
           e.type,
           COALESCE(e.description, '') AS description,
+          e.properties,
           m.name AS manual_name,
           ts_rank(
             to_tsvector('english', e.name || ' ' || COALESCE(e.description, '')),
@@ -457,49 +461,139 @@ router.post("/chat", async (req: Request, res: Response) => {
         name: r.name,
         type: r.type,
         description: r.description,
+        properties: r.properties,
         manualName: r.manual_name,
       }));
     }
 
-    // Pull relationships for matched entities
-    let graphContext = "";
-    if (graphEntities.length > 0) {
-      const entityIds = graphEntities.map((e) => e.id);
-      const pgArrayLiteral = `{${entityIds.join(",")}}`;
-      const relRows = await db.execute<{
-        source_name: string;
-        target_name: string;
-        type: string;
-        label: string;
-      }>(sql`
+    // Pull relationships for matched entities + scoped paths
+    type PathRow = {
+      id: number;
+      name: string;
+      path_type: string;
+      condition: string | null;
+      step_sequence: string[];
+      plain_language: string;
+      page_references: number[];
+    };
+
+    let graphPaths: PathRow[] = [];
+    if (entityFtsQuery.length > 0) {
+      const pathResult = await db.execute<PathRow>(sql`
         SELECT
-          se.name AS source_name,
-          te.name AS target_name,
-          r.type,
-          r.label
-        FROM relationships r
-        JOIN entities se ON se.id = r.source_entity_id
-        JOIN entities te ON te.id = r.target_entity_id
-        WHERE r.source_entity_id = ANY(${pgArrayLiteral}::integer[])
-           OR r.target_entity_id = ANY(${pgArrayLiteral}::integer[])
-        LIMIT 30
+          p.id,
+          p.name,
+          p.path_type,
+          p.condition,
+          p.step_sequence,
+          p.plain_language,
+          p.page_references
+        FROM paths p
+        WHERE
+          p.manual_id = ANY(${scopedManualArray}::integer[])
+          AND to_tsvector('english', p.name || ' ' || p.plain_language)
+              @@ to_tsquery('english', ${entityFtsQuery})
+        ORDER BY p.id
+        LIMIT 15
       `);
+      graphPaths = pathResult.rows;
+    }
 
-      const entitySummary = graphEntities
-        .map(
-          (e) =>
-            `• ${e.name} (${e.type}, from "${e.manualName}"): ${e.description}`
-        )
-        .join("\n");
+    // Fallback: if no paths matched by FTS, fetch all paths for the manual
+    // (short manuals with few paths benefit from always having them in context)
+    if (graphPaths.length === 0 && scopedManualIds.length <= 2) {
+      const allPathsResult = await db.execute<PathRow>(sql`
+        SELECT id, name, path_type, condition, step_sequence, plain_language, page_references
+        FROM paths
+        WHERE manual_id = ANY(${scopedManualArray}::integer[])
+        ORDER BY id
+        LIMIT 20
+      `);
+      graphPaths = allPathsResult.rows;
+    }
 
-      const relSummary = relRows.rows
-        .map(
-          (r) =>
-            `• ${r.source_name} → [${r.type}${r.label ? ": " + r.label : ""}] → ${r.target_name}`
-        )
-        .join("\n");
+    let graphContext = "";
+    if (graphEntities.length > 0 || graphPaths.length > 0) {
+      const parts: string[] = [];
 
-      graphContext = `RELATED ENTITIES:\n${entitySummary}\n\nRELATED CONNECTIONS:\n${relSummary}`;
+      if (graphEntities.length > 0) {
+        const entityIds = graphEntities.map((e) => e.id);
+        const pgArrayLiteral = `{${entityIds.join(",")}}`;
+        const relRows = await db.execute<{
+          source_name: string;
+          target_name: string;
+          type: string;
+          label: string;
+        }>(sql`
+          SELECT
+            se.name AS source_name,
+            te.name AS target_name,
+            r.type,
+            r.label
+          FROM relationships r
+          JOIN entities se ON se.id = r.source_entity_id
+          JOIN entities te ON te.id = r.target_entity_id
+          WHERE r.source_entity_id = ANY(${pgArrayLiteral}::integer[])
+             OR r.target_entity_id = ANY(${pgArrayLiteral}::integer[])
+          LIMIT 30
+        `);
+
+        // Build entity summary — include structured attributes and conditions when present
+        const entitySummary = graphEntities
+          .map((e) => {
+            let line = `• ${e.name} (${e.type}): ${e.description}`;
+            const props = e.properties as {
+              attributes?: Array<{ value: string; unit?: string; tolerance?: string; applicableTo?: string }>;
+              conditions?: string[];
+              applicableTo?: string[];
+            } | null;
+            if (props?.attributes && props.attributes.length > 0) {
+              const attrStr = props.attributes
+                .map((a) => {
+                  const parts: string[] = [];
+                  if (a.applicableTo) parts.push(`[${a.applicableTo}]`);
+                  parts.push(`${a.value}${a.unit ? " " + a.unit : ""}${a.tolerance ? " " + a.tolerance : ""}`);
+                  return parts.join(" ");
+                })
+                .join(", ");
+              line += `\n  Measured values: ${attrStr}`;
+            }
+            if (props?.conditions && props.conditions.length > 0) {
+              line += `\n  Scope conditions: ${props.conditions.join("; ")}`;
+            }
+            if (props?.applicableTo && props.applicableTo.length > 0) {
+              line += `\n  Applicable to: ${props.applicableTo.join(", ")}`;
+            }
+            return line;
+          })
+          .join("\n");
+
+        const relSummary = relRows.rows
+          .map(
+            (r) =>
+              `• ${r.source_name} → [${r.type}${r.label ? ": " + r.label : ""}] → ${r.target_name}`
+          )
+          .join("\n");
+
+        parts.push(`RELATED ENTITIES (with measured values and scope conditions):\n${entitySummary}`);
+        if (relSummary) parts.push(`RELATED CONNECTIONS:\n${relSummary}`);
+      }
+
+      // Paths: ordered procedural sequences with machine-type scope
+      if (graphPaths.length > 0) {
+        const pathSummary = graphPaths
+          .map((p) => {
+            const scopeTag = p.condition ? ` [${p.condition}]` : " [all machines]";
+            const steps = Array.isArray(p.step_sequence) && p.step_sequence.length > 0
+              ? "\n  Steps: " + p.step_sequence.join(" → ")
+              : "";
+            return `• ${p.name}${scopeTag}: ${p.plain_language}${steps}`;
+          })
+          .join("\n");
+        parts.push(`PROCEDURE PATHS (machine-type scope in brackets — ONLY apply the path whose scope matches the machine type in the question):\n${pathSummary}`);
+      }
+
+      graphContext = parts.join("\n\n");
     }
 
     // ── 4. Build RAG context ────────────────────────────────────────────────
