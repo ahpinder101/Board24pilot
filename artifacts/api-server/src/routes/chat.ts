@@ -31,28 +31,61 @@ function extractIdentifierTokens(text: string): string[] {
   return [...new Set([...matches, ...numeric])].slice(0, 6);
 }
 
-// Words too generic to use as manual-name signals for domain detection
+// Words too generic to use as manual-name or entity-name signals for domain detection
 const GENERIC_NAME_WORDS = new Set([
   "manual", "unit", "machine", "system", "maintenance",
-  "document", "guide", "handbook", "instruction",
+  "document", "guide", "handbook", "instruction", "vacuum",
+  "packaging", "packing", "touch", "use", "user",
 ]);
 
 // ── Domain classification ──────────────────────────────────────────────────
 // Returns the manual IDs the question is most likely about.
-// Two signals, in priority order:
-//   A. Explicit: manual name keywords appear verbatim in the question text.
-//      Handles "In the Maverick…" / "on the Tetra Pak machine…" style questions.
-//   B. Implicit: which manuals did the FTS chunk search already return hits from?
-//      Handles domain-specific terminology that maps naturally to one manual.
+// Three signals, in priority order:
+//   A1. Explicit: machine entity names (from entities table) appear in the
+//       question text.  Handles "What does the VERTICAL VACUUM PACKAGING
+//       MACHINE…" where the DB manual name ("user manual fu912") gives no signal.
+//   A2. Explicit: manual name keywords appear verbatim in the question text.
+//       Handles "In the Maverick…" / "on the Tetra Pak machine…" style questions.
+//   B.  Implicit: which manuals did the FTS chunk search already return hits from?
+//       Handles domain-specific terminology that maps naturally to one manual.
 // Falls back to all manuals when neither signal fires (e.g. cross-cutting questions).
 function classifyDomain(
   question: string,
   allManuals: Array<{ id: number; name: string }>,
-  ftsChunks: Array<{ manual_id: number; rank: number }>
+  ftsChunks: Array<{ manual_id: number; rank: number }>,
+  machineEntities: Array<{ manualId: number; name: string }>
 ): number[] {
   const qLower = question.toLowerCase();
 
-  // Signal A — explicit name match
+  // Signal A1 — machine entity name match
+  // Each entity name is split into tokens; if enough distinct tokens appear in
+  // the question, this manual is an explicit match.
+  const entityExplicit = new Set<number>();
+  // Group entities by manual
+  const entitiesByManual = new Map<number, string[]>();
+  for (const e of machineEntities) {
+    const names = entitiesByManual.get(e.manualId) ?? [];
+    names.push(e.name);
+    entitiesByManual.set(e.manualId, names);
+  }
+  for (const [manualId, names] of entitiesByManual) {
+    for (const name of names) {
+      const tokens = name
+        .toLowerCase()
+        .split(/[\s/\-_]+/)
+        .filter((t) => t.length > 3 && !GENERIC_NAME_WORDS.has(t));
+      // Require at least 2 distinct tokens to match, preventing false positives
+      // from very short entity names.
+      if (tokens.length >= 2 && tokens.filter((t) => qLower.includes(t)).length >= 2) {
+        entityExplicit.add(manualId);
+      } else if (tokens.length === 1 && tokens[0] && qLower.includes(tokens[0])) {
+        entityExplicit.add(manualId);
+      }
+    }
+  }
+  if (entityExplicit.size > 0) return Array.from(entityExplicit);
+
+  // Signal A2 — explicit manual name match
   const explicit = new Set<number>();
   for (const m of allManuals) {
     const tokens = m.name
@@ -91,10 +124,20 @@ router.post("/chat", async (req: Request, res: Response) => {
   const trimmedQuestion = question.trim();
 
   try {
-    // ── 0. Load manuals (needed for domain classification) ───────────────────
-    const allManuals = await db
-      .select({ id: manualsTable.id, name: manualsTable.name })
-      .from(manualsTable);
+    // ── 0. Load manuals + machine entities (needed for domain classification) ─
+    const [allManuals, machineEntityRows] = await Promise.all([
+      db.select({ id: manualsTable.id, name: manualsTable.name }).from(manualsTable),
+      db.execute<{ manual_id: number; name: string }>(sql`
+        SELECT manual_id, name FROM entities
+        WHERE type IN ('machine', 'system')
+        ORDER BY manual_id, order_index
+      `),
+    ]);
+
+    const machineEntities = machineEntityRows.rows.map((r) => ({
+      manualId: r.manual_id,
+      name: r.name,
+    }));
 
     // ── 1. RAG: full-text search over chunks ─────────────────────────────────
     // Include 2-char tokens (Sq, mm, LH, RH …) — critical abbreviations in
@@ -191,15 +234,16 @@ router.post("/chat", async (req: Request, res: Response) => {
     }
 
     // ── 2. Window expansion: fetch adjacent chunks ────────────────────────────
-    // For each FTS-retrieved chunk, also pull chunk_index ± 1 from the same
-    // page.  This is a safety net: values tables that immediately follow a
-    // retrieved step chunk are automatically included even if FTS ranked them
-    // below the cut-off.
+    // For each FTS-retrieved chunk, also pull chunk_index ± 2 from the same
+    // page.  A window of ±2 is needed because dimension/spec tables referenced
+    // by "shown in the table below" may be up to two section boundaries away
+    // from the sentence that references them (e.g. section 3.2 references the
+    // table that OCR placed after section 3.3.1, two chunk_index steps later).
     if (ragChunks.length > 0) {
       const retrievedIds = new Set(ragChunks.map((c) => c.id));
       const adjacentIds = new Set<string>(); // "manualId:page:chunkIdx"
       for (const c of ragChunks) {
-        for (const delta of [-1, 1]) {
+        for (const delta of [-2, -1, 1, 2]) {
           const adjIdx = c.chunk_index + delta;
           if (adjIdx >= 0) adjacentIds.add(`${c.manual_id}:${c.page_number}:${adjIdx}`);
         }
@@ -242,12 +286,88 @@ router.post("/chat", async (req: Request, res: Response) => {
     }
 
     // ── 2b. Domain classification ─────────────────────────────────────────────
-    // Determine which manual(s) this question is about, using two signals:
-    //   A. Explicit mention of a manual name in the question text.
-    //   B. Which manuals produced the top-ranked FTS chunk hits.
+    // Determine which manual(s) this question is about, using three signals:
+    //   A1. Machine entity names (from the entities table) appear in the question.
+    //       This catches cases where the manual DB name ("user manual fu912")
+    //       gives no signal but the machine entity name ("VERTICAL VACUUM
+    //       PACKAGING MACHINE TOUCH") matches the question directly.
+    //   A2. Explicit manual name keywords appear in the question text.
+    //   B.  Which manuals produced the top-ranked FTS chunk hits.
     // All graph/entity retrieval below is scoped to these manual IDs.
-    const scopedManualIds = classifyDomain(trimmedQuestion, allManuals, ragChunks);
+    const scopedManualIds = classifyDomain(trimmedQuestion, allManuals, ragChunks, machineEntities);
     const scopedManualArray = `{${scopedManualIds.join(",")}}`;
+
+    // ── 2c. Domain-scoped second-pass chunk retrieval ─────────────────────────
+    // The initial FTS ran cross-manual, so relevant chunks in the target manual
+    // may have been outranked globally by chunks from other manuals that happen
+    // to share query tokens.  After narrowing the domain, re-run FTS scoped to
+    // the classified manual(s) and merge any new top-K chunks into ragChunks.
+    // This is the primary fix for dimension/spec tables that only partially
+    // overlap with question vocabulary (e.g. "height of box" vs "A B C mm 515").
+    if (scopedManualIds.length <= 2 && tsQuery.length > 0) {
+      const scopedFtsResult = await db.execute<ChunkRow>(sql`
+        SELECT
+          c.id,
+          c.manual_id,
+          m.name AS manual_name,
+          c.page_number,
+          c.chunk_index,
+          c.content,
+          ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
+        FROM chunks c
+        JOIN manuals m ON m.id = c.manual_id
+        WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+          AND c.fts_vector @@ to_tsquery('english', ${tsQuery})
+        ORDER BY rank DESC
+        LIMIT ${TOP_K_CHUNKS}
+      `);
+
+      const existingIds = new Set(ragChunks.map((c) => c.id));
+      const newChunks: ChunkRow[] = [];
+      for (const row of scopedFtsResult.rows) {
+        if (!existingIds.has(row.id)) {
+          newChunks.push(row);
+          existingIds.add(row.id);
+        }
+      }
+
+      if (newChunks.length > 0) {
+        // Also expand window ±2 around the newly added scoped chunks
+        const scopedAdjacentIds = new Set<string>();
+        for (const c of newChunks) {
+          for (const delta of [-2, -1, 1, 2]) {
+            const adjIdx = c.chunk_index + delta;
+            if (adjIdx >= 0) scopedAdjacentIds.add(`${c.manual_id}:${c.page_number}:${adjIdx}`);
+          }
+        }
+        if (scopedAdjacentIds.size > 0) {
+          const adjConditions = Array.from(scopedAdjacentIds).map((key) => {
+            const [mid, pg, ci] = key.split(":").map(Number);
+            return sql`(c.manual_id = ${mid} AND c.page_number = ${pg} AND c.chunk_index = ${ci})`;
+          });
+          const scopedAdjResult = await db.execute<ChunkRow>(sql`
+            SELECT c.id, c.manual_id, m.name AS manual_name,
+                   c.page_number, c.chunk_index, c.content, 0::float AS rank
+            FROM chunks c JOIN manuals m ON m.id = c.manual_id
+            WHERE ${sql.join(adjConditions, sql` OR `)}
+          `);
+          for (const row of scopedAdjResult.rows) {
+            if (!existingIds.has(row.id)) {
+              newChunks.push(row);
+              existingIds.add(row.id);
+            }
+          }
+        }
+
+        ragChunks.push(...newChunks);
+        ragChunks.sort(
+          (a, b) =>
+            b.rank - a.rank ||
+            a.page_number - b.page_number ||
+            a.chunk_index - b.chunk_index
+        );
+      }
+    }
 
     // ── 3. Graph: FTS entity search scoped to classified domain ──────────────
     // Uses the same FTS relevance model as chunk retrieval (ts_rank + @@ operator)
@@ -365,7 +485,8 @@ CRITICAL RULES FOR ACCURACY:
 2. Numeric tables: when an excerpt contains a table of numbers (rows with ± notation, column headers like "Package", "C (mm)", "D (mm)"), read the values directly from that table. Do NOT say a value is unavailable if the table is present in the source excerpts — extract the specific row that matches the question.
 3. PDF table formatting: in PDF-extracted text, table values are sometimes concatenated directly to the row label without spaces. For example "TBA 1000 S3" means the TBA 1000 S row has a value of 3; "TBA 750 S250 ±185 ±1" means TBA 750 S: C=250 ±1, D=85 ±1. Parse such rows by reading trailing numbers as the value for the preceding label.
 4. Repeated identifier lists: when a part number, catalogue code, or component name appears as a repeated list in an excerpt (the same identifier on consecutive lines, e.g. "QST-5/16-12\nQST-5/16-12\nQST-5/16-12…"), each repetition represents one physical instance. Count them — that count IS the answer to "how many" questions about that item. Then look at context lines immediately after the list to identify which assemblies they serve.
-5. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
+5. Dimension tables: when an excerpt shows a table with lettered column headers (A, B, C) and numeric values below them, those letters refer to labelled dimensions in a figure. Report all available dimension values (e.g. "A=515mm, B=435mm, C=385mm") and note which figure they reference. If the question asks for a specific dimension (e.g. "height") but the table only has A/B/C labels, provide all dimensions and note the figure reference so the engineer can identify which is height.
+6. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
 
 Structure your answer with:
 - A direct answer to the question
