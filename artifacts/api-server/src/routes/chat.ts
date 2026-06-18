@@ -521,6 +521,12 @@ CRITICAL RULES FOR ACCURACY:
 6. Machine dimensions vs packaging dimensions: manuals typically contain TWO separate dimension tables — one for the machine itself (e.g. "Machine dimensions and weight", Fig 2.x) and one for the shipping/packaging box (e.g. "Delivery and handling", Fig 3.x). When the question asks about the machine's height/size, answer from the MACHINE dimensions table. When the question asks about the box or packaging the machine ships in, answer from the PACKAGING dimensions table. If both are present in the excerpts, clearly label which is which.
 7. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
 
+CITING SOURCES:
+- Each excerpt is labelled [Source N: ...] in the context.
+- Whenever you use information from a source, place its number in square brackets immediately after the relevant sentence, e.g. "The motor runs at 1450 rpm [1]." or "See the wiring diagram on page 25 [2]."
+- Only cite sources you actually drew on. Do not cite a source just because it was provided.
+- Do not add a "References" or "Sources" section at the end — inline citations only.
+
 Structure your answer with:
 - A direct answer to the question
 - Supporting technical details from the manuals
@@ -551,11 +557,25 @@ Please answer the question based on the above information from the engineering m
       "Unable to generate an answer.";
 
     // ── 6. Build citations ──────────────────────────────────────────────────
+    // Parse which source numbers the model actually cited inline (e.g. "[2]").
+    // ragChunks[i] corresponds to [Source i+1] in the prompt context.
+    const citedIndices = new Set<number>();
+    for (const m of answer.matchAll(/\[(\d+)\]/g)) {
+      const n = parseInt(m[1], 10);
+      if (n >= 1 && n <= ragChunks.length) citedIndices.add(n - 1);
+    }
+    // Fall back to top 3 if the model cited nothing (safety net).
+    const indicesToCite =
+      citedIndices.size > 0
+        ? citedIndices
+        : new Set(ragChunks.slice(0, 3).map((_, i) => i));
+
     const seenManualPages = new Set<string>();
     const citations: ChatCitation[] = [];
 
-    for (const chunk of ragChunks) {
-      if (citations.length >= 5) break;
+    for (let i = 0; i < ragChunks.length; i++) {
+      if (!indicesToCite.has(i)) continue;
+      const chunk = ragChunks[i];
       const key = `${chunk.manual_id}:${chunk.page_number}`;
       if (seenManualPages.has(key)) continue;
       seenManualPages.add(key);
