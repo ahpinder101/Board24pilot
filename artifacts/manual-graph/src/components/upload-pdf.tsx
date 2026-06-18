@@ -5,9 +5,11 @@ import { Progress } from "@/components/ui/progress";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
+import { useLocation } from "wouter";
 
 export function UploadPDF() {
   const queryClient = useQueryClient();
+  const [, navigate] = useLocation();
   const [isUploading, setIsUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentFile, setCurrentFile] = useState<{ name: string; size: number } | null>(null);
@@ -58,10 +60,10 @@ export function UploadPDF() {
       queryClient.invalidateQueries({ queryKey: ["/api/manuals"] });
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
 
-      toast.success("Upload complete", { description: "AI extraction started — check the manual card for progress." });
+      toast.success("Upload complete", { description: "Navigating to manual page…" });
+      navigate(`/manuals/${result.id}`);
     } catch (err) {
       toast.error("Upload failed", { description: err instanceof Error ? err.message : "Unknown error" });
-    } finally {
       setIsUploading(false);
       setCurrentFile(null);
       setProgress(0);
