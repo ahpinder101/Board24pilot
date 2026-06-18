@@ -90,22 +90,27 @@ function TranslateBar({
   const current = translation?.lang ?? "en";
 
   return (
-    <div className="flex items-center gap-1.5 px-1 mt-1">
-      <Globe className="w-3 h-3 text-gray-400 shrink-0" />
-      <select
-        value={current}
-        onChange={(e) => onChange(messageId, e.target.value as LangCode, originalText)}
-        className="text-[11px] text-gray-500 bg-transparent border-none outline-none cursor-pointer hover:text-blue-600 transition-colors appearance-none pr-3 font-medium"
-        style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: "no-repeat", backgroundPosition: "right 2px center" }}
-      >
-        {LANGUAGES.map((l) => (
-          <option key={l.code} value={l.code}>
-            {l.native}
-          </option>
-        ))}
-      </select>
+    <div className="flex items-center gap-2 mt-1">
+      <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-gray-200 bg-gray-50 hover:border-blue-300 hover:bg-blue-50 transition-colors">
+        <Globe className="w-4 h-4 text-gray-500 shrink-0" />
+        <span className="text-xs text-gray-500 font-medium whitespace-nowrap">Translate:</span>
+        <select
+          value={current}
+          onChange={(e) => onChange(messageId, e.target.value as LangCode, originalText)}
+          className="text-sm font-semibold text-gray-700 bg-transparent border-none outline-none cursor-pointer hover:text-blue-600 transition-colors"
+        >
+          {LANGUAGES.map((l) => (
+            <option key={l.code} value={l.code}>
+              {l.native}
+            </option>
+          ))}
+        </select>
+      </div>
       {translation?.loading && (
-        <Loader2 className="w-3 h-3 text-blue-400 animate-spin shrink-0" />
+        <div className="flex items-center gap-1.5 text-xs text-blue-500">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <span>Translating…</span>
+        </div>
       )}
     </div>
   );
