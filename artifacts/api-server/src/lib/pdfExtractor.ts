@@ -243,7 +243,7 @@ export async function extractPdfText(pdfBuffer: Buffer): Promise<PdfContent> {
         }
 
         currentPage++;
-        const hasImages = text.length < 100 && currentPage > 1;
+        const hasImages = text.length < 500 && currentPage > 1;
         const hasTables = /(\t|  {3,})/.test(text) || /\|.*\|/.test(text);
 
         pages.push({
