@@ -1,15 +1,17 @@
 import { Link, useLocation } from "wouter";
 import { LayoutDashboard, MessageSquare, LogOut } from "lucide-react";
+import { useClerk } from "@clerk/react";
 import { cn } from "@/lib/utils";
-import { useAuth } from "@/context/auth";
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
+const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+
 export function Layout({ children }: LayoutProps) {
   const [location] = useLocation();
-  const { logout } = useAuth();
+  const { signOut } = useClerk();
 
   const navItems = [
     { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -45,7 +47,7 @@ export function Layout({ children }: LayoutProps) {
               );
             })}
             <button
-              onClick={logout}
+              onClick={() => signOut({ redirectUrl: basePath || "/" })}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium text-gray-500 hover:text-gray-800 hover:bg-gray-100 transition-colors ml-1"
               title="Sign out"
             >

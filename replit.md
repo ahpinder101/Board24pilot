@@ -54,6 +54,13 @@ Upload PDF engineering manuals and let AI extract entities and relationships int
 - Stats dashboard showing entity and relationship counts
 - **Ask Engineer** (`/ask`): RAG chat — ask natural language questions, answers synthesized by GPT-4o from FTS chunk retrieval + graph entity/relationship search, with cited page references
 
+## Auth
+
+- **Replit-managed Clerk** (cookie-based on web). Provisioned via `setupClerkWhitelabelAuth()`; keys in `CLERK_*` / `VITE_CLERK_*` env vars (auto-managed, do not edit).
+- Server: `clerkProxyMiddleware` (prod-only) mounted before body parsers, then `clerkMiddleware`; `requireAuth` (in `routes/index.ts`) gates **all** API routes except `/api/healthz`.
+- Client: `App.tsx` wraps everything in `<ClerkProvider>`; signed-out users see `landing-page.tsx`, sign-in/up at `/sign-in` and `/sign-up`.
+- **Invite-only is NOT enforced by code.** Auth only requires a signed-in user, not which user. To restrict to invited people, configure the **Auth pane** (disable open sign-up / add an allowlist). See `.agents/memory/clerk-invite-only.md`.
+
 ## User preferences
 
 _Populate as you build — explicit user instructions worth remembering across sessions._
