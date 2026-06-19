@@ -801,11 +801,62 @@ Please answer the question based on the above information from the engineering m
     req.log.info({ citedSourceNumbers }, "chat: model-reported sources");
 
     // Map 1-based source numbers → 0-based chunk indices
-    const indicesToCite = new Set<number>(citedSourceNumbers.map((n) => n - 1));
+    const modelCitedIndices = new Set<number>(citedSourceNumbers.map((n) => n - 1));
 
-    // Fall back to the top-ranked chunk if the model cited nothing
-    if (indicesToCite.size === 0 && ragChunks.length > 0) {
-      indicesToCite.add(0);
+    // ── Filter: drop model-cited chunks with no content overlap in the answer ─
+    // Models over-cite topically-related chunks ("mentions TMCC2") even when no
+    // specific fact from that chunk appears in the answer.  We keep a cited chunk
+    // only if at least one of its phrases (3+ consecutive words) or numbers appears
+    // in the answer.  This is a filter on the model's list, not an independent search.
+    const answerLower = answer.toLowerCase();
+
+    function hasContentOverlap(content: string): boolean {
+      const contentLower = content.toLowerCase();
+
+      // Any decimal number present in both chunk and answer
+      for (const m of content.matchAll(/\b\d+\.\d+\b/g)) {
+        if (answer.includes(m[0])) return true;
+      }
+
+      // Any number-with-unit present in both
+      const unitPat = /\b\d+\.?\d*\s*(?:VDC|VAC|mA|bar|rpm|mm|cm|kg|kW|Hz|MHz|%)\b/gi;
+      for (const m of content.matchAll(unitPat)) {
+        if (answerLower.includes(m[0].toLowerCase())) return true;
+      }
+
+      // ±N% patterns (e.g. ±10%)
+      for (const m of content.matchAll(/[±]\s*\d+\s*%/g)) {
+        if (answerLower.includes(m[0].toLowerCase())) return true;
+      }
+
+      // Any run of 3+ words (≥12 chars) from the chunk appears in the answer
+      const words = contentLower.split(/\s+/);
+      for (let i = 0; i <= words.length - 3; i++) {
+        const phrase = words.slice(i, i + 3).join(" ");
+        if (phrase.length >= 12 && answerLower.includes(phrase)) return true;
+      }
+
+      return false;
+    }
+
+    const indicesToCite = new Set<number>();
+    for (const i of modelCitedIndices) {
+      if (hasContentOverlap(ragChunks[i].content)) {
+        indicesToCite.add(i);
+      } else {
+        req.log.info(
+          { chunkPage: ragChunks[i].page_number },
+          "chat: dropped over-cited chunk (no content overlap)"
+        );
+      }
+    }
+
+    // Fall back: if the filter removed everything, keep the first model-cited chunk
+    // (better to show one source than none)
+    if (indicesToCite.size === 0) {
+      const first = [...modelCitedIndices][0];
+      if (first !== undefined) indicesToCite.add(first);
+      else if (ragChunks.length > 0) indicesToCite.add(0);
     }
 
     const seenManualPages = new Set<string>();
