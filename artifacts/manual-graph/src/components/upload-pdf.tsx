@@ -1,11 +1,75 @@
 import { useState, useRef } from "react";
-import { UploadCloud, File, AlertCircle, Loader2 } from "lucide-react";
+import { UploadCloud, File, AlertCircle, Loader2, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
 import { useLocation } from "wouter";
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function UploadOverlay({
+  fileName,
+  fileSize,
+  progress,
+}: {
+  fileName: string;
+  fileSize: number;
+  progress: number;
+}) {
+  const isDone = progress >= 100;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md mx-4 flex flex-col items-center gap-6">
+
+        {/* Icon */}
+        <div className="relative w-16 h-16 flex items-center justify-center">
+          {isDone ? (
+            <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center">
+              <CheckCircle2 className="w-8 h-8 text-green-600" />
+            </div>
+          ) : (
+            <>
+              <div className="absolute inset-0 rounded-full bg-blue-100 animate-ping opacity-30" />
+              <div className="relative w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center">
+                <UploadCloud className="w-8 h-8 text-blue-600" />
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Title */}
+        <div className="text-center">
+          <h2 className="text-lg font-semibold text-gray-900">
+            {isDone ? "Upload complete" : "Uploading PDF…"}
+          </h2>
+          <p className="text-sm text-gray-500 mt-1 font-mono truncate max-w-xs">{fileName}</p>
+          <p className="text-xs text-gray-400 font-mono">{formatBytes(fileSize)}</p>
+        </div>
+
+        {/* Progress bar */}
+        <div className="w-full space-y-2">
+          <Progress value={progress} className="h-3 w-full rounded-full" />
+          <div className="flex justify-between text-xs font-mono text-gray-500">
+            <span>{isDone ? "Saving to server…" : "Transferring…"}</span>
+            <span className="font-semibold text-blue-600">{progress}%</span>
+          </div>
+        </div>
+
+        {!isDone && (
+          <p className="text-xs text-gray-400 text-center">
+            Large files may take a minute or two — please keep this tab open.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function UploadPDF() {
   const queryClient = useQueryClient();
@@ -27,7 +91,7 @@ export function UploadPDF() {
 
     setCurrentFile({ name: file.name, size: file.size });
     setIsUploading(true);
-    setProgress(10);
+    setProgress(5);
 
     try {
       const formData = new FormData();
@@ -36,7 +100,7 @@ export function UploadPDF() {
       const xhr = new XMLHttpRequest();
       xhr.upload.addEventListener("progress", (ev) => {
         if (ev.lengthComputable) {
-          setProgress(10 + Math.round((ev.loaded / ev.total) * 80));
+          setProgress(5 + Math.round((ev.loaded / ev.total) * 85));
         }
       });
 
@@ -60,7 +124,8 @@ export function UploadPDF() {
       queryClient.invalidateQueries({ queryKey: ["/api/manuals"] });
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
 
-      toast.success("Upload complete", { description: "Navigating to manual page…" });
+      // Brief pause so user sees 100% before navigating
+      await new Promise((r) => setTimeout(r, 600));
       navigate(`/manuals/${result.id}`);
     } catch (err) {
       toast.error("Upload failed", { description: err instanceof Error ? err.message : "Unknown error" });
@@ -71,9 +136,19 @@ export function UploadPDF() {
   };
 
   return (
-    <Card className="border-border bg-card border-dashed">
-      <CardContent className="p-6">
-        {!isUploading ? (
+    <>
+      {/* Full-screen upload overlay */}
+      {isUploading && currentFile && (
+        <UploadOverlay
+          fileName={currentFile.name}
+          fileSize={currentFile.size}
+          progress={progress}
+        />
+      )}
+
+      {/* Upload card (always visible) */}
+      <Card className="border-border bg-card border-dashed">
+        <CardContent className="p-6">
           <div className="flex flex-col items-center justify-center space-y-4 text-center">
             <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center">
               <UploadCloud className="w-6 h-6 text-primary" />
@@ -88,33 +163,18 @@ export function UploadPDF() {
                 type="file"
                 accept="application/pdf"
                 onChange={handleFileSelect}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                disabled={isUploading}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
               />
-              <Button className="font-mono" variant="secondary">Select File</Button>
+              <Button className="font-mono" variant="secondary" disabled={isUploading}>
+                {isUploading ? (
+                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Uploading…</>
+                ) : "Select File"}
+              </Button>
             </div>
           </div>
-        ) : (
-          <div className="flex flex-col items-center justify-center space-y-4 w-full max-w-md mx-auto">
-            <div className="flex items-center space-x-3 w-full">
-              <File className="w-8 h-8 text-primary shrink-0" />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-foreground truncate">{currentFile?.name}</p>
-                <div className="flex justify-between items-center mt-1">
-                  <p className="text-xs text-muted-foreground font-mono">
-                    {currentFile ? (currentFile.size / 1024 / 1024).toFixed(2) : 0} MB
-                  </p>
-                  <p className="text-xs text-primary font-mono font-medium">{progress}%</p>
-                </div>
-              </div>
-            </div>
-            <Progress value={progress} className="h-2 w-full" />
-            <p className="text-xs text-muted-foreground font-mono flex items-center gap-2">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              {progress < 90 ? "Uploading to server..." : "Processing upload..."}
-            </p>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
+    </>
   );
 }
