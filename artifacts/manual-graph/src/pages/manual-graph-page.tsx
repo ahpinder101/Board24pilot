@@ -67,6 +67,68 @@ const TIER_META: TierMeta[] = [
   },
 ];
 
+// ─── Pending card — manual uploaded but not yet processed ───────────────────
+
+function PendingCard({ manualId, onStarted }: { manualId: number; onStarted: () => void }) {
+  const { getToken } = useAuth();
+  const [isStarting, setIsStarting] = useState(false);
+  const [error, setError] = useState("");
+
+  async function handleStart() {
+    setIsStarting(true);
+    setError("");
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/manuals/${manualId}/process`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+      }
+      onStarted();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start processing");
+      setIsStarting(false);
+    }
+  }
+
+  return (
+    <Card className="h-full flex items-center justify-center bg-card/50 border-dashed">
+      <CardContent className="flex flex-col items-center justify-center p-10 max-w-md w-full text-center space-y-5">
+        <div className="w-14 h-14 rounded-full bg-primary/10 flex items-center justify-center">
+          <Play className="w-7 h-7 text-primary" />
+        </div>
+        <div>
+          <h3 className="text-lg font-semibold text-foreground">Ready to process</h3>
+          <p className="text-sm text-muted-foreground mt-1">
+            The PDF is uploaded. Start processing to extract text, images, and build the knowledge graph.
+          </p>
+        </div>
+        {error && (
+          <div className="flex items-center gap-2 text-red-600 text-xs bg-red-50 border border-red-200 rounded-lg px-3 py-2 w-full text-left">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            {error}
+          </div>
+        )}
+        <button
+          onClick={handleStart}
+          disabled={isStarting}
+          className="flex items-center gap-2 px-6 py-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm transition-all shadow disabled:opacity-50"
+        >
+          {isStarting
+            ? <><RefreshCw className="w-4 h-4 animate-spin" />Starting…</>
+            : <><Play className="w-4 h-4" />Start Processing</>}
+        </button>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ─── Reset button for failed manuals ────────────────────────────────────────
 
 function FailedResetButton({ manualId, onReset }: { manualId: number; onReset: () => void }) {
@@ -405,6 +467,11 @@ export default function ManualGraphPage() {
       </div>
 
       <div className="flex-1 min-h-[400px]">
+
+        {/* ── Pending — needs processing triggered ── */}
+        {manual.status === "pending" && (
+          <PendingCard manualId={manualId} onStarted={() => queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) })} />
+        )}
 
         {/* ── Processing — live ticker ── */}
         {manual.status === "processing" && (
