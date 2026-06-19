@@ -21,12 +21,8 @@ export default function LandingPage() {
 
         <div className="bg-white rounded-2xl shadow-lg border border-slate-200 p-7">
           <div className="mb-6 text-center">
-            <h1 className="text-xl font-semibold text-slate-800 tracking-tight">
-              Engineering Manual Knowledge Graph
-            </h1>
-            <p className="text-slate-400 text-sm mt-1">
-              Sign in to explore your manuals
-            </p>
+            <h1 className="text-xl font-semibold text-slate-800 tracking-tight">Machine Mesh AI Log In </h1>
+            <p className="text-slate-400 text-sm mt-1">Sign in to get advice from your manuals</p>
           </div>
 
           <div className="flex flex-col gap-3">
