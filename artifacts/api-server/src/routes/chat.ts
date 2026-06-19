@@ -789,6 +789,48 @@ Please answer the question based on the above information from the engineering m
         ? citedIndices
         : new Set(ragChunks.slice(0, 3).map((_, i) => i));
 
+    // ── 6b. Content-match recovery ────────────────────────────────────────────
+    // Models frequently mis-assign inline [N] numbers when many sources are in
+    // context (e.g. citing [4] when the relevant chunk was actually Source 2).
+    // As a safety net, check each chunk for "distinctive content" — specific
+    // numbers (measurements, voltages, counts) and technical phrases — that
+    // appear verbatim in the answer.  Any chunk whose specific data provably
+    // contributed to the answer is added to citations regardless of [N].
+    const answerLower = answer.toLowerCase();
+    for (let i = 0; i < ragChunks.length; i++) {
+      if (indicesToCite.has(i)) continue; // already included
+      const content = ragChunks[i].content;
+      let matchCount = 0;
+
+      // Match numbers with engineering units
+      const unitPattern = /\b\d+\.?\d*\s*(?:vdc|vac|v dc|v ac|ma|mA|bar|rpm|mm|cm|kg|°c|kw|hz|mhz|khz|%|°)\b/gi;
+      for (const m of content.matchAll(unitPattern)) {
+        if (answerLower.includes(m[0].toLowerCase())) matchCount++;
+      }
+
+      // Match specific non-round numbers (e.g. 1.8, 0.6, 9.6 — unlikely to appear by coincidence)
+      const specificNumPattern = /\b\d+\.\d+\b/g;
+      for (const m of content.matchAll(specificNumPattern)) {
+        if (answer.includes(m[0])) matchCount++;
+      }
+
+      // Match multi-word technical phrases (case-insensitive)
+      const phrasePattern = /\b(?:[A-Z][a-z]+\s+){1,3}[A-Z][a-z]+\b/g;
+      for (const m of content.matchAll(phrasePattern)) {
+        const phrase = m[0];
+        if (phrase.split(" ").length >= 2 && answerLower.includes(phrase.toLowerCase())) matchCount++;
+      }
+
+      // 2+ distinctive matches = this chunk provably contributed to the answer
+      if (matchCount >= 2) {
+        indicesToCite.add(i);
+        req.log.info(
+          { chunkPage: ragChunks[i].page_number, matchCount },
+          "citation-recovery: added content-matched chunk"
+        );
+      }
+    }
+
     const seenManualPages = new Set<string>();
     const citations: ChatCitation[] = [];
 
