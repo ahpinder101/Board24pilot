@@ -286,7 +286,6 @@ async function pass4EntityExtraction(
       const response = await openai.chat.completions.create({
         model: MODEL,
         max_completion_tokens: MAX_TOKENS,
-        signal: AbortSignal.timeout(90_000),
         messages: [
           {
             role: "system",
@@ -386,7 +385,6 @@ async function pass5ExtractPaths(
       const response = await openai.chat.completions.create({
         model: MODEL,
         max_completion_tokens: MAX_TOKENS,
-        signal: AbortSignal.timeout(90_000),
         messages: [
           {
             role: "system",
@@ -460,7 +458,6 @@ async function pass5RelationshipExtraction(
       const response = await openai.chat.completions.create({
         model: MODEL,
         max_completion_tokens: MAX_TOKENS,
-        signal: AbortSignal.timeout(90_000),
         messages: [
           {
             role: "system",
