@@ -9,7 +9,7 @@ import {
   relationshipsTable,
   manualPagesTable,
 } from "@workspace/db";
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, and, ne } from "drizzle-orm";
 import {
   CreateManualBody,
   GetManualParams,
@@ -21,6 +21,7 @@ import {
 import { ObjectStorageService } from "../lib/objectStorage.js";
 import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText } from "../lib/extractionPipeline.js";
 import { logger } from "../lib/logger.js";
+import { expensiveOpLimiter } from "../middlewares/rateLimit.js";
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -63,8 +64,20 @@ function getPdfBuffer(manual: { pdfData?: Buffer | null }): Buffer {
   return Buffer.isBuffer(manual.pdfData) ? manual.pdfData : Buffer.from(manual.pdfData as unknown as string, "hex");
 }
 
+// Atomically claim a manual for processing. Flips status -> "processing" only if it
+// isn't already, in a single UPDATE so concurrent/burst requests can't both win.
+// Returns true if this caller claimed the job, false if one is already running.
+async function claimForProcessing(manualId: number): Promise<boolean> {
+  const claimed = await db
+    .update(manualsTable)
+    .set({ status: "processing", updatedAt: new Date() })
+    .where(and(eq(manualsTable.id, manualId), ne(manualsTable.status, "processing")))
+    .returning({ id: manualsTable.id });
+  return claimed.length > 0;
+}
+
 // POST /manuals/upload — combined: receive PDF → store in DB → create record → kick off processing
-router.post("/manuals/upload", upload.single("file"), async (req, res) => {
+router.post("/manuals/upload", expensiveOpLimiter, upload.single("file"), async (req, res) => {
   if (!req.file) {
     res.status(400).json({ error: "No PDF file provided" });
     return;
@@ -166,7 +179,7 @@ router.delete("/manuals/:id", async (req, res) => {
 });
 
 // POST /manuals/:id/process — trigger multi-pass AI extraction
-router.post("/manuals/:id/process", async (req, res) => {
+router.post("/manuals/:id/process", expensiveOpLimiter, async (req, res) => {
   const parsed = ProcessManualParams.safeParse({ id: Number(req.params.id) });
   if (!parsed.success) {
     res.status(400).json({ error: "Invalid ID" });
@@ -183,12 +196,6 @@ router.post("/manuals/:id/process", async (req, res) => {
     return;
   }
 
-  // If already processing or completed, return current state
-  if (manual.status === "processing") {
-    res.json(manual);
-    return;
-  }
-
   // Read PDF from database
   let pdfBuffer: Buffer;
   try {
@@ -199,11 +206,29 @@ router.post("/manuals/:id/process", async (req, res) => {
     return;
   }
 
-  // Clear any previous extraction data
-  await db.delete(entitiesTable).where(eq(entitiesTable.manualId, parsed.data.id));
+  // Atomically claim the job — rejects if one is already running (prevents
+  // duplicate full-document extraction jobs on the same manual).
+  if (!(await claimForProcessing(parsed.data.id))) {
+    res.status(409).json({ error: "Manual is already processing" });
+    return;
+  }
+
+  // Clear any previous extraction data. If this fails after claiming, release the
+  // claim so the manual isn't left stuck in "processing" with no job running.
+  const manualId = parsed.data.id;
+  try {
+    await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
+  } catch (err) {
+    await db
+      .update(manualsTable)
+      .set({ status: "failed", errorMessage: String(err), updatedAt: new Date() })
+      .where(eq(manualsTable.id, manualId));
+    req.log.error({ err, manualId }, "Failed to clear prior extraction data");
+    res.status(500).json({ error: String(err) });
+    return;
+  }
 
   // Start pipeline in background (don't await)
-  const manualId = parsed.data.id;
   runExtractionPipeline(manualId, pdfBuffer).catch((err) => {
     req.log.error({ err, manualId }, "Background extraction pipeline error");
   });
@@ -293,8 +318,8 @@ router.get("/manuals/:id/stats", async (req, res) => {
 
 // POST /manuals/:id/reprocess-vision — admin: re-run full pipeline with GPT-4o vision OCR
 // Use when a manual was processed as an image-based PDF and produced no entities/chunks.
-router.post("/manuals/:id/reprocess-vision", async (req, res) => {
-  const manualId = parseInt(req.params.id ?? "", 10);
+router.post("/manuals/:id/reprocess-vision", expensiveOpLimiter, async (req, res) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
   if (isNaN(manualId)) {
     res.status(400).json({ error: "Invalid manual id" });
     return;
@@ -310,11 +335,6 @@ router.post("/manuals/:id/reprocess-vision", async (req, res) => {
     return;
   }
 
-  if (manual.status === "processing") {
-    res.status(409).json({ error: "Manual is already processing" });
-    return;
-  }
-
   // Read PDF from database
   let pdfBuffer: Buffer;
   try {
@@ -322,6 +342,12 @@ router.post("/manuals/:id/reprocess-vision", async (req, res) => {
   } catch (err) {
     req.log.error({ err, manualId }, "Failed to read PDF from database for vision reprocess");
     res.status(500).json({ error: String(err) });
+    return;
+  }
+
+  // Atomically claim the job — rejects if one is already running.
+  if (!(await claimForProcessing(manualId))) {
+    res.status(409).json({ error: "Manual is already processing" });
     return;
   }
 
@@ -334,8 +360,8 @@ router.post("/manuals/:id/reprocess-vision", async (req, res) => {
 });
 
 // POST /manuals/:id/reprocess-vision-pages — OCR a specific page range only
-router.post("/manuals/:id/reprocess-vision-pages", async (req, res) => {
-  const manualId = parseInt(req.params.id ?? "", 10);
+router.post("/manuals/:id/reprocess-vision-pages", expensiveOpLimiter, async (req, res) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
   const startPage = parseInt(String(req.body?.startPage ?? ""), 10);
   const endPage = parseInt(String(req.body?.endPage ?? ""), 10);
 
@@ -346,6 +372,15 @@ router.post("/manuals/:id/reprocess-vision-pages", async (req, res) => {
 
   const [manual] = await db.select().from(manualsTable).where(eq(manualsTable.id, manualId));
   if (!manual) { res.status(404).json({ error: "Manual not found" }); return; }
+
+  // Clamp the range to the document's real page count so a caller can't request
+  // a huge range (e.g. 1..999999) and force one vision LLM call per phantom page.
+  const maxPage = manual.totalPages ?? startPage;
+  if (startPage > maxPage) {
+    res.status(400).json({ error: `startPage exceeds document length (${maxPage} pages)` });
+    return;
+  }
+  const boundedEnd = Math.min(endPage, maxPage);
 
   let pdfBuffer: Buffer;
   try {
@@ -358,7 +393,7 @@ router.post("/manuals/:id/reprocess-vision-pages", async (req, res) => {
 
   // Run synchronously — page ranges are small, caller wants the result
   try {
-    const result = await reprocessPageRangeWithVision(manualId, pdfBuffer, startPage, endPage);
+    const result = await reprocessPageRangeWithVision(manualId, pdfBuffer, startPage, boundedEnd);
     res.json({ ok: true, manualId, startPage, endPage, ...result });
   } catch (err) {
     req.log.error({ err, manualId }, "Page-range vision OCR failed");
@@ -369,7 +404,7 @@ router.post("/manuals/:id/reprocess-vision-pages", async (req, res) => {
 // GET /manuals/:id/extraction-plan — compute extraction tiers from actual page text stats
 // Returns real token counts and rationale derived from the manual's extracted content.
 router.get("/manuals/:id/extraction-plan", async (req, res) => {
-  const manualId = parseInt(req.params.id ?? "", 10);
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
   if (isNaN(manualId)) { res.status(400).json({ error: "Invalid manual id" }); return; }
 
   const [manual] = await db.select().from(manualsTable).where(eq(manualsTable.id, manualId));
@@ -514,14 +549,21 @@ router.get("/manuals/:id/extraction-plan", async (req, res) => {
 // entityChunks controls how many 5,000-char chunks Pass 4 reads (~12 pages/chunk).
 // relChunks controls how many 4,000-char chunks Pass 5 reads (~10 pages/chunk).
 // Responds 202 immediately; extraction runs in background. Poll GET /manuals/:id for progress.
-router.post("/manuals/:id/extract-graph", async (req, res) => {
-  const manualId = parseInt(req.params.id ?? "", 10);
+router.post("/manuals/:id/extract-graph", expensiveOpLimiter, async (req, res) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
   if (isNaN(manualId)) { res.status(400).json({ error: "Invalid manual id" }); return; }
   const [manual] = await db.select().from(manualsTable).where(eq(manualsTable.id, manualId));
   if (!manual) { res.status(404).json({ error: "Manual not found" }); return; }
 
   const entityChunks = typeof req.body?.entityChunks === "number" ? Math.max(1, Math.min(req.body.entityChunks, 500)) : undefined;
   const relChunks = typeof req.body?.relChunks === "number" ? Math.max(1, Math.min(req.body.relChunks, 500)) : undefined;
+
+  // Atomically claim the job — rejects if one is already running. Without this,
+  // repeated calls would each spawn a full-document LLM extraction in parallel.
+  if (!(await claimForProcessing(manualId))) {
+    res.status(409).json({ error: "Manual is already processing" });
+    return;
+  }
 
   res.status(202).json({ ok: true, manualId, entityChunks, relChunks, message: "Graph extraction started — poll GET /api/manuals/:id for progress" });
   // Defer to next tick so the HTTP response flushes before the blocking AI work starts
@@ -536,8 +578,8 @@ router.post("/manuals/:id/extract-graph", async (req, res) => {
 });
 
 // POST /manuals/:id/rechunk — admin: re-apply semantic chunker without full pipeline
-router.post("/manuals/:id/rechunk", async (req, res) => {
-  const manualId = parseInt(req.params.id ?? "", 10);
+router.post("/manuals/:id/rechunk", expensiveOpLimiter, async (req, res) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
   if (isNaN(manualId)) {
     res.status(400).json({ error: "Invalid manual id" });
     return;

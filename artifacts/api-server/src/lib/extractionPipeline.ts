@@ -1173,6 +1173,10 @@ export async function extractGraphFromExistingText(
 
   await setManualStatus(manualId, "processing", { processingPass: 4 });
 
+  // Wrap the whole job so any throw releases the manual from "processing".
+  // Without this, a failed background run would leave status stuck at "processing"
+  // forever — and the route's claim guard would then reject every re-trigger.
+  try {
   const [manual] = await db
     .select({ documentType: manualsTable.documentType, structure: manualsTable.structure })
     .from(manualsTable)
@@ -1204,7 +1208,6 @@ export async function extractGraphFromExistingText(
     .join("\n\n");
 
   if (fullText.trim().length === 0) {
-    await setManualStatus(manualId, "structure_complete");
     throw new Error(`Manual ${manualId} has no OCR text — run vision OCR first`);
   }
 
@@ -1330,6 +1333,13 @@ export async function extractGraphFromExistingText(
     "Graph extraction from existing text complete"
   );
   return { entities: insertedEntities.length, relationships: relCount };
+  } catch (err) {
+    logger.error({ err, manualId }, "Graph extraction from existing text failed");
+    await setManualStatus(manualId, "failed", {
+      errorMessage: err instanceof Error ? err.message : "Unknown error",
+    });
+    throw err;
+  }
 }
 
 // ─── RECHUNK: re-run Pass 7 from stored page text ────────────────────────────
