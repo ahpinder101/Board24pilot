@@ -902,6 +902,25 @@ export async function reprocessManualWithVision(
       }
     }
 
+    // Pass 5b: Path extraction — ordered procedural sequences
+    const extractedPaths = await pass5ExtractPaths(manualId, fullText);
+    for (const path of extractedPaths) {
+      if (!path.name || !path.plainLanguage) continue;
+      try {
+        await db.insert(pathsTable).values({
+          manualId,
+          name: path.name,
+          pathType: path.pathType ?? "procedure_step",
+          condition: path.condition ?? null,
+          stepSequence: path.stepSequence ?? [],
+          plainLanguage: path.plainLanguage,
+          pageReferences: path.pageReferences ?? [],
+        });
+      } catch (err) {
+        logger.warn({ err, path: path.name }, "Path insert failed (vision reprocess)");
+      }
+    }
+
     // Pass 6: Ordering & hierarchy
     await pass6OrderingHierarchy(manualId, fullText, extractedEntities);
 
@@ -912,7 +931,7 @@ export async function reprocessManualWithVision(
     );
 
     await setManualStatus(manualId, "completed", { processingPass: 7 });
-    logger.info({ manualId }, "Vision reprocess completed");
+    logger.info({ manualId, paths: extractedPaths.length }, "Vision reprocess completed");
   } catch (err) {
     await setManualStatus(manualId, "failed", {
       errorMessage: err instanceof Error ? err.message : "Unknown error",
@@ -1058,13 +1077,26 @@ export async function extractGraphFromExistingText(
   if (!manual) throw new Error(`Manual ${manualId} not found`);
 
   const pages = await db
-    .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
+    .select({
+      pageNumber: manualPagesTable.pageNumber,
+      rawText: manualPagesTable.rawText,
+      description: manualPagesTable.description,
+    })
     .from(manualPagesTable)
     .where(eq(manualPagesTable.manualId, manualId))
     .orderBy(manualPagesTable.pageNumber);
 
+  // For pages where OCR is sparse but Pass 3 generated a vision description,
+  // use the description instead — it captures diagram/table content that OCR misses.
   const fullText = pages
-    .map((p) => p.rawText ?? "")
+    .map((p) => {
+      const raw = (p.rawText ?? "").trim();
+      const desc = (p.description ?? "").trim();
+      if (raw.length < 100 && desc.length > 0) {
+        return `[Page ${p.pageNumber} — diagram/image content]\n${desc}`;
+      }
+      return raw;
+    })
     .filter((t) => t.trim().length > 0)
     .join("\n\n");
 
