@@ -21,6 +21,54 @@ const TOP_K_SCOPED = 14;        // domain-scoped second-pass — can be higher b
                                  // we're already within one manual and want full coverage
 const TOP_K_ENTITIES = 10;
 
+// ── Vision pre-pass ────────────────────────────────────────────────────────
+// When an image is attached, run a cheap GPT-4o vision call BEFORE retrieval
+// to extract technical keywords from what the image shows.  These are merged
+// with the question text so that FTS queries are grounded in the actual image
+// content (component names, fault codes, part numbers, labels) rather than
+// just the often-generic question words ("what is this?", "what does this mean?").
+async function extractImageKeywords(
+  imageDataUrl: string,
+  question: string,
+  log: (msg: string) => void
+): Promise<string> {
+  try {
+    const response = await openai.chat.completions.create({
+      model: CHAT_MODEL,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `You are helping retrieve sections of an engineering manual that are relevant to this image.
+
+The engineer's question is: "${question}"
+
+Examine the image carefully and extract the most useful technical search terms that would identify the right section of a manual. Include:
+- Component names, part names, assembly names visible or identifiable
+- Any text, labels, codes, or identifiers visible in the image (fault codes, error codes, part numbers, model numbers, alarm codes)
+- Technical terms describing what you see (e.g. "level probe", "float assembly", "pressure transducer", "wiring diagram", "terminal block")
+- Functional purpose of what is shown if identifiable
+
+Respond with ONLY a comma-separated list of keywords. No explanations or sentences. Maximum 20 keywords.`,
+            },
+            { type: "image_url", image_url: { url: imageDataUrl, detail: "low" } },
+          ],
+        },
+      ],
+      max_tokens: 120,
+      temperature: 0,
+    });
+    const keywords = response.choices[0]?.message?.content ?? "";
+    log(`Vision pre-pass extracted: ${keywords}`);
+    return keywords;
+  } catch {
+    log("Vision pre-pass failed, continuing with question-only FTS");
+    return "";
+  }
+}
+
 // ── Identifier token extraction ────────────────────────────────────────────
 // Extracts part numbers / catalogue codes from the question — alphanumeric
 // tokens containing hyphens or slashes (e.g. QST-5/16-12, MFH-5-1/2,
@@ -149,15 +197,36 @@ router.post("/chat", async (req: Request, res: Response) => {
       name: r.name,
     }));
 
+    // ── 0.5. Vision pre-pass ──────────────────────────────────────────────────
+    // When an image is attached, ask GPT-4o to identify what it shows BEFORE
+    // retrieval runs.  The extracted keywords are merged with the question text
+    // so that FTS is driven by the image content (component name, fault code,
+    // part number…) rather than the often-generic question wording.
+    let visionKeywords = "";
+    if (hasImage) {
+      visionKeywords = await extractImageKeywords(
+        imageDataUrl!,
+        trimmedQuestion,
+        (msg) => req.log.info({ msg }, "vision-prepass")
+      );
+    }
+
+    // Combined search text: question words + vision-extracted keywords
+    const searchText =
+      visionKeywords.length > 0
+        ? `${trimmedQuestion} ${visionKeywords.replace(/,/g, " ")}`
+        : trimmedQuestion;
+
     // ── 1. RAG: full-text search over chunks ─────────────────────────────────
     // Include 2-char tokens (Sq, mm, LH, RH …) — critical abbreviations in
     // engineering manuals that would otherwise be silently dropped.
-    const tsQuery = trimmedQuestion
+    // Vision pre-pass keywords are included in searchText when an image was sent.
+    const tsQuery = searchText
       .replace(/[^a-zA-Z0-9 ]/g, " ")
       .trim()
       .split(/\s+/)
       .filter((w) => w.length >= 2)
-      .slice(0, 12)
+      .slice(0, 20)  // raised from 12 — image keywords can add many more tokens
       .join(" | ");
 
     type ChunkRow = {
@@ -215,7 +284,9 @@ router.post("/chat", async (req: Request, res: Response) => {
     // codes) by splitting on hyphens and slashes.  When the question contains
     // such tokens, run a parallel ILIKE search backed by the pg_trgm GIN index
     // and merge any new chunks into ragChunks before domain classification.
-    const identifierTokens = extractIdentifierTokens(trimmedQuestion);
+    // searchText includes vision-extracted keywords — so fault codes / part numbers
+    // visible in an uploaded image are also picked up by the ILIKE path.
+    const identifierTokens = extractIdentifierTokens(searchText);
     if (identifierTokens.length > 0) {
       const ilikeConditions = identifierTokens.map(
         (tok) => sql`c.content ILIKE ${"%" + tok + "%"}`
@@ -304,7 +375,7 @@ router.post("/chat", async (req: Request, res: Response) => {
     //   A2. Explicit manual name keywords appear in the question text.
     //   B.  Which manuals produced the top-ranked FTS chunk hits.
     // All graph/entity retrieval below is scoped to these manual IDs.
-    const scopedManualIds = classifyDomain(trimmedQuestion, allManuals, ragChunks, machineEntities);
+    const scopedManualIds = classifyDomain(searchText, allManuals, ragChunks, machineEntities);
     const scopedManualArray = `{${scopedManualIds.join(",")}}`;
 
     // Filter out cross-manual noise: the initial FTS ran before domain
