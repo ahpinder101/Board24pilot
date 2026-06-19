@@ -113,8 +113,24 @@ async function pass2PageContent(
 ) {
   await updateManualPass(manualId, 2);
 
-  // Save page records (text + image/table detection)
-  const pageRecords = pages.map((p) => ({
+  // Check which page numbers are already in the DB so we can skip them on resume.
+  const existingRows = await db
+    .select({ pageNumber: manualPagesTable.pageNumber })
+    .from(manualPagesTable)
+    .where(eq(manualPagesTable.manualId, manualId));
+  const existingSet = new Set(existingRows.map((r) => r.pageNumber));
+
+  const newPages = pages.filter((p) => !existingSet.has(p.pageNumber));
+  if (newPages.length === 0) {
+    logger.info({ manualId, total: pages.length }, "Pass 2: all pages already in DB — skipping insert");
+    return;
+  }
+  if (existingSet.size > 0) {
+    logger.info({ manualId, existing: existingSet.size, inserting: newPages.length }, "Pass 2: resuming — inserting remaining pages");
+    await setActivity(manualId, `Pass 2 — resuming: ${existingSet.size} pages already saved, inserting ${newPages.length} remaining`);
+  }
+
+  const pageRecords = newPages.map((p) => ({
     manualId,
     pageNumber: p.pageNumber,
     rawText: p.text,
@@ -122,7 +138,6 @@ async function pass2PageContent(
     hasTables: p.hasTables ? 1 : 0,
   }));
 
-  // Insert in batches of 20
   for (let i = 0; i < pageRecords.length; i += 20) {
     await db.insert(manualPagesTable).values(pageRecords.slice(i, i + 20));
   }
@@ -697,8 +712,23 @@ async function pass7EmbedChunks(
 ): Promise<void> {
   if (options.updatePass !== false) await updateManualPass(manualId, 7);
 
-  // Delete old chunks for this manual (idempotent re-runs)
-  await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
+  // Check which pages already have chunks so we can resume instead of starting over.
+  // If NO chunks exist at all, do the traditional full clear-and-replace to ensure
+  // a clean state (handles the case where a previous run wrote partial bad data).
+  const existingChunkRows = await db
+    .select({ pageNumber: chunksTable.pageNumber })
+    .from(chunksTable)
+    .where(eq(chunksTable.manualId, manualId));
+  const chunkedPageSet = new Set(existingChunkRows.map((r) => r.pageNumber));
+
+  if (chunkedPageSet.size === 0) {
+    // Fresh run — clear any stale data and start clean
+    await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
+  } else {
+    // Resuming — keep existing chunks, only process pages not yet indexed
+    logger.info({ manualId, alreadyChunked: chunkedPageSet.size, total: pages.length }, "Pass 7: resuming — skipping already-indexed pages");
+    await setActivity(manualId, `Pass 7 — resuming: ${chunkedPageSet.size} pages already indexed, processing remaining`);
+  }
 
   // Pre-write the PDF buffer to a single shared temp file (if provided) so the
   // diagram gate can call pdfimages/pdftoppm without re-writing the buffer on
@@ -727,6 +757,8 @@ async function pass7EmbedChunks(
   let pass7PageIdx = 0;
   for (const page of pages) {
     pass7PageIdx++;
+    // Skip pages already indexed in a previous run
+    if (chunkedPageSet.has(page.pageNumber)) continue;
     if (pass7PageIdx % 20 === 1) {
       await setActivity(manualId, `Pass 7 — indexing page ${page.pageNumber} of ${pages.length} for search`);
     }
@@ -1243,8 +1275,42 @@ export async function extractGraphFromExistingText(
   const entityChunks = opts?.entityChunks ?? Infinity;
   const relChunks = opts?.relChunks ?? Infinity;
 
+  // ── Capture state BEFORE touching processingPass ─────────────────────────
+  // We need to know which passes were already completed before we overwrite
+  // processingPass with 4, so we can skip them on resume.
+  const [priorState] = await db
+    .select({ processingPass: manualsTable.processingPass })
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId));
+  const previousPass = priorState?.processingPass ?? 0;
+
+  // Count existing entities and relationships so we can decide whether to
+  // resume (skip already-complete passes) or restart (delete and redo).
+  const [entityCountRow] = await db
+    .select({ cnt: count() })
+    .from(entitiesTable)
+    .where(eq(entitiesTable.manualId, manualId));
+  const [relCountRow] = await db
+    .select({ cnt: count() })
+    .from(relationshipsTable)
+    .where(eq(relationshipsTable.manualId, manualId));
+  const existingEntityCount = entityCountRow?.cnt ?? 0;
+  const existingRelCount = relCountRow?.cnt ?? 0;
+
+  // Resume rules:
+  //  • previousPass >= 5 AND entities exist → Pass 4 finished; skip it, reuse saved entities
+  //  • previousPass >= 6 AND rels exist     → Pass 5 finished; skip it too
+  //  • Otherwise                            → delete stale data and run from scratch
+  const resumeFromPass5 = previousPass >= 5 && existingEntityCount > 0;
+  const resumeFromPass6 = previousPass >= 6 && existingRelCount > 0;
+
   await setManualStatus(manualId, "processing", { processingPass: 4 });
-  await setActivity(manualId, "Pass 4 — preparing entity extraction...");
+  if (resumeFromPass5) {
+    await setActivity(manualId, `Resuming — Pass 4 already done (${existingEntityCount} entities found), checking relationships...`);
+    logger.info({ manualId, existingEntityCount, previousPass }, "extractGraphFromExistingText: resuming from Pass 5 — entities already extracted");
+  } else {
+    await setActivity(manualId, "Pass 4 — preparing entity extraction...");
+  }
 
   // Wrap the whole job so any throw releases the manual from "processing".
   // Without this, a failed background run would leave status stuck at "processing"
@@ -1284,10 +1350,13 @@ export async function extractGraphFromExistingText(
     throw new Error(`Manual ${manualId} has no OCR text — run vision OCR first`);
   }
 
-  // Clear existing graph data so re-runs are idempotent
-  await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
-  await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
-  await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
+  // Only clear graph data when we are NOT resuming — a resume keeps existing
+  // entities/relationships from the previous (complete) pass.
+  if (!resumeFromPass5) {
+    await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
+    await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+    await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
+  }
 
   // Pass 1: document structure. Reuse the stored structure from the upload pass
   // if present — re-running Pass 1 here would be a wasted LLM call on identical text.
@@ -1311,98 +1380,136 @@ export async function extractGraphFromExistingText(
       .where(eq(manualsTable.id, manualId));
   }
 
-  // Pass 4: entity extraction (configurable depth, anchored to Pass 1 machine names)
-  const extractedEntities = await pass4EntityExtraction(
-    manualId,
-    fullText,
-    structure.documentType,
-    structure.overview ?? "",
-    entityChunks,
-    structure.machines
-  );
+  // ── Pass 4: entity extraction ─────────────────────────────────────────────
+  // Skip if we are resuming from Pass 5+ (entities already in DB).
+  let insertedEntities: Array<{ name: string; id: number }>;
+  let extractedEntitiesForContext: ExtractedEntity[];
 
-  const insertedEntities: Array<{ name: string; id: number }> = [];
-  for (const entity of extractedEntities) {
-    try {
-      const [inserted] = await db
-        .insert(entitiesTable)
-        .values({
-          manualId,
-          name: entity.name,
-          type: entity.type ?? "component",
-          description: entity.description ?? "",
-          properties: entity.properties ?? null,
-          pageReferences: entity.pageReferences ?? [],
-          orderIndex: entity.orderIndex ?? null,
-        })
-        .returning();
-      if (inserted) insertedEntities.push({ name: entity.name, id: inserted.id });
-    } catch (err) {
-      logger.warn({ err, entity: entity.name }, "Entity insert failed");
+  if (resumeFromPass5) {
+    // Load entities from DB so Pass 5 context (entity name anchoring) stays consistent
+    await updateManualPass(manualId, 5);
+    const dbEntities = await db
+      .select({ id: entitiesTable.id, name: entitiesTable.name, type: entitiesTable.type, description: entitiesTable.description, pageReferences: entitiesTable.pageReferences, properties: entitiesTable.properties })
+      .from(entitiesTable)
+      .where(eq(entitiesTable.manualId, manualId));
+    insertedEntities = dbEntities.map((e) => ({ name: e.name, id: e.id }));
+    extractedEntitiesForContext = dbEntities.map((e) => ({
+      name: e.name,
+      type: e.type,
+      description: e.description,
+      pageReferences: (e.pageReferences as number[]) ?? [],
+      properties: (e.properties as EntityProperties | undefined) ?? undefined,
+    }));
+    logger.info({ manualId, entities: insertedEntities.length }, "Pass 4: skipped — loaded existing entities from DB");
+    await setActivity(manualId, `Pass 4 ✓ — ${insertedEntities.length} entities already extracted, resuming from relationships`);
+  } else {
+    const extractedEntities = await pass4EntityExtraction(
+      manualId,
+      fullText,
+      structure.documentType,
+      structure.overview ?? "",
+      entityChunks,
+      structure.machines
+    );
+    extractedEntitiesForContext = extractedEntities;
+
+    insertedEntities = [];
+    for (const entity of extractedEntities) {
+      try {
+        const [inserted] = await db
+          .insert(entitiesTable)
+          .values({
+            manualId,
+            name: entity.name,
+            type: entity.type ?? "component",
+            description: entity.description ?? "",
+            properties: entity.properties ?? null,
+            pageReferences: entity.pageReferences ?? [],
+            orderIndex: entity.orderIndex ?? null,
+          })
+          .returning();
+        if (inserted) insertedEntities.push({ name: entity.name, id: inserted.id });
+      } catch (err) {
+        logger.warn({ err, entity: entity.name }, "Entity insert failed");
+      }
     }
   }
 
-  // Pass 5: relationship extraction (configurable depth)
-  const extractedRelationships = await pass5RelationshipExtraction(
-    manualId,
-    fullText,
-    extractedEntities,
-    relChunks
-  );
-
+  // ── Pass 5: relationship extraction ──────────────────────────────────────
+  // Skip if we are resuming from Pass 6+ (relationships already in DB).
   const nameToId = new Map<string, number>();
   for (const e of insertedEntities) nameToId.set(e.name.toLowerCase().trim(), e.id);
 
   let relCount = 0;
-  for (const rel of extractedRelationships) {
-    const sourceId = nameToId.get(rel.sourceName?.toLowerCase().trim() ?? "");
-    const targetId = nameToId.get(rel.targetName?.toLowerCase().trim() ?? "");
-    if (!sourceId || !targetId || sourceId === targetId) continue;
-    try {
-      await db.insert(relationshipsTable).values({
-        manualId,
-        sourceEntityId: sourceId,
-        targetEntityId: targetId,
-        type: rel.type ?? "connects_to",
-        label: rel.label ?? "",
-        orderIndex: rel.orderIndex ?? null,
-        properties: null,
-      });
-      relCount++;
-    } catch (err) {
-      logger.warn({ err }, "Relationship insert failed");
+  if (resumeFromPass6) {
+    relCount = existingRelCount;
+    await updateManualPass(manualId, 6);
+    logger.info({ manualId, relationships: relCount }, "Pass 5: skipped — loaded existing relationships from DB");
+    await setActivity(manualId, `Pass 5 ✓ — ${relCount} relationships already extracted, resuming from ordering`);
+  } else {
+    // Clear only relationships/paths (not entities which are already correct)
+    if (resumeFromPass5) {
+      await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+      await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
     }
+
+    const extractedRelationships = await pass5RelationshipExtraction(
+      manualId,
+      fullText,
+      extractedEntitiesForContext,
+      relChunks
+    );
+
+    for (const rel of extractedRelationships) {
+      const sourceId = nameToId.get(rel.sourceName?.toLowerCase().trim() ?? "");
+      const targetId = nameToId.get(rel.targetName?.toLowerCase().trim() ?? "");
+      if (!sourceId || !targetId || sourceId === targetId) continue;
+      try {
+        await db.insert(relationshipsTable).values({
+          manualId,
+          sourceEntityId: sourceId,
+          targetEntityId: targetId,
+          type: rel.type ?? "connects_to",
+          label: rel.label ?? "",
+          orderIndex: rel.orderIndex ?? null,
+          properties: null,
+        });
+        relCount++;
+      } catch (err) {
+        logger.warn({ err }, "Relationship insert failed");
+      }
+    }
+
+    // Pass 5b: path extraction — ordered procedural sequences with scope conditions.
+    const extractedPaths = await pass5ExtractPaths(manualId, fullText, relChunks, extractedEntitiesForContext);
+    let pathCount = 0;
+    for (const path of extractedPaths) {
+      if (!path.name || !path.plainLanguage) continue;
+      try {
+        await db.insert(pathsTable).values({
+          manualId,
+          name: path.name,
+          pathType: path.pathType ?? "procedure_step",
+          condition: path.condition ?? null,
+          stepSequence: path.stepSequence ?? [],
+          plainLanguage: path.plainLanguage,
+          pageReferences: path.pageReferences ?? [],
+        });
+        pathCount++;
+      } catch (err) {
+        logger.warn({ err, path: path.name }, "Path insert failed");
+      }
+    }
+    logger.info({ manualId, paths: pathCount }, "Pass 5b: path extraction complete");
   }
 
-  // Pass 5b: path extraction — ordered procedural sequences with scope conditions.
-  // Pass extractedEntities so step descriptions reference consistent entity names.
-  const extractedPaths = await pass5ExtractPaths(manualId, fullText, relChunks, extractedEntities);
-  let pathCount = 0;
-  for (const path of extractedPaths) {
-    if (!path.name || !path.plainLanguage) continue;
-    try {
-      await db.insert(pathsTable).values({
-        manualId,
-        name: path.name,
-        pathType: path.pathType ?? "procedure_step",
-        condition: path.condition ?? null,
-        stepSequence: path.stepSequence ?? [],
-        plainLanguage: path.plainLanguage,
-        pageReferences: path.pageReferences ?? [],
-      });
-      pathCount++;
-    } catch (err) {
-      logger.warn({ err, path: path.name }, "Path insert failed");
-    }
-  }
-
-  // Pass 6: ordering & hierarchy — apply top-level machine ranking to entities
-  const hierarchy = await pass6OrderingHierarchy(manualId, fullText, extractedEntities, structure.machines);
+  // Pass 6: ordering & hierarchy — always re-run (lightweight, idempotent UPDATE)
+  const hierarchy = await pass6OrderingHierarchy(manualId, fullText, extractedEntitiesForContext, structure.machines);
   await applyTopLevelOrdering(manualId, hierarchy.topLevelMachines);
 
   await setManualStatus(manualId, "completed", { processingPass: 7 });
   logger.info(
-    { manualId, entities: insertedEntities.length, relationships: relCount, paths: pathCount, entityChunks, relChunks },
+    { manualId, entities: insertedEntities.length, relationships: relCount, entityChunks, relChunks, resumeFromPass5, resumeFromPass6 },
     "Graph extraction from existing text complete"
   );
   return { entities: insertedEntities.length, relationships: relCount };
@@ -1464,45 +1571,61 @@ export async function runExtractionPipeline(
   pdfBuffer: Buffer
 ): Promise<void> {
   try {
-    await setManualStatus(manualId, "processing", { processingPass: 0 });
-    await setActivity(manualId, "Starting — extracting text from PDF...");
+    // ── Load existing DB state before changing anything ──────────────────────
+    // This lets every pass check what's already been done and skip it, so a
+    // stall at any point — Pass 1, 2, 3, Vision OCR, or 7 — resumes from that
+    // exact point rather than restarting from the beginning.
+    const [existingManual] = await db
+      .select({ structure: manualsTable.structure, documentType: manualsTable.documentType, totalPages: manualsTable.totalPages })
+      .from(manualsTable)
+      .where(eq(manualsTable.id, manualId));
+    const hasStructure = !!(existingManual?.structure && existingManual.totalPages);
 
-    // Extract PDF text
+    await setManualStatus(manualId, "processing", { processingPass: 0 });
+    await setActivity(manualId, hasStructure ? "Resuming pipeline — checking progress..." : "Starting — extracting text from PDF...");
+
+    // Always extract text from the PDF buffer (fast, no AI — just native parsing).
     const pdfContent = await extractPdfText(pdfBuffer);
 
-    await db
-      .update(manualsTable)
-      .set({ totalPages: pdfContent.totalPages, updatedAt: new Date() })
-      .where(eq(manualsTable.id, manualId));
+    // ── Pass 1: Document structure ───────────────────────────────────────────
+    let structure: { documentType: string; overview: string; machines: string[]; sections: string[] };
+    if (hasStructure && existingManual.structure) {
+      // Already done in a previous run — reuse saved structure, skip LLM call.
+      structure = {
+        documentType: existingManual.documentType ?? "other",
+        overview: existingManual.structure.overview,
+        machines: existingManual.structure.machines ?? [],
+        sections: existingManual.structure.sections ?? [],
+      };
+      await updateManualPass(manualId, 1);
+      await setActivity(manualId, "Pass 1 ✓ — document structure already extracted, skipping");
+      logger.info({ manualId }, "Pass 1: skipping — structure already in DB");
+    } else {
+      await db
+        .update(manualsTable)
+        .set({ totalPages: pdfContent.totalPages, updatedAt: new Date() })
+        .where(eq(manualsTable.id, manualId));
+      structure = await pass1DocumentStructure(manualId, pdfContent.fullText, pdfContent.totalPages);
+      await db
+        .update(manualsTable)
+        .set({
+          documentType: structure.documentType,
+          structure: { overview: structure.overview, machines: structure.machines, sections: structure.sections },
+          updatedAt: new Date(),
+        })
+        .where(eq(manualsTable.id, manualId));
+    }
 
-    // Pass 1: Document structure
-    const structure = await pass1DocumentStructure(
-      manualId,
-      pdfContent.fullText,
-      pdfContent.totalPages
-    );
-
-    await db
-      .update(manualsTable)
-      .set({
-        documentType: structure.documentType,
-        structure: { overview: structure.overview, machines: structure.machines, sections: structure.sections },
-        updatedAt: new Date(),
-      })
-      .where(eq(manualsTable.id, manualId));
-
-    // Pass 2: Page content
+    // ── Pass 2: Page content ─────────────────────────────────────────────────
+    // pass2PageContent already checks which pages exist and only inserts new ones.
     await pass2PageContent(manualId, pdfContent.pages);
 
-    // Pass 3: Vision descriptions — returns a map of pageNumber → description for
-    // sparse pages so we can patch pdfContent in-memory before Pass 7 runs.
+    // ── Pass 3: Vision descriptions ──────────────────────────────────────────
+    // pass3VisionDescriptions already loads existing descriptions from DB and
+    // skips pages that already have one.
     const pass3Descriptions = await pass3VisionDescriptions(manualId, pdfContent.fullText, pdfContent.pages);
 
     // Patch sparse pages in-memory with the AI descriptions Pass 3 generated.
-    // Pass 7 (below) uses pdfContent.pages, so without this patch it would chunk
-    // the thin original OCR text for those pages instead of the richer description.
-    // Diagram pages are exempt — Pass 7's diagram gate handles them with vision
-    // analysis which is more accurate than the context-only Pass 3 description.
     for (const page of pdfContent.pages) {
       const desc = pass3Descriptions.get(page.pageNumber);
       if (desc && page.text.trim().length < 200) {
@@ -1510,24 +1633,43 @@ export async function runExtractionPipeline(
       }
     }
 
-    // Image-PDF detection: if >80% of pages have no text, use GPT-4o vision OCR
+    // ── Vision OCR (image-based PDFs) ────────────────────────────────────────
+    // Only trigger if >80 % of pages are empty. On resume, check if pages
+    // already have rawText saved from a previous OCR run and load from DB.
     const emptyCount = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20).length;
     if (pdfContent.pages.length > 0 && emptyCount / pdfContent.pages.length > 0.8) {
-      logger.info({ manualId, emptyCount }, "Image-based PDF detected — running vision OCR");
-      const ocrPages = await passVisionOcr(manualId, pdfBuffer, pdfContent.totalPages);
-      // Patch pdfContent in-place so downstream passes use the OCR text
-      for (const ocrPage of ocrPages) {
-        const page = pdfContent.pages.find((p) => p.pageNumber === ocrPage.pageNumber);
-        if (page) page.text = ocrPage.text;
+      // Check whether vision OCR was already fully (or partially) completed.
+      const ocrRows = await db
+        .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
+        .from(manualPagesTable)
+        .where(and(eq(manualPagesTable.manualId, manualId), isNotNull(manualPagesTable.rawText)));
+      const ocrSavedPages = new Map(ocrRows.map((r) => [r.pageNumber, r.rawText!]));
+
+      if (ocrSavedPages.size >= pdfContent.pages.length * 0.8) {
+        // OCR already done — patch from DB rather than re-running
+        logger.info({ manualId, saved: ocrSavedPages.size }, "Vision OCR: skipping — rawText already in DB");
+        await setActivity(manualId, `Vision OCR ✓ — ${ocrSavedPages.size} pages already OCR'd, loading from database`);
+        for (const page of pdfContent.pages) {
+          const saved = ocrSavedPages.get(page.pageNumber);
+          if (saved) page.text = saved;
+        }
+        pdfContent.fullText = pdfContent.pages.map((p) => p.text).join("\n\n");
+      } else {
+        // Not done (or partial) — run/resume the OCR pass (passVisionOcr saves
+        // rawText per-page as it goes, so a re-run skips pages already written).
+        logger.info({ manualId, emptyCount }, "Image-based PDF detected — running vision OCR");
+        const ocrPages = await passVisionOcr(manualId, pdfBuffer, pdfContent.totalPages);
+        for (const ocrPage of ocrPages) {
+          const page = pdfContent.pages.find((p) => p.pageNumber === ocrPage.pageNumber);
+          if (page) page.text = ocrPage.text;
+        }
+        pdfContent.fullText = ocrPages.map((p) => p.text).join("\n\n");
       }
-      pdfContent.fullText = ocrPages.map((p) => p.text).join("\n\n");
     }
 
-    // Pass 7: RAG chunking — runs automatically so search is ready immediately.
-    // pdfBuffer is passed so the diagram gate can run pixel analysis and replace
-    // garbled OCR on wiring-diagram / schematic pages with a vision description.
-    // updatePass:false keeps the displayed pass number at 3 (not 7) so the UI
-    // progress bar doesn't jump forward and then back when entity extraction starts.
+    // ── Pass 7: RAG chunking ─────────────────────────────────────────────────
+    // pass7EmbedChunks now skips pages that already have chunks in the DB, so
+    // a stall mid-pass resumes from the first un-indexed page.
     await pass7EmbedChunks(manualId, pdfContent.pages, pdfBuffer, { updatePass: false });
 
     // Stop here — entity/relationship extraction is triggered manually by the user
