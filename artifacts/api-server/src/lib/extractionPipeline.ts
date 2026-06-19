@@ -25,7 +25,7 @@ import {
   type InsertEntity,
   type InsertRelationship,
 } from "@workspace/db";
-import { eq, and, count } from "drizzle-orm";
+import { eq, and, count, sql } from "drizzle-orm";
 import { extractPdfText, renderPdfPageToBase64, hasDiagramImage, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
@@ -57,7 +57,7 @@ async function pass1DocumentStructure(
   manualId: number,
   fullText: string,
   totalPages: number
-): Promise<{ documentType: string; overview: string }> {
+): Promise<{ documentType: string; overview: string; machines: string[]; sections: string[] }> {
   await updateManualPass(manualId, 1);
 
   const sample = fullText.slice(0, 8000);
@@ -84,9 +84,15 @@ Analyze the document and return a JSON object with:
 
   const raw = response.choices[0]?.message?.content ?? "{}";
   try {
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return {
+      documentType: parsed.documentType ?? "other",
+      overview: parsed.overview ?? "",
+      machines: Array.isArray(parsed.machines) ? parsed.machines : [],
+      sections: Array.isArray(parsed.sections) ? parsed.sections : [],
+    };
   } catch {
-    return { documentType: "other", overview: "" };
+    return { documentType: "other", overview: "", machines: [], sections: [] };
   }
 }
 
@@ -122,11 +128,18 @@ async function pass3VisionDescriptions(
 ): Promise<Map<number, string>> {
   await updateManualPass(manualId, 3);
 
-  // For pages with sparse text (likely images/tables), generate descriptions using AI
-  const sparsePages = pages.filter((p) => p.hasImages || p.hasTables || p.text.length < 200);
+  // For sparse non-image pages, generate context-based descriptions using AI.
+  // Image pages are excluded — Pass 7's diagram gate handles them with true vision
+  // analysis (more accurate than Pass 3's context-only guess), so describing them
+  // here would waste an LLM call whose output Pass 7 overwrites anyway.
+  // Tabular pages that still have substantial text are also excluded: their
+  // description is never preferred downstream (consumers only swap in the
+  // description for genuinely sparse text), so describing them would be a wasted
+  // call. Pass 7's tabular gate restructures those pages instead.
+  const sparsePages = pages.filter((p) => !p.hasImages && p.text.length < 200);
 
-  // Process up to 10 sparse pages with AI descriptions
-  const toDescribe = sparsePages.slice(0, 10);
+  // Describe all qualifying sparse pages (no cap — full document coverage)
+  const toDescribe = sparsePages;
 
   // Return a map of pageNumber → description so the caller can patch pdfContent
   // in-memory before Pass 7 runs, ensuring FTS chunks contain enriched text.
@@ -204,13 +217,21 @@ async function pass4EntityExtraction(
   fullText: string,
   documentType: string,
   overview: string,
-  maxChunks = 8
+  maxChunks = Infinity,
+  knownMachines: string[] = []
 ): Promise<ExtractedEntity[]> {
   await updateManualPass(manualId, 4);
 
   const allEntities: ExtractedEntity[] = [];
   const chunks = chunkText(fullText, 5000);
   const seenNames = new Set<string>();
+
+  // Anchor naming to the top-level machines Pass 1 identified, so the same machine
+  // is named identically across every chunk (chat domain classification matches on
+  // exact entity names — naming drift fragments retrieval).
+  const machineAnchor = knownMachines.length > 0
+    ? `\n\nKNOWN TOP-LEVEL MACHINES (use these EXACT names when referring to them; keep naming consistent across the document):\n${knownMachines.map((m) => `- ${m}`).join("\n")}`
+    : "";
 
   for (let ci = 0; ci < Math.min(chunks.length, maxChunks); ci++) {
     const chunk = chunks[ci];
@@ -250,7 +271,7 @@ Guidelines:
 - document_section: major manual sections
 
 Be precise — use the exact names from the text. Do not invent entities not in the text.
-IMPORTANT: For measurement entities (distances, pressures, temperatures, tensions), always populate "properties.attributes" with all variant values and "properties.conditions" with any scope qualifiers present in the text.`,
+IMPORTANT: For measurement entities (distances, pressures, temperatures, tensions), always populate "properties.attributes" with all variant values and "properties.conditions" with any scope qualifiers present in the text.${machineAnchor}`,
           },
           {
             role: "user",
@@ -297,7 +318,7 @@ interface ExtractedPath {
 async function pass5ExtractPaths(
   manualId: number,
   fullText: string,
-  maxChunks = 6,
+  maxChunks = Infinity,
   entities: ExtractedEntity[] = []
 ): Promise<ExtractedPath[]> {
   const allPaths: ExtractedPath[] = [];
@@ -372,7 +393,7 @@ async function pass5RelationshipExtraction(
   manualId: number,
   fullText: string,
   entities: ExtractedEntity[],
-  maxChunks = 6
+  maxChunks = Infinity
 ): Promise<ExtractedRelationship[]> {
   await updateManualPass(manualId, 5);
 
@@ -441,9 +462,16 @@ Only use entity names that exactly match (or very closely match) the known entit
 async function pass6OrderingHierarchy(
   manualId: number,
   fullText: string,
-  entities: ExtractedEntity[]
-): Promise<{ hierarchyNotes: string }> {
+  entities: ExtractedEntity[],
+  knownMachines: string[] = []
+): Promise<{ hierarchyNotes: string; topLevelMachines: string[]; procedureOrder: string[] }> {
   await updateManualPass(manualId, 6);
+
+  // Seed with the top-level machines Pass 1 already identified so the model
+  // ranks a known list rather than re-deriving it from scratch.
+  const machineSeed = knownMachines.length > 0
+    ? `\n\nTop-level machines already identified (rank/refine these, do not invent new ones unless clearly missing): ${knownMachines.join(", ")}`
+    : "";
 
   // Extract top-level hierarchy from overview section
   const sample = fullText.slice(0, 4000);
@@ -462,16 +490,44 @@ Return a JSON object with:
         },
         {
           role: "user",
-          content: `Determine the hierarchy and ordering from this engineering manual:\n\n${sample}\n\nKnown entities: ${entities.slice(0, 30).map((e) => e.name).join(", ")}`,
+          content: `Determine the hierarchy and ordering from this engineering manual:\n\n${sample}\n\nKnown entities: ${entities.slice(0, 30).map((e) => e.name).join(", ")}${machineSeed}`,
         },
       ],
       response_format: { type: "json_object" },
     });
 
     const raw = response.choices[0]?.message?.content ?? "{}";
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return {
+      hierarchyNotes: parsed.hierarchyNotes ?? "",
+      topLevelMachines: Array.isArray(parsed.topLevelMachines) ? parsed.topLevelMachines : [],
+      procedureOrder: Array.isArray(parsed.procedureOrder) ? parsed.procedureOrder : [],
+    };
   } catch {
-    return { hierarchyNotes: "" };
+    return { hierarchyNotes: "", topLevelMachines: [], procedureOrder: [] };
+  }
+}
+
+// Apply Pass 6's top-level machine ranking to entity orderIndex. Ranked machines
+// get a distinct low band (negative) so they always sort ahead of chunk-derived
+// entities while preserving their relative rank order.
+async function applyTopLevelOrdering(manualId: number, topLevelMachines: string[]): Promise<void> {
+  for (let i = 0; i < topLevelMachines.length; i++) {
+    const name = topLevelMachines[i]?.toLowerCase().trim();
+    if (!name) continue;
+    try {
+      await db
+        .update(entitiesTable)
+        .set({ orderIndex: -10000 + i })
+        .where(
+          and(
+            eq(entitiesTable.manualId, manualId),
+            sql`lower(${entitiesTable.name}) = ${name}`
+          )
+        );
+    } catch (err) {
+      logger.warn({ err, manualId, name }, "Top-level ordering update failed");
+    }
   }
 }
 
@@ -612,6 +668,7 @@ async function pass7EmbedChunks(
     if (!page.text || page.text.trim().length < 20) continue;
 
     let textToChunk = page.text;
+    let enriched = false;
 
     // Diagram gate: if pdfBuffer is available, check whether any embedded image
     // on this page is a line drawing or schematic (midtone pixel fraction < 25%).
@@ -622,6 +679,7 @@ async function pass7EmbedChunks(
       const visionText = await describePageWithVision(pdfBuffer, page.pageNumber);
       if (visionText) {
         textToChunk = visionText;
+        enriched = true;
         diagramPages++;
         logger.info(
           { manualId, pageNumber: page.pageNumber },
@@ -633,11 +691,34 @@ async function pass7EmbedChunks(
       // relationships that OCR linearisation destroyed.  Prose pages pass through
       // unchanged (isTabularOcrPage returns false for them).
       textToChunk = await restructureTabularContent(page.text);
+      enriched = true;
       restructuredPages++;
       logger.info(
         { manualId, pageNumber: page.pageNumber },
         "Pass 7: tabular page restructured"
       );
+    }
+
+    // Persist enriched text to the page's description so entity/relationship
+    // extraction (which reads manual_pages and prefers description for sparse
+    // pages) sees the vision/restructured content rather than the garbled OCR.
+    if (enriched && textToChunk.trim().length > 0) {
+      try {
+        await db
+          .update(manualPagesTable)
+          .set({ description: textToChunk })
+          .where(
+            and(
+              eq(manualPagesTable.manualId, manualId),
+              eq(manualPagesTable.pageNumber, page.pageNumber)
+            )
+          );
+      } catch (err) {
+        logger.warn(
+          { err, manualId, pageNumber: page.pageNumber },
+          "Pass 7: description writeback failed"
+        );
+      }
     }
 
     const semanticChunks = chunkPageSemantically(textToChunk);
@@ -856,15 +937,21 @@ export async function reprocessManualWithVision(
     const structure = await pass1DocumentStructure(manualId, fullText, totalPages);
     await db
       .update(manualsTable)
-      .set({ documentType: structure.documentType, updatedAt: new Date() })
+      .set({
+        documentType: structure.documentType,
+        structure: { overview: structure.overview, machines: structure.machines, sections: structure.sections },
+        updatedAt: new Date(),
+      })
       .where(eq(manualsTable.id, manualId));
 
-    // Pass 4: Entity extraction
+    // Pass 4: Entity extraction (full document, anchored to Pass 1 machine names)
     const extractedEntities = await pass4EntityExtraction(
       manualId,
       fullText,
       structure.documentType,
-      structure.overview ?? ""
+      structure.overview ?? "",
+      undefined,
+      structure.machines
     );
 
     const insertedEntities: Array<{ name: string; id: number }> = [];
@@ -877,7 +964,7 @@ export async function reprocessManualWithVision(
             name: entity.name,
             type: entity.type ?? "component",
             description: entity.description ?? "",
-            properties: null,
+            properties: entity.properties ?? null,
             pageReferences: entity.pageReferences ?? [],
             orderIndex: entity.orderIndex ?? null,
           })
@@ -917,8 +1004,8 @@ export async function reprocessManualWithVision(
       }
     }
 
-    // Pass 5b: Path extraction — ordered procedural sequences
-    const extractedPaths = await pass5ExtractPaths(manualId, fullText);
+    // Pass 5b: Path extraction — ordered procedural sequences (entity-anchored)
+    const extractedPaths = await pass5ExtractPaths(manualId, fullText, undefined, extractedEntities);
     for (const path of extractedPaths) {
       if (!path.name || !path.plainLanguage) continue;
       try {
@@ -936,8 +1023,9 @@ export async function reprocessManualWithVision(
       }
     }
 
-    // Pass 6: Ordering & hierarchy
-    await pass6OrderingHierarchy(manualId, fullText, extractedEntities);
+    // Pass 6: Ordering & hierarchy — apply top-level machine ranking to entities
+    const hierarchy = await pass6OrderingHierarchy(manualId, fullText, extractedEntities, structure.machines);
+    await applyTopLevelOrdering(manualId, hierarchy.topLevelMachines);
 
     // Pass 7: Semantic chunking
     await pass7EmbedChunks(
@@ -1080,13 +1168,13 @@ export async function extractGraphFromExistingText(
   manualId: number,
   opts?: { entityChunks?: number; relChunks?: number }
 ): Promise<{ entities: number; relationships: number }> {
-  const entityChunks = opts?.entityChunks ?? 8;
-  const relChunks = opts?.relChunks ?? 6;
+  const entityChunks = opts?.entityChunks ?? Infinity;
+  const relChunks = opts?.relChunks ?? Infinity;
 
   await setManualStatus(manualId, "processing", { processingPass: 4 });
 
   const [manual] = await db
-    .select({ documentType: manualsTable.documentType })
+    .select({ documentType: manualsTable.documentType, structure: manualsTable.structure })
     .from(manualsTable)
     .where(eq(manualsTable.id, manualId));
   if (!manual) throw new Error(`Manual ${manualId} not found`);
@@ -1125,20 +1213,36 @@ export async function extractGraphFromExistingText(
   await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
   await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
 
-  // Pass 1: document structure (needed for document type + overview context)
-  const structure = await pass1DocumentStructure(manualId, fullText, pages.length);
-  await db
-    .update(manualsTable)
-    .set({ documentType: structure.documentType, updatedAt: new Date() })
-    .where(eq(manualsTable.id, manualId));
+  // Pass 1: document structure. Reuse the stored structure from the upload pass
+  // if present — re-running Pass 1 here would be a wasted LLM call on identical text.
+  let structure: { documentType: string; overview: string; machines: string[]; sections: string[] };
+  if (manual.structure) {
+    structure = {
+      documentType: manual.documentType ?? "other",
+      overview: manual.structure.overview,
+      machines: manual.structure.machines ?? [],
+      sections: manual.structure.sections ?? [],
+    };
+  } else {
+    structure = await pass1DocumentStructure(manualId, fullText, pages.length);
+    await db
+      .update(manualsTable)
+      .set({
+        documentType: structure.documentType,
+        structure: { overview: structure.overview, machines: structure.machines, sections: structure.sections },
+        updatedAt: new Date(),
+      })
+      .where(eq(manualsTable.id, manualId));
+  }
 
-  // Pass 4: entity extraction (configurable depth)
+  // Pass 4: entity extraction (configurable depth, anchored to Pass 1 machine names)
   const extractedEntities = await pass4EntityExtraction(
     manualId,
     fullText,
     structure.documentType,
     structure.overview ?? "",
-    entityChunks
+    entityChunks,
+    structure.machines
   );
 
   const insertedEntities: Array<{ name: string; id: number }> = [];
@@ -1216,8 +1320,9 @@ export async function extractGraphFromExistingText(
     }
   }
 
-  // Pass 6: ordering & hierarchy
-  await pass6OrderingHierarchy(manualId, fullText, extractedEntities);
+  // Pass 6: ordering & hierarchy — apply top-level machine ranking to entities
+  const hierarchy = await pass6OrderingHierarchy(manualId, fullText, extractedEntities, structure.machines);
+  await applyTopLevelOrdering(manualId, hierarchy.topLevelMachines);
 
   await setManualStatus(manualId, "completed", { processingPass: 7 });
   logger.info(
@@ -1236,16 +1341,29 @@ export async function extractGraphFromExistingText(
  */
 export async function rechunkManual(manualId: number): Promise<{ chunks: number }> {
   const pages = await db
-    .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
+    .select({
+      pageNumber: manualPagesTable.pageNumber,
+      rawText: manualPagesTable.rawText,
+      description: manualPagesTable.description,
+    })
     .from(manualPagesTable)
     .where(eq(manualPagesTable.manualId, manualId))
     .orderBy(manualPagesTable.pageNumber);
 
   if (pages.length === 0) throw new Error(`No pages found for manual ${manualId}`);
 
+  // Prefer the enriched description for sparse pages (mirrors extractGraphFromExistingText)
+  // so re-chunking keeps the vision/restructured content instead of thin OCR text.
   await pass7EmbedChunks(
     manualId,
-    pages.map((p) => ({ pageNumber: p.pageNumber, text: p.rawText ?? "" }))
+    pages.map((p) => {
+      const raw = (p.rawText ?? "").trim();
+      const desc = (p.description ?? "").trim();
+      return {
+        pageNumber: p.pageNumber,
+        text: raw.length < 100 && desc.length > 0 ? desc : raw,
+      };
+    })
   );
 
   const [row] = await db
@@ -1282,7 +1400,11 @@ export async function runExtractionPipeline(
 
     await db
       .update(manualsTable)
-      .set({ documentType: structure.documentType, updatedAt: new Date() })
+      .set({
+        documentType: structure.documentType,
+        structure: { overview: structure.overview, machines: structure.machines, sections: structure.sections },
+        updatedAt: new Date(),
+      })
       .where(eq(manualsTable.id, manualId));
 
     // Pass 2: Page content

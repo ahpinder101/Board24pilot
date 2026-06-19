@@ -17,6 +17,7 @@ export const manualsTable = pgTable("manuals", {
   processingPass: integer("processing_pass"),
   totalPages: integer("total_pages"),
   documentType: text("document_type"),
+  structure: jsonb("structure").$type<{ overview: string; machines: string[]; sections: string[] }>(),
   errorMessage: text("error_message"),
   pdfData: bytea("pdf_data"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
