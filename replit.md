@@ -59,7 +59,7 @@ Upload PDF engineering manuals and let AI extract entities and relationships int
 - **Replit-managed Clerk** (cookie-based on web). Provisioned via `setupClerkWhitelabelAuth()`; keys in `CLERK_*` / `VITE_CLERK_*` env vars (auto-managed, do not edit).
 - Server: `clerkProxyMiddleware` (prod-only) mounted before body parsers, then `clerkMiddleware`; `requireAuth` (in `routes/index.ts`) gates **all** API routes except `/api/healthz`.
 - Client: `App.tsx` wraps everything in `<ClerkProvider>`; signed-out users see `landing-page.tsx`, sign-in/up at `/sign-in` and `/sign-up`.
-- **Invite-only is NOT enforced by code.** Auth only requires a signed-in user, not which user. To restrict to invited people, configure the **Auth pane** (disable open sign-up / add an allowlist). See `.agents/memory/clerk-invite-only.md`.
+- **Invite-only allowlist:** `requireAuth` enforces an `ALLOWED_EMAILS` env var (comma/space separated; full emails or `@domain` entries). Unset = disabled (any signed-in user; logs a startup warning). Set = non-listed emails get 403. Requires an api-server restart to pick up changes. See `.agents/memory/clerk-invite-only.md`.
 
 ## User preferences
 
