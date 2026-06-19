@@ -241,23 +241,55 @@ router.post("/chat", async (req: Request, res: Response) => {
 
     let ragChunks: ChunkRow[] = [];
 
+    // Minimum ts_rank threshold: filters chunks that match only 1-2 tokens from
+    // the OR query (e.g. a page that mentions "TMCC2" but has nothing about the
+    // specific question).  If the threshold drops everything we fall back to the
+    // unthresholded top results so short/single-term queries still work.
+    const FTS_RANK_THRESHOLD = 0.01;
+
     if (tsQuery.length > 0) {
       const ftsResult = await db.execute<ChunkRow>(sql`
-        SELECT
-          c.id,
-          c.manual_id,
-          m.name AS manual_name,
-          c.page_number,
-          c.chunk_index,
-          c.content,
-          ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
-        FROM chunks c
-        JOIN manuals m ON m.id = c.manual_id
-        WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
+        SELECT * FROM (
+          SELECT
+            c.id,
+            c.manual_id,
+            m.name AS manual_name,
+            c.page_number,
+            c.chunk_index,
+            c.content,
+            ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
+          FROM chunks c
+          JOIN manuals m ON m.id = c.manual_id
+          WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
+          ORDER BY rank DESC
+          LIMIT 50
+        ) ranked
+        WHERE rank > ${FTS_RANK_THRESHOLD}
         ORDER BY rank DESC
         LIMIT ${TOP_K_CHUNKS}
       `);
-      ragChunks = ftsResult.rows;
+
+      if (ftsResult.rows.length > 0) {
+        ragChunks = ftsResult.rows;
+      } else {
+        // Threshold excluded everything — fall back to unthresholded top results
+        const fallbackFts = await db.execute<ChunkRow>(sql`
+          SELECT
+            c.id,
+            c.manual_id,
+            m.name AS manual_name,
+            c.page_number,
+            c.chunk_index,
+            c.content,
+            ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
+          FROM chunks c
+          JOIN manuals m ON m.id = c.manual_id
+          WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
+          ORDER BY rank DESC
+          LIMIT ${TOP_K_CHUNKS}
+        `);
+        ragChunks = fallbackFts.rows;
+      }
     }
 
     // Fallback: if FTS returns nothing, grab most-recent chunks as context
@@ -392,18 +424,23 @@ router.post("/chat", async (req: Request, res: Response) => {
     // the classified manual(s) and merge any new top-K chunks into ragChunks.
     if (scopedManualIds.length <= 2 && tsQuery.length > 0) {
       const scopedFtsResult = await db.execute<ChunkRow>(sql`
-        SELECT
-          c.id,
-          c.manual_id,
-          m.name AS manual_name,
-          c.page_number,
-          c.chunk_index,
-          c.content,
-          ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
-        FROM chunks c
-        JOIN manuals m ON m.id = c.manual_id
-        WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
-          AND c.fts_vector @@ to_tsquery('english', ${tsQuery})
+        SELECT * FROM (
+          SELECT
+            c.id,
+            c.manual_id,
+            m.name AS manual_name,
+            c.page_number,
+            c.chunk_index,
+            c.content,
+            ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
+          FROM chunks c
+          JOIN manuals m ON m.id = c.manual_id
+          WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+            AND c.fts_vector @@ to_tsquery('english', ${tsQuery})
+          ORDER BY rank DESC
+          LIMIT 100
+        ) ranked
+        WHERE rank > ${FTS_RANK_THRESHOLD}
         ORDER BY rank DESC
         LIMIT ${TOP_K_SCOPED}
       `);
