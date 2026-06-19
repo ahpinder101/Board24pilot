@@ -442,12 +442,13 @@ async function pass5RelationshipExtraction(
   manualId: number,
   fullText: string,
   entities: ExtractedEntity[],
+  nameToId: Map<string, number>,
   maxChunks = Infinity
-): Promise<ExtractedRelationship[]> {
+): Promise<number> {
   await updateManualPass(manualId, 5);
 
   const entityNames = entities.map((e) => e.name).join(", ");
-  const allRelationships: ExtractedRelationship[] = [];
+  let relCount = 0;
   const chunks = chunkText(fullText, 4000);
 
   const totalRelChunks = Math.min(chunks.length, maxChunks === Infinity ? chunks.length : maxChunks);
@@ -499,13 +500,32 @@ Only use entity names that exactly match (or very closely match) the known entit
       const raw = response.choices[0]?.message?.content ?? "{}";
       const parsed = JSON.parse(raw);
       const relationships: ExtractedRelationship[] = parsed.relationships ?? [];
-      allRelationships.push(...relationships);
+      // Insert immediately so a crash only loses the current chunk, not all previous work
+      for (const rel of relationships) {
+        const sourceId = nameToId.get(rel.sourceName?.toLowerCase().trim() ?? "");
+        const targetId = nameToId.get(rel.targetName?.toLowerCase().trim() ?? "");
+        if (!sourceId || !targetId || sourceId === targetId) continue;
+        try {
+          await db.insert(relationshipsTable).values({
+            manualId,
+            sourceEntityId: sourceId,
+            targetEntityId: targetId,
+            type: rel.type ?? "connects_to",
+            label: rel.label ?? "",
+            orderIndex: rel.orderIndex ?? null,
+            properties: null,
+          });
+          relCount++;
+        } catch (err) {
+          logger.warn({ err }, "Relationship insert failed");
+        }
+      }
     } catch (err) {
       logger.warn({ err, chunk: ci }, "Relationship extraction failed for chunk");
     }
   }
 
-  return allRelationships;
+  return relCount;
 }
 
 // ─── PASS 6: Ordering & hierarchy ───────────────────────────────────────────
@@ -1324,7 +1344,10 @@ export async function extractGraphFromExistingText(
   //  • previousPass >= 6 AND rels exist AND not completed     → Pass 5 finished; skip it too
   //  • Otherwise (including status="completed")               → delete and run from scratch
   const resumeFromPass5 = !previouslyCompleted && previousPass >= 5 && existingEntityCount > 0;
-  const resumeFromPass6 = !previouslyCompleted && previousPass >= 6 && existingRelCount > 0;
+  // resumeFromPass6: skip pass 5 if relationships already exist in DB.
+  // Since pass 5 now saves per-chunk, any existing relationships mean we have
+  // at least partial (often near-complete) pass 5 data — safe to skip to pass 6.
+  const resumeFromPass6 = !previouslyCompleted && previousPass >= 5 && existingRelCount > 0;
 
   await setManualStatus(manualId, "processing", { processingPass: 4 });
   if (resumeFromPass5) {
@@ -1466,41 +1489,20 @@ export async function extractGraphFromExistingText(
   if (resumeFromPass6) {
     relCount = existingRelCount;
     await updateManualPass(manualId, 6);
-    logger.info({ manualId, relationships: relCount }, "Pass 5: skipped — loaded existing relationships from DB");
+    logger.info({ manualId, relationships: relCount }, "Pass 5: skipped — relationships already in DB");
     await setActivity(manualId, `Pass 5 ✓ — ${relCount} relationships already extracted, resuming from ordering`);
   } else {
-    // Clear only relationships/paths (not entities which are already correct)
-    if (resumeFromPass5) {
-      await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
-      await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
-    }
+    // Clear relationships/paths before (re-)running pass 5 — entities are safe
+    await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+    await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
 
-    const extractedRelationships = await pass5RelationshipExtraction(
+    relCount = await pass5RelationshipExtraction(
       manualId,
       fullText,
       extractedEntitiesForContext,
+      nameToId,
       relChunks
     );
-
-    for (const rel of extractedRelationships) {
-      const sourceId = nameToId.get(rel.sourceName?.toLowerCase().trim() ?? "");
-      const targetId = nameToId.get(rel.targetName?.toLowerCase().trim() ?? "");
-      if (!sourceId || !targetId || sourceId === targetId) continue;
-      try {
-        await db.insert(relationshipsTable).values({
-          manualId,
-          sourceEntityId: sourceId,
-          targetEntityId: targetId,
-          type: rel.type ?? "connects_to",
-          label: rel.label ?? "",
-          orderIndex: rel.orderIndex ?? null,
-          properties: null,
-        });
-        relCount++;
-      } catch (err) {
-        logger.warn({ err }, "Relationship insert failed");
-      }
-    }
 
     // Pass 5b: path extraction — ordered procedural sequences with scope conditions.
     const extractedPaths = await pass5ExtractPaths(manualId, fullText, relChunks, extractedEntitiesForContext);
