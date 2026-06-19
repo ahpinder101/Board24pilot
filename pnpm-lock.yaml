@@ -740,6 +740,13 @@ importers:
         version: 19.2.14
 
   scripts:
+    dependencies:
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0(zod@3.25.76)
+      pg:
+        specifier: ^8.20.0
+        version: 8.20.0
     devDependencies:
       '@types/node':
         specifier: 'catalog:'
