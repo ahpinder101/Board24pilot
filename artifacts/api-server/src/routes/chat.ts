@@ -722,15 +722,7 @@ CRITICAL RULES FOR ACCURACY:
 
 FORMATTING:
 - Write in plain prose. Do NOT use markdown bold (**text**), headers (##), or bullet dashes that start with **.
-- You may use numbered lists (1. 2. 3.) and plain dashes (-) for bullet points.
-- Do NOT include inline source numbers like [1] or [2] — sources are shown separately to the user.
-- Do not add a "References" or "Sources" section.
-
-Structure your answer with:
-- A direct answer to the question
-- Supporting technical details from the manuals
-
-Be concise but thorough. Use technical terminology appropriate for engineers.${
+- You may use numbered lists (1. 2. 3.) and plain dashes (-) for bullet points.${
   hasImage
     ? `
 
@@ -742,7 +734,14 @@ The user has attached a photo along with their question. Analyse the image caref
 - If the image shows damage or abnormal condition, describe it and refer to any relevant maintenance or troubleshooting guidance in the manuals.
 - If you cannot identify the part from the image alone, describe what you see and ask clarifying follow-up questions.`
     : ""
-}`;
+}
+
+OUTPUT FORMAT — respond with valid JSON only, no other text:
+{
+  "answer": "your plain-text answer here",
+  "sources": [1, 2]
+}
+The "sources" array must contain the Source N numbers (integers) of every excerpt you actually drew information from to write the answer. If you used nothing from the excerpts (e.g. the answer was found entirely from an image), use an empty array.`;
 
     const userPrompt = `QUESTION: ${trimmedQuestion}
 
@@ -767,82 +766,38 @@ Please answer the question based on the above information from the engineering m
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessageContent },
       ],
+      response_format: { type: "json_object" },
       max_tokens: 1500,
       temperature: 0.2,
     });
 
-    const rawAnswer =
-      completion.choices[0]?.message?.content ??
-      "Unable to generate an answer.";
+    // ── 6. Parse JSON response and build citations ───────────────────────────
+    // The model returns { answer: string, sources: number[] } where sources
+    // contains the [Source N] numbers it actually drew from.  We look those up
+    // directly in ragChunks — no scoring or inference needed.
+    const rawContent = completion.choices[0]?.message?.content ?? "{}";
+    let parsed: { answer?: string; sources?: number[] } = {};
+    try {
+      parsed = JSON.parse(rawContent) as { answer?: string; sources?: number[] };
+    } catch {
+      req.log.warn({ rawContent }, "chat: failed to parse JSON response from model");
+    }
 
-    // Strip any stray [N] citation markers and ** bold that the model may still
-    // produce despite the prompt instruction (safety net).
-    const answer = rawAnswer
-      .replace(/\s*\[\d+(?:,\s*\d+)*\]/g, "")   // [1], [1, 2], [1,2,18] …
-      .replace(/\*\*([^*]+)\*\*/g, "$1")           // **bold** → plain
+    // Safety strip: remove any stray ** bold the model may have included.
+    const answer = (parsed.answer ?? "Unable to generate an answer.")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
       .trim();
 
-    // ── 6. Build citations via content-match ────────────────────────────────
-    // The model no longer writes inline [N] markers.  Citations are determined
-    // entirely by matching distinctive content from each chunk against the answer.
-    // indicesToCite starts empty and is populated by the scoring pass below.
-    const indicesToCite = new Set<number>();
+    const citedSourceNumbers: number[] = Array.isArray(parsed.sources)
+      ? parsed.sources.filter((n) => Number.isInteger(n) && n >= 1 && n <= ragChunks.length)
+      : [];
 
-    // ── 6b. Content-match citation scoring ───────────────────────────────────
-    // Since the model no longer writes [N] markers, citations are determined
-    // purely by checking which chunks contain distinctive content that appears
-    // verbatim in the answer.  Only high-specificity signals count:
-    //
-    //   +3  Exact 3+ word phrase (≥15 chars) from chunk appears in answer
-    //   +2  Decimal number (e.g. 0.6, 1.8) from chunk appears in answer
-    //   +1  Number-with-unit (e.g. "9.6 VDC", "±10%") from chunk in answer
-    //       — bare round integers (10, 20 …) are excluded; too common
-    //
-    // Threshold: score ≥ 3 → chunk is cited.
-    const answerLower = answer.toLowerCase();
+    req.log.info({ citedSourceNumbers }, "chat: model-reported sources");
 
-    function scoreChunk(content: string): number {
-      let score = 0;
+    // Map 1-based source numbers → 0-based chunk indices
+    const indicesToCite = new Set<number>(citedSourceNumbers.map((n) => n - 1));
 
-      // +3: long multi-word phrases (≥15 chars, likely unique technical language)
-      const phrasePattern = /\b[A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){2,}\b/g;
-      for (const m of content.matchAll(phrasePattern)) {
-        if (m[0].length >= 15 && answerLower.includes(m[0].toLowerCase())) score += 3;
-      }
-
-      // +2: decimal numbers (e.g. 0.6, 1.8, 9.6 — highly specific)
-      for (const m of content.matchAll(/\b\d+\.\d+\b/g)) {
-        if (answer.includes(m[0])) score += 2;
-      }
-
-      // +1: number-with-unit combos (specific enough; excludes bare round integers)
-      const unitPat = /\b\d+\.?\d*\s*(?:VDC|VAC|mA|bar|rpm|mm|cm|kg|kW|Hz|MHz)\b/gi;
-      for (const m of content.matchAll(unitPat)) {
-        if (answerLower.includes(m[0].toLowerCase())) score += 1;
-      }
-
-      // +1: ±N% pattern (e.g. ±10%)
-      for (const m of content.matchAll(/[±]\d+\s*%/g)) {
-        if (answerLower.includes(m[0].toLowerCase())) score += 1;
-      }
-
-      return score;
-    }
-
-    // Score every chunk — include those that score ≥ 3
-    for (let i = 0; i < ragChunks.length; i++) {
-      const s = scoreChunk(ragChunks[i].content);
-      if (s >= 3) {
-        indicesToCite.add(i);
-        req.log.info(
-          { chunkPage: ragChunks[i].page_number, score: s },
-          "citation: content-matched chunk"
-        );
-      }
-    }
-
-    // Fall back to the top-ranked chunk if nothing scored high enough
-    // (e.g. purely qualitative answers with no numbers or long phrases)
+    // Fall back to the top-ranked chunk if the model cited nothing
     if (indicesToCite.size === 0 && ragChunks.length > 0) {
       indicesToCite.add(0);
     }
