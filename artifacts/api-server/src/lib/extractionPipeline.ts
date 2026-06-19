@@ -1282,10 +1282,14 @@ export async function extractGraphFromExistingText(
   // We need to know which passes were already completed before we overwrite
   // processingPass with 4, so we can skip them on resume.
   const [priorState] = await db
-    .select({ processingPass: manualsTable.processingPass })
+    .select({ processingPass: manualsTable.processingPass, status: manualsTable.status })
     .from(manualsTable)
     .where(eq(manualsTable.id, manualId));
   const previousPass = priorState?.processingPass ?? 0;
+  // A "completed" status means the previous run finished successfully — this is
+  // a deliberate re-extraction, not a resume.  Treat it as a fresh run so all
+  // passes re-execute rather than skipping based on leftover entity counts.
+  const previouslyCompleted = priorState?.status === "completed";
 
   // Count existing entities and relationships so we can decide whether to
   // resume (skip already-complete passes) or restart (delete and redo).
@@ -1300,12 +1304,12 @@ export async function extractGraphFromExistingText(
   const existingEntityCount = entityCountRow?.cnt ?? 0;
   const existingRelCount = relCountRow?.cnt ?? 0;
 
-  // Resume rules:
-  //  • previousPass >= 5 AND entities exist → Pass 4 finished; skip it, reuse saved entities
-  //  • previousPass >= 6 AND rels exist     → Pass 5 finished; skip it too
-  //  • Otherwise                            → delete stale data and run from scratch
-  const resumeFromPass5 = previousPass >= 5 && existingEntityCount > 0;
-  const resumeFromPass6 = previousPass >= 6 && existingRelCount > 0;
+  // Resume rules (only apply when truly stalled mid-pass, never on a fresh re-run):
+  //  • previousPass >= 5 AND entities exist AND not completed → Pass 4 finished; skip it
+  //  • previousPass >= 6 AND rels exist AND not completed     → Pass 5 finished; skip it too
+  //  • Otherwise (including status="completed")               → delete and run from scratch
+  const resumeFromPass5 = !previouslyCompleted && previousPass >= 5 && existingEntityCount > 0;
+  const resumeFromPass6 = !previouslyCompleted && previousPass >= 6 && existingRelCount > 0;
 
   await setManualStatus(manualId, "processing", { processingPass: 4 });
   if (resumeFromPass5) {
@@ -1627,9 +1631,53 @@ export async function runExtractionPipeline(
     // pass2PageContent already checks which pages exist and only inserts new ones.
     await pass2PageContent(manualId, pdfContent.pages);
 
+    // ── Image-based PDF detection (MUST happen before Pass 3) ────────────────
+    // Calculate the empty-page ratio from the RAW extracted text, before any
+    // description patching.  If we do this after Pass 3 patches in-memory text,
+    // the placeholder descriptions ("no page text provided...") generated for
+    // image-only pages are long enough to satisfy the length check, making the
+    // threshold appear un-met and preventing Vision OCR from ever running.
+    const rawEmptyCount = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20).length;
+    const isImageBasedPdf = pdfContent.pages.length > 0 && rawEmptyCount / pdfContent.pages.length > 0.8;
+
+    if (isImageBasedPdf) {
+      // ── Vision OCR runs BEFORE Pass 3 so Pass 3 gets real image text ──────
+      // Check whether vision OCR was already fully (or partially) completed.
+      const ocrRows = await db
+        .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
+        .from(manualPagesTable)
+        .where(and(eq(manualPagesTable.manualId, manualId), isNotNull(manualPagesTable.rawText)));
+      // rawText rows with < 20 chars are not real OCR content (pdf-parse fills
+      // these even on blank pages).  Only count rows with substantial text.
+      const ocrSavedPages = new Map(
+        ocrRows.filter((r) => (r.rawText ?? "").trim().length >= 20).map((r) => [r.pageNumber, r.rawText!])
+      );
+
+      if (ocrSavedPages.size >= pdfContent.pages.length * 0.8) {
+        // OCR already done — patch in-memory from DB
+        logger.info({ manualId, saved: ocrSavedPages.size }, "Vision OCR: skipping — rawText already in DB");
+        await setActivity(manualId, `Vision OCR ✓ — ${ocrSavedPages.size} pages already OCR'd, loading from database`);
+        for (const page of pdfContent.pages) {
+          const saved = ocrSavedPages.get(page.pageNumber);
+          if (saved) page.text = saved;
+        }
+      } else {
+        // Run/resume vision OCR (passVisionOcr saves rawText per-page so
+        // a resume skips pages already written).
+        logger.info({ manualId, rawEmptyCount }, "Image-based PDF — running vision OCR before Pass 3");
+        const ocrPages = await passVisionOcr(manualId, pdfBuffer, pdfContent.totalPages);
+        for (const ocrPage of ocrPages) {
+          const page = pdfContent.pages.find((p) => p.pageNumber === ocrPage.pageNumber);
+          if (page) page.text = ocrPage.text;
+        }
+      }
+      pdfContent.fullText = pdfContent.pages.map((p) => p.text).join("\n\n");
+    }
+
     // ── Pass 3: Vision descriptions ──────────────────────────────────────────
-    // pass3VisionDescriptions already loads existing descriptions from DB and
-    // skips pages that already have one.
+    // Runs AFTER vision OCR (if this is an image-based PDF) so it has real text
+    // context instead of empty strings.  pass3VisionDescriptions loads existing
+    // descriptions from DB and skips pages that already have one.
     const pass3Descriptions = await pass3VisionDescriptions(manualId, pdfContent.fullText, pdfContent.pages);
 
     // Patch sparse pages in-memory with the AI descriptions Pass 3 generated.
@@ -1637,40 +1685,6 @@ export async function runExtractionPipeline(
       const desc = pass3Descriptions.get(page.pageNumber);
       if (desc && page.text.trim().length < 200) {
         page.text = desc;
-      }
-    }
-
-    // ── Vision OCR (image-based PDFs) ────────────────────────────────────────
-    // Only trigger if >80 % of pages are empty. On resume, check if pages
-    // already have rawText saved from a previous OCR run and load from DB.
-    const emptyCount = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20).length;
-    if (pdfContent.pages.length > 0 && emptyCount / pdfContent.pages.length > 0.8) {
-      // Check whether vision OCR was already fully (or partially) completed.
-      const ocrRows = await db
-        .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
-        .from(manualPagesTable)
-        .where(and(eq(manualPagesTable.manualId, manualId), isNotNull(manualPagesTable.rawText)));
-      const ocrSavedPages = new Map(ocrRows.map((r) => [r.pageNumber, r.rawText!]));
-
-      if (ocrSavedPages.size >= pdfContent.pages.length * 0.8) {
-        // OCR already done — patch from DB rather than re-running
-        logger.info({ manualId, saved: ocrSavedPages.size }, "Vision OCR: skipping — rawText already in DB");
-        await setActivity(manualId, `Vision OCR ✓ — ${ocrSavedPages.size} pages already OCR'd, loading from database`);
-        for (const page of pdfContent.pages) {
-          const saved = ocrSavedPages.get(page.pageNumber);
-          if (saved) page.text = saved;
-        }
-        pdfContent.fullText = pdfContent.pages.map((p) => p.text).join("\n\n");
-      } else {
-        // Not done (or partial) — run/resume the OCR pass (passVisionOcr saves
-        // rawText per-page as it goes, so a re-run skips pages already written).
-        logger.info({ manualId, emptyCount }, "Image-based PDF detected — running vision OCR");
-        const ocrPages = await passVisionOcr(manualId, pdfBuffer, pdfContent.totalPages);
-        for (const ocrPage of ocrPages) {
-          const page = pdfContent.pages.find((p) => p.pageNumber === ocrPage.pageNumber);
-          if (page) page.text = ocrPage.text;
-        }
-        pdfContent.fullText = ocrPages.map((p) => p.text).join("\n\n");
       }
     }
 
