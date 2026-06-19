@@ -827,9 +827,15 @@ The user has attached a photo along with their question. Analyse the image caref
 
 OUTPUT FORMAT — respond with valid JSON only, no other text:
 {
+  "quote": "Copy here, character-for-character, the single sentence or phrase from the excerpts above that most directly answers the question. If no sentence in the excerpts answers it, write exactly: NOT IN EXCERPTS",
   "answer": "your plain-text answer here",
   "sources": [1, 2]
 }
+
+CHAIN-OF-THOUGHT RULE — you MUST complete the "quote" field before writing the "answer":
+- Find the sentence in the excerpts that contains the answer. Copy it verbatim into "quote".
+- Your "answer" must be consistent with whatever you wrote in "quote". If "quote" is "NOT IN EXCERPTS", your "answer" must say "The manual does not specify this."
+- This means: if you cannot point to an exact sentence in the excerpts, you cannot state the fact. No exceptions.
 
 CITATION RULES — this is critical:
 - "sources" must list ONLY the Source N numbers from which you directly drew a specific fact, value, procedure, or statement that appears in your answer.
@@ -871,11 +877,14 @@ Please answer the question based on the above information from the engineering m
     // contains the [Source N] numbers it actually drew from.  We look those up
     // directly in ragChunks — no scoring or inference needed.
     const rawContent = completion.choices[0]?.message?.content ?? "{}";
-    let parsed: { answer?: string; sources?: number[] } = {};
+    let parsed: { quote?: string; answer?: string; sources?: number[] } = {};
     try {
-      parsed = JSON.parse(rawContent) as { answer?: string; sources?: number[] };
+      parsed = JSON.parse(rawContent) as { quote?: string; answer?: string; sources?: number[] };
     } catch {
       req.log.warn({ rawContent }, "chat: failed to parse JSON response from model");
+    }
+    if (parsed.quote) {
+      req.log.debug({ quote: parsed.quote }, "chat: model grounding quote");
     }
 
     // Safety strip: remove any stray ** bold the model may have included.
