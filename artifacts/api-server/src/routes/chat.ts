@@ -741,7 +741,13 @@ OUTPUT FORMAT — respond with valid JSON only, no other text:
   "answer": "your plain-text answer here",
   "sources": [1, 2]
 }
-The "sources" array must contain the Source N numbers (integers) of every excerpt you actually drew information from to write the answer. If you used nothing from the excerpts (e.g. the answer was found entirely from an image), use an empty array.`;
+
+CITATION RULES — this is critical:
+- "sources" must list ONLY the Source N numbers from which you directly drew a specific fact, value, procedure, or statement that appears in your answer.
+- Do NOT cite a source just because it mentions the same component or keyword as the question.
+- Ask yourself: "Did I copy or paraphrase a specific piece of information from this source into my answer?" If no, do not include it.
+- Example: if Source 3 says "the Filling OK signal is sent when level is within ±10%" and your answer states that fact, cite Source 3. If Source 7 only says "the TMCC2 controls filling" but you did not use that in your answer, do NOT cite Source 7.
+- If you used nothing from the excerpts, set sources to [].`;
 
     const userPrompt = `QUESTION: ${trimmedQuestion}
 
