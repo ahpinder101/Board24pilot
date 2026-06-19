@@ -807,6 +807,7 @@ CRITICAL RULES FOR ACCURACY:
 5. Dimension tables: when an excerpt shows a table with lettered column headers (A, B, C …) and numeric values below them, those letters refer to labelled dimensions in a figure. Report all available dimension values (e.g. "A=515mm, B=435mm, C=385mm") and note which figure they reference. If the question asks for a specific dimension (e.g. "height") but the table only has A/B/C labels, provide all dimensions and note the figure reference so the engineer can identify which is height.
 6. Machine dimensions vs packaging dimensions: manuals typically contain TWO separate dimension tables — one for the machine itself (e.g. "Machine dimensions and weight", Fig 2.x) and one for the shipping/packaging box (e.g. "Delivery and handling", Fig 3.x). When the question asks about the machine's height/size, answer from the MACHINE dimensions table. When the question asks about the box or packaging the machine ships in, answer from the PACKAGING dimensions table. If both are present in the excerpts, clearly label which is which.
 7. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
+8. Verbatim values — this is absolute: for any specific value (number, measurement, angle, distance, duration, temperature, product name, part number, model code, catalogue code, phone number, URL, or proper noun) you MUST copy it character-for-character from the excerpt text above. Do NOT paraphrase it, round it, convert its units, or recall it from memory. If the exact value does not appear literally in one of the Source excerpts, write "The manual does not specify this" — never substitute a plausible-sounding figure. This rule exists because engineers act on these values and a wrong number causes real harm.
 
 FORMATTING:
 - Write in plain prose. Do NOT use markdown bold (**text**), headers (##), or bullet dashes that start with **.
@@ -862,7 +863,7 @@ Please answer the question based on the above information from the engineering m
       ],
       response_format: { type: "json_object" },
       max_tokens: 1500,
-      temperature: 0.2,
+      temperature: 0,
     });
 
     // ── 6. Parse JSON response and build citations ───────────────────────────
