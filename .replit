@@ -38,3 +38,5 @@ channel = "stable-25_05"
 
 [userenv.shared]
 ALLOWED_EMAILS = "ahpinder@gmail.com"
+
+[userenv.development]
