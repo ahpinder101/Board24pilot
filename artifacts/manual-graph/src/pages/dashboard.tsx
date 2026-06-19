@@ -5,6 +5,7 @@ import { Link } from "wouter";
 import { formatDistanceToNow } from "date-fns";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { useAuth } from "@clerk/react";
 import {
   BookOpen,
   MessageSquare,
@@ -62,8 +63,27 @@ function StatCard({
   );
 }
 
-function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) => void }) {
+function ManualRow({ manual, onDelete, getToken }: { manual: any; onDelete: (id: number) => void; getToken: () => Promise<string | null> }) {
   const isReady = manual.status === "structure_complete";
+  const [pdfLoading, setPdfLoading] = useState(false);
+
+  async function openPdf() {
+    setPdfLoading(true);
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/manuals/${manual.id}/pdf`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch {
+      toast.error("Could not open PDF — please try again");
+    } finally {
+      setPdfLoading(false);
+    }
+  }
 
   return (
     <div className={cn(
@@ -126,21 +146,16 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
           </Link>
         )}
         {manual.status === "completed" && (
-          <a
-            href={`/api/manuals/${manual.id}/pdf`}
-            target="_blank"
-            rel="noopener noreferrer"
+          <Button
+            variant="ghost"
+            size="icon"
+            className="w-8 h-8 text-gray-300 hover:text-blue-600 hover:bg-blue-50"
             title="Open PDF"
+            onClick={openPdf}
+            disabled={pdfLoading}
           >
-            <Button
-              variant="ghost"
-              size="icon"
-              className="w-8 h-8 text-gray-300 hover:text-blue-600 hover:bg-blue-50"
-              asChild={false}
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-            </Button>
-          </a>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </Button>
         )}
         <Button
           variant="ghost"
@@ -156,6 +171,7 @@ function ManualRow({ manual, onDelete }: { manual: any; onDelete: (id: number) =
 }
 
 export default function Dashboard() {
+  const { getToken } = useAuth();
   const { data: stats, isLoading: statsLoading, refetch: refetchStats } = useGetGlobalStats();
   const { data: manuals, isLoading: manualsLoading, refetch: refetchManuals } = useListManuals();
   const deleteManual = useDeleteManual();
@@ -291,7 +307,7 @@ export default function Dashboard() {
             ) : manuals?.length ? (
               <div>
                 {manuals.map((manual) => (
-                  <ManualRow key={manual.id} manual={manual} onDelete={handleDelete} />
+                  <ManualRow key={manual.id} manual={manual} onDelete={handleDelete} getToken={getToken} />
                 ))}
               </div>
             ) : (
