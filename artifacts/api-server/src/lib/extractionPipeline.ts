@@ -111,8 +111,6 @@ async function pass2PageContent(
   manualId: number,
   pages: Array<{ pageNumber: number; text: string; hasImages: boolean; hasTables: boolean }>
 ) {
-  await updateManualPass(manualId, 2);
-
   // Check which page numbers are already in the DB so we can skip them on resume.
   const existingRows = await db
     .select({ pageNumber: manualPagesTable.pageNumber })
@@ -122,9 +120,14 @@ async function pass2PageContent(
 
   const newPages = pages.filter((p) => !existingSet.has(p.pageNumber));
   if (newPages.length === 0) {
+    // All pages already in DB — skip entirely without touching processingPass
     logger.info({ manualId, total: pages.length }, "Pass 2: all pages already in DB — skipping insert");
     return;
   }
+
+  // Only advance processingPass when we're actually doing new work
+  await updateManualPass(manualId, 2);
+
   if (existingSet.size > 0) {
     logger.info({ manualId, existing: existingSet.size, inserting: newPages.length }, "Pass 2: resuming — inserting remaining pages");
     await setActivity(manualId, `Pass 2 — resuming: ${existingSet.size} pages already saved, inserting ${newPages.length} remaining`);
@@ -1576,12 +1579,15 @@ export async function runExtractionPipeline(
     // stall at any point — Pass 1, 2, 3, Vision OCR, or 7 — resumes from that
     // exact point rather than restarting from the beginning.
     const [existingManual] = await db
-      .select({ structure: manualsTable.structure, documentType: manualsTable.documentType, totalPages: manualsTable.totalPages })
+      .select({ structure: manualsTable.structure, documentType: manualsTable.documentType, totalPages: manualsTable.totalPages, processingPass: manualsTable.processingPass })
       .from(manualsTable)
       .where(eq(manualsTable.id, manualId));
     const hasStructure = !!(existingManual?.structure && existingManual.totalPages);
 
-    await setManualStatus(manualId, "processing", { processingPass: 0 });
+    // When resuming, preserve the existing processingPass so the progress bar
+    // does not jump backwards. Only reset to 0 on a genuinely fresh run.
+    const startingPass = hasStructure ? (existingManual.processingPass ?? 0) : 0;
+    await setManualStatus(manualId, "processing", { processingPass: startingPass });
     await setActivity(manualId, hasStructure ? "Resuming pipeline — checking progress..." : "Starting — extracting text from PDF...");
 
     // Always extract text from the PDF buffer (fast, no AI — just native parsing).
@@ -1591,14 +1597,15 @@ export async function runExtractionPipeline(
     let structure: { documentType: string; overview: string; machines: string[]; sections: string[] };
     if (hasStructure && existingManual.structure) {
       // Already done in a previous run — reuse saved structure, skip LLM call.
+      // Do NOT change processingPass here — it would move the progress bar backwards
+      // from wherever the pipeline previously stalled, confusing the user.
       structure = {
         documentType: existingManual.documentType ?? "other",
         overview: existingManual.structure.overview,
         machines: existingManual.structure.machines ?? [],
         sections: existingManual.structure.sections ?? [],
       };
-      await updateManualPass(manualId, 1);
-      await setActivity(manualId, "Pass 1 ✓ — document structure already extracted, skipping");
+      await setActivity(manualId, "Pass 1 ✓ — structure already done, resuming from where pipeline left off...");
       logger.info({ manualId }, "Pass 1: skipping — structure already in DB");
     } else {
       await db
