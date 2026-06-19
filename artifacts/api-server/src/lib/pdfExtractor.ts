@@ -222,9 +222,52 @@ export interface PdfContent {
   fullText: string;
 }
 
+/**
+ * Runs `pdfimages -list` on a PDF file and returns the set of page numbers
+ * that contain at least one embedded raster image.
+ *
+ * This is the authoritative source for hasImages — it reads the PDF's internal
+ * image XObject table directly, with no text-length heuristic involved.
+ * Costs one subprocess call for the whole document (not per page).
+ */
+export async function getImagePageNumbers(pdfPath: string): Promise<Set<number>> {
+  const imagePages = new Set<number>();
+  try {
+    const { stdout } = await execFileAsync("pdfimages", ["-list", pdfPath]);
+    for (const line of stdout.split("\n").slice(2)) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length > 1 && /^\d+$/.test(parts[0])) {
+        imagePages.add(parseInt(parts[0], 10));
+      }
+    }
+  } catch {
+    // pdfimages unavailable or PDF has no images — returns empty set,
+    // which means hasImages=false for all pages (safe: no vision gate fires).
+  }
+  return imagePages;
+}
+
 export async function extractPdfText(pdfBuffer: Buffer): Promise<PdfContent> {
   const pdfParse = await import("pdf-parse");
   const parse = pdfParse.default;
+
+  // Run pdfimages -list once on the whole document to get authoritative image
+  // page numbers. We write a short-lived temp file just for this scan; it is
+  // cleaned up before the function returns.
+  let scanTempDir: string | undefined;
+  let imagePageNumbers = new Set<number>();
+  try {
+    scanTempDir = await mkdtemp(join(tmpdir(), "pdfimgscan-"));
+    const scanPath = join(scanTempDir, "input.pdf");
+    await writeFile(scanPath, pdfBuffer);
+    imagePageNumbers = await getImagePageNumbers(scanPath);
+  } catch {
+    // If the temp write fails for any reason, fall back to empty set (safe).
+  } finally {
+    if (scanTempDir) {
+      await rm(scanTempDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
 
   const pages: PageContent[] = [];
   let currentPage = 0;
@@ -243,7 +286,7 @@ export async function extractPdfText(pdfBuffer: Buffer): Promise<PdfContent> {
         }
 
         currentPage++;
-        const hasImages = text.length < 500 && currentPage > 1;
+        const hasImages = imagePageNumbers.has(currentPage);
         const hasTables = /(\t|  {3,})/.test(text) || /\|.*\|/.test(text);
 
         pages.push({
