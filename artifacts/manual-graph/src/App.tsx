@@ -13,6 +13,10 @@ import {
   QueryClientProvider,
   useQueryClient,
 } from "@tanstack/react-query";
+import {
+  useGetGlobalStats,
+  getGetGlobalStatsQueryKey,
+} from "@workspace/api-client-react";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Layout } from "@/components/layout";
@@ -22,6 +26,7 @@ import GlobalGraphPage from "@/pages/global-graph-page";
 import AskPage from "@/pages/ask-page";
 import NotFound from "@/pages/not-found";
 import LandingPage from "@/pages/landing-page";
+import AccessDeniedPage from "@/pages/access-denied-page";
 
 const queryClient = new QueryClient();
 
@@ -138,11 +143,39 @@ function AppRoutes() {
   );
 }
 
+// Probes a lightweight authenticated endpoint to determine whether the
+// signed-in user is on the server-side invite allowlist. A 403 means the
+// account is authenticated but not authorized, so we show a friendly screen
+// instead of a dashboard that silently fails to load.
+function AccessGate() {
+  const { error, isLoading } = useGetGlobalStats({
+    query: {
+      retry: false,
+      staleTime: 60_000,
+      queryKey: getGetGlobalStatsQueryKey(),
+    },
+  });
+
+  if (error?.status === 403) {
+    return <AccessDeniedPage />;
+  }
+
+  if (isLoading) {
+    return (
+      <div className="flex min-h-[100dvh] items-center justify-center bg-slate-100">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-slate-300 border-t-slate-700" />
+      </div>
+    );
+  }
+
+  return <AppRoutes />;
+}
+
 function ProtectedApp() {
   return (
     <>
       <Show when="signed-in">
-        <AppRoutes />
+        <AccessGate />
       </Show>
       <Show when="signed-out">
         <LandingPage />

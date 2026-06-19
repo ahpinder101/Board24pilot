@@ -26,7 +26,9 @@ front.
 api-server workflow. Env vars load at boot, so the in-process allowlist + cache
 are fixed per run — changes require a restart.
 
-**Known UX gap:** a signed-in but non-allowlisted user currently sees a broken
-dashboard (API calls 403) rather than a friendly "access denied" screen. The
-server-side cost protection still holds. A frontend access-denied screen was not
-built (allowlist was off at the time) — add one if invite-only is activated.
+**Frontend gate:** signed-in but non-allowlisted users get a friendly
+access-denied screen (not a broken dashboard). `AccessGate` in `App.tsx` probes
+`useGetGlobalStats`; on `error.status === 403` it renders `access-denied-page.tsx`
+(with Clerk sign-out). This is UX only — server `requireAuth` is the real
+enforcement. Non-403 errors fall through to the app so transient API failures
+don't lock anyone out.
