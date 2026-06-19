@@ -119,7 +119,7 @@ async function pass3VisionDescriptions(
   manualId: number,
   fullText: string,
   pages: Array<{ pageNumber: number; text: string; hasImages: boolean; hasTables: boolean }>
-) {
+): Promise<Map<number, string>> {
   await updateManualPass(manualId, 3);
 
   // For pages with sparse text (likely images/tables), generate descriptions using AI
@@ -127,6 +127,10 @@ async function pass3VisionDescriptions(
 
   // Process up to 10 sparse pages with AI descriptions
   const toDescribe = sparsePages.slice(0, 10);
+
+  // Return a map of pageNumber → description so the caller can patch pdfContent
+  // in-memory before Pass 7 runs, ensuring FTS chunks contain enriched text.
+  const generated = new Map<number, string>();
 
   for (const page of toDescribe) {
     try {
@@ -161,10 +165,14 @@ async function pass3VisionDescriptions(
             eq(manualPagesTable.pageNumber, page.pageNumber)
           )
         );
+
+      if (description) generated.set(page.pageNumber, description);
     } catch (err) {
       logger.warn({ err, page: page.pageNumber }, "Vision pass failed for page");
     }
   }
+
+  return generated;
 }
 
 // ─── PASS 4: Entity extraction ──────────────────────────────────────────────
@@ -289,10 +297,17 @@ interface ExtractedPath {
 async function pass5ExtractPaths(
   manualId: number,
   fullText: string,
-  maxChunks = 6
+  maxChunks = 6,
+  entities: ExtractedEntity[] = []
 ): Promise<ExtractedPath[]> {
   const allPaths: ExtractedPath[] = [];
   const chunks = chunkText(fullText, 4000);
+
+  // Build a compact entity reference list so the model can anchor step descriptions
+  // to the exact entity names already extracted in Pass 4, ensuring consistency.
+  const entityRef = entities.length > 0
+    ? `\n\nKNOWN ENTITIES (use these exact names in stepSequence where applicable):\n${entities.map((e) => `- ${e.name} (${e.type})`).join("\n")}`
+    : "";
 
   for (let ci = 0; ci < Math.min(chunks.length, maxChunks); ci++) {
     const chunk = chunks[ci];
@@ -315,13 +330,13 @@ For each path, return:
 - name: short unique name (e.g. "Fine setting distance C - non-Sq machines", "Basic setting distance D - Sq machines")
 - pathType: one of "procedure_step", "assembly_sequence", "decision_flow", "measurement_setting"
 - condition: EXACT text of any scope qualifier that limits when this path applies (e.g. "Not valid for Sq machines", "Valid only for Sq machines", "For MM edition 06"). Leave null if it applies to all machines/conditions.
-- stepSequence: ordered array of concise step descriptions
+- stepSequence: ordered array of concise step descriptions. Where a step involves a known entity, use its exact name from the KNOWN ENTITIES list.
 - plainLanguage: single sentence summary of what this path achieves. IMPORTANT: if the procedure targets a specific measurement or setting value (e.g. "C = 300 ±1 mm", "tension 30-50 N"), you MUST include that target value explicitly in plainLanguage (e.g. "Sets distance C to 300 ±1 mm on Sq machines by adjusting timing belt pulley (22).").
 - pageReferences: array of page numbers (estimate from context)
 
 Return a JSON object with a "paths" array.
 
-CRITICAL: If the text contains two versions of the same procedure for different machine types (e.g. one section "Not valid for Sq machines" and another "Valid only for Sq machines"), extract them as SEPARATE paths with their respective conditions. This is essential for accuracy.`,
+CRITICAL: If the text contains two versions of the same procedure for different machine types (e.g. one section "Not valid for Sq machines" and another "Valid only for Sq machines"), extract them as SEPARATE paths with their respective conditions. This is essential for accuracy.${entityRef}`,
           },
           {
             role: "user",
@@ -1179,8 +1194,9 @@ export async function extractGraphFromExistingText(
     }
   }
 
-  // Pass 5b: path extraction — ordered procedural sequences with scope conditions
-  const extractedPaths = await pass5ExtractPaths(manualId, fullText, relChunks);
+  // Pass 5b: path extraction — ordered procedural sequences with scope conditions.
+  // Pass extractedEntities so step descriptions reference consistent entity names.
+  const extractedPaths = await pass5ExtractPaths(manualId, fullText, relChunks, extractedEntities);
   let pathCount = 0;
   for (const path of extractedPaths) {
     if (!path.name || !path.plainLanguage) continue;
@@ -1272,8 +1288,21 @@ export async function runExtractionPipeline(
     // Pass 2: Page content
     await pass2PageContent(manualId, pdfContent.pages);
 
-    // Pass 3: Vision descriptions
-    await pass3VisionDescriptions(manualId, pdfContent.fullText, pdfContent.pages);
+    // Pass 3: Vision descriptions — returns a map of pageNumber → description for
+    // sparse pages so we can patch pdfContent in-memory before Pass 7 runs.
+    const pass3Descriptions = await pass3VisionDescriptions(manualId, pdfContent.fullText, pdfContent.pages);
+
+    // Patch sparse pages in-memory with the AI descriptions Pass 3 generated.
+    // Pass 7 (below) uses pdfContent.pages, so without this patch it would chunk
+    // the thin original OCR text for those pages instead of the richer description.
+    // Diagram pages are exempt — Pass 7's diagram gate handles them with vision
+    // analysis which is more accurate than the context-only Pass 3 description.
+    for (const page of pdfContent.pages) {
+      const desc = pass3Descriptions.get(page.pageNumber);
+      if (desc && page.text.trim().length < 200) {
+        page.text = desc;
+      }
+    }
 
     // Image-PDF detection: if >80% of pages have no text, use GPT-4o vision OCR
     const emptyCount = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20).length;
