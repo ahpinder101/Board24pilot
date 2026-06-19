@@ -789,46 +789,82 @@ Please answer the question based on the above information from the engineering m
         ? citedIndices
         : new Set(ragChunks.slice(0, 3).map((_, i) => i));
 
-    // ── 6b. Content-match recovery ────────────────────────────────────────────
-    // Models frequently mis-assign inline [N] numbers when many sources are in
-    // context (e.g. citing [4] when the relevant chunk was actually Source 2).
-    // As a safety net, check each chunk for "distinctive content" — specific
-    // numbers (measurements, voltages, counts) and technical phrases — that
-    // appear verbatim in the answer.  Any chunk whose specific data provably
-    // contributed to the answer is added to citations regardless of [N].
+    // ── 6b. Citation validation + content-match recovery ─────────────────────
+    // Two problems this block solves:
+    //
+    //   A. Model over-cites: the model often piles [N1, N2, N3] onto a single
+    //      sentence even when only one source actually contains the answer.
+    //      Fix: validate every model-cited chunk — drop it if it scores 0
+    //      against the answer (no distinctive content overlap).
+    //
+    //   B. Model mis-assigns [N]: the model uses data from Source 2 but writes
+    //      [4] in the answer.  Fix: recover un-cited chunks that score high
+    //      (specific decimal numbers or long phrases that appear verbatim).
+    //
+    // Scoring rules — only distinctive signals count:
+    //   +3  Exact 3+ word phrase (≥15 chars) from chunk appears in answer
+    //   +2  Decimal number (e.g. 0.6, 1.8) from chunk appears in answer
+    //   +1  Number-with-unit (e.g. "10 VDC", "±10%") from chunk in answer
+    //       — round integers (10, 20, 50…) score 0; too common to be signal
     const answerLower = answer.toLowerCase();
-    for (let i = 0; i < ragChunks.length; i++) {
-      if (indicesToCite.has(i)) continue; // already included
-      const content = ragChunks[i].content;
-      let matchCount = 0;
 
-      // Match numbers with engineering units
-      const unitPattern = /\b\d+\.?\d*\s*(?:vdc|vac|v dc|v ac|ma|mA|bar|rpm|mm|cm|kg|°c|kw|hz|mhz|khz|%|°)\b/gi;
-      for (const m of content.matchAll(unitPattern)) {
-        if (answerLower.includes(m[0].toLowerCase())) matchCount++;
-      }
+    function scoreChunk(content: string): number {
+      const contentLower = content.toLowerCase();
+      let score = 0;
 
-      // Match specific non-round numbers (e.g. 1.8, 0.6, 9.6 — unlikely to appear by coincidence)
-      const specificNumPattern = /\b\d+\.\d+\b/g;
-      for (const m of content.matchAll(specificNumPattern)) {
-        if (answer.includes(m[0])) matchCount++;
-      }
-
-      // Match multi-word technical phrases (case-insensitive)
-      const phrasePattern = /\b(?:[A-Z][a-z]+\s+){1,3}[A-Z][a-z]+\b/g;
+      // +3: long multi-word phrases (≥15 chars, likely unique technical language)
+      const phrasePattern = /\b[A-Za-z][a-z]+(?:\s+[A-Za-z][a-z]+){2,}\b/g;
       for (const m of content.matchAll(phrasePattern)) {
-        const phrase = m[0];
-        if (phrase.split(" ").length >= 2 && answerLower.includes(phrase.toLowerCase())) matchCount++;
+        if (m[0].length >= 15 && answerLower.includes(m[0].toLowerCase())) score += 3;
       }
 
-      // 2+ distinctive matches = this chunk provably contributed to the answer
-      if (matchCount >= 2) {
+      // +2: decimal numbers (e.g. 0.6, 1.8, 9.6 — highly specific)
+      for (const m of content.matchAll(/\b\d+\.\d+\b/g)) {
+        if (answer.includes(m[0])) score += 2;
+      }
+
+      // +1: number-with-unit combos (specific enough; excludes bare round integers)
+      const unitPat = /\b\d+\.?\d*\s*(?:VDC|VAC|mA|bar|rpm|mm|cm|kg|kW|Hz|MHz)\b/gi;
+      for (const m of content.matchAll(unitPat)) {
+        if (answerLower.includes(m[0].toLowerCase())) score += 1;
+      }
+
+      // +1: percentage with non-round value (e.g. ±10% only if "±10" in chunk too)
+      for (const m of content.matchAll(/[±]\d+\s*%/g)) {
+        if (answerLower.includes(m[0].toLowerCase())) score += 1;
+      }
+
+      return score;
+    }
+
+    // A. Validate model-cited chunks — remove if they score 0
+    for (const i of [...indicesToCite]) {
+      const s = scoreChunk(ragChunks[i].content);
+      if (s === 0) {
+        indicesToCite.delete(i);
+        req.log.info(
+          { chunkPage: ragChunks[i].page_number },
+          "citation-validation: dropped low-signal chunk"
+        );
+      }
+    }
+
+    // B. Recover un-cited chunks that score ≥ 3 (strong content match)
+    for (let i = 0; i < ragChunks.length; i++) {
+      if (indicesToCite.has(i)) continue;
+      const s = scoreChunk(ragChunks[i].content);
+      if (s >= 3) {
         indicesToCite.add(i);
         req.log.info(
-          { chunkPage: ragChunks[i].page_number, matchCount },
+          { chunkPage: ragChunks[i].page_number, score: s },
           "citation-recovery: added content-matched chunk"
         );
       }
+    }
+
+    // If validation removed everything, fall back to the top-ranked chunk
+    if (indicesToCite.size === 0 && ragChunks.length > 0) {
+      indicesToCite.add(0);
     }
 
     const seenManualPages = new Set<string>();
