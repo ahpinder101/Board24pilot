@@ -80,7 +80,7 @@ export function UploadPDF() {
             </div>
             <div>
               <h3 className="text-lg font-medium text-foreground">Upload Engineering Manual</h3>
-              <p className="text-sm text-muted-foreground mt-1 font-mono">PDF format only. Max 100MB.</p>
+              <p className="text-sm text-muted-foreground mt-1 font-mono">PDF format only. Max 300MB.</p>
             </div>
             <div className="relative">
               <input

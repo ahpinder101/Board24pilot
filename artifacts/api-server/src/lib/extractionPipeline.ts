@@ -26,7 +26,7 @@ import {
   type InsertRelationship,
 } from "@workspace/db";
 import { eq, and, count, sql } from "drizzle-orm";
-import { extractPdfText, renderPdfPageToBase64, hasDiagramImage, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
+import { extractPdfText, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
 
@@ -617,11 +617,11 @@ Rules:
  * Returns null on any error so the caller can fall back to the original text.
  */
 async function describePageWithVision(
-  pdfBuffer: Buffer,
+  pdfPath: string,
   pageNumber: number
 ): Promise<string | null> {
   try {
-    const base64Image = await renderPdfPageToBase64(pdfBuffer, pageNumber);
+    const base64Image = await renderPdfPageToBase64FromPath(pdfPath, pageNumber);
     const response = await openai.chat.completions.create({
       model: MODEL,
       max_completion_tokens: 4096,
@@ -661,6 +661,27 @@ async function pass7EmbedChunks(
   // Delete old chunks for this manual (idempotent re-runs)
   await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
 
+  // Pre-write the PDF buffer to a single shared temp file (if provided) so the
+  // diagram gate can call pdfimages/pdftoppm without re-writing the buffer on
+  // every page.  Also restrict the diagram gate to pages with embedded images
+  // (detected during Pass 2) so text-only pages skip pixel analysis entirely.
+  // Both together reduce temp-disk I/O from O(pages × fileSize) to O(fileSize).
+  let sharedPdfPath: string | undefined;
+  let cleanupSharedPdf: (() => Promise<void>) | undefined;
+  let imagePageNumbers: Set<number> | undefined;
+  if (pdfBuffer) {
+    ({ pdfPath: sharedPdfPath, cleanup: cleanupSharedPdf } = await writePdfToTempFile(pdfBuffer));
+    const imageRows = await db
+      .select({ pageNumber: manualPagesTable.pageNumber })
+      .from(manualPagesTable)
+      .where(and(eq(manualPagesTable.manualId, manualId), eq(manualPagesTable.hasImages, 1)));
+    imagePageNumbers = new Set(imageRows.map((r) => r.pageNumber));
+    logger.info(
+      { manualId, imagePages: imagePageNumbers.size },
+      "Pass 7: diagram gate restricted to pages with embedded images"
+    );
+  }
+
   let totalChunks = 0;
   let restructuredPages = 0;
   let diagramPages = 0;
@@ -670,13 +691,10 @@ async function pass7EmbedChunks(
     let textToChunk = page.text;
     let enriched = false;
 
-    // Diagram gate: if pdfBuffer is available, check whether any embedded image
-    // on this page is a line drawing or schematic (midtone pixel fraction < 25%).
-    // If so, replace the garbled OCR with a structured vision description that
-    // correctly interprets the diagram per the relevant ISO/IEC standard.
-    // This takes priority over the tabular restructuring path below.
-    if (pdfBuffer && await hasDiagramImage(pdfBuffer, page.pageNumber)) {
-      const visionText = await describePageWithVision(pdfBuffer, page.pageNumber);
+    // Diagram gate: only runs on pages that have embedded images (Pass 2 flag),
+    // using a pre-written shared PDF path to avoid re-writing the buffer each page.
+    if (sharedPdfPath && imagePageNumbers?.has(page.pageNumber) && await hasDiagramImageFromPath(sharedPdfPath, page.pageNumber)) {
+      const visionText = await describePageWithVision(sharedPdfPath, page.pageNumber);
       if (visionText) {
         textToChunk = visionText;
         enriched = true;
@@ -745,6 +763,7 @@ async function pass7EmbedChunks(
   }
 
   logger.info({ manualId, totalChunks, restructuredPages, diagramPages }, "Pass 7: semantic chunks stored");
+  await cleanupSharedPdf?.();
 }
 
 // ─── VISION OCR: ISO/IEC-guided page interpretation ──────────────────────────
@@ -831,6 +850,9 @@ async function passVisionOcr(
   const results: Array<{ pageNumber: number; text: string }> = [];
   const CONCURRENCY = 5;
 
+  // Write the PDF buffer to disk once; all page renders reuse the same path.
+  const { pdfPath, cleanup: cleanupPdf } = await writePdfToTempFile(pdfBuffer);
+
   for (let start = 1; start <= totalPages; start += CONCURRENCY) {
     const batch: number[] = [];
     for (let p = start; p < start + CONCURRENCY && p <= totalPages; p++) {
@@ -840,7 +862,7 @@ async function passVisionOcr(
     const batchResults = await Promise.all(
       batch.map(async (pageNumber) => {
         try {
-          const base64Image = await renderPdfPageToBase64(pdfBuffer, pageNumber);
+          const base64Image = await renderPdfPageToBase64FromPath(pdfPath, pageNumber);
 
           const response = await openai.chat.completions.create({
             model: MODEL,
@@ -896,6 +918,7 @@ async function passVisionOcr(
     );
   }
 
+  await cleanupPdf();
   return results;
 }
 
@@ -1063,6 +1086,9 @@ export async function reprocessPageRangeWithVision(
   const ocrPages: Array<{ pageNumber: number; text: string }> = [];
   const CONCURRENCY = 5;
 
+  // Write the PDF buffer to disk once; all page renders reuse the same path.
+  const { pdfPath, cleanup: cleanupPdf } = await writePdfToTempFile(pdfBuffer);
+
   for (let batch_start = startPage; batch_start <= clampedEnd; batch_start += CONCURRENCY) {
     const batch: number[] = [];
     for (let p = batch_start; p < batch_start + CONCURRENCY && p <= clampedEnd; p++) {
@@ -1072,7 +1098,7 @@ export async function reprocessPageRangeWithVision(
     const batchResults = await Promise.all(
       batch.map(async (pageNumber) => {
         try {
-          const base64Image = await renderPdfPageToBase64(pdfBuffer, pageNumber);
+          const base64Image = await renderPdfPageToBase64FromPath(pdfPath, pageNumber);
           const response = await openai.chat.completions.create({
             model: MODEL,
             max_completion_tokens: 4096,
@@ -1155,6 +1181,7 @@ export async function reprocessPageRangeWithVision(
   }
 
   logger.info({ manualId, startPage, endPage: clampedEnd, pages: totalToProcess, totalChunks }, "Vision OCR page-range complete");
+  await cleanupPdf();
   return { pages: totalToProcess, chunks: totalChunks };
 }
 

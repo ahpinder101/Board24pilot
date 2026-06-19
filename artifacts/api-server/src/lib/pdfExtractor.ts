@@ -107,6 +107,108 @@ export async function hasDiagramImage(
   }
 }
 
+/**
+ * Writes pdfBuffer to a single shared temp file and returns the path plus a
+ * cleanup function.  Call once per pipeline pass so the buffer is written to
+ * disk only once regardless of how many pages are subsequently examined.
+ */
+export async function writePdfToTempFile(
+  pdfBuffer: Buffer,
+): Promise<{ pdfPath: string; cleanup: () => Promise<void> }> {
+  const tempDir = await mkdtemp(join(tmpdir(), "pdfshared-"));
+  const pdfPath = join(tempDir, "manual.pdf");
+  await writeFile(pdfPath, pdfBuffer);
+  return {
+    pdfPath,
+    cleanup: async () => {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    },
+  };
+}
+
+/**
+ * Path-based variant of hasDiagramImage.
+ * Caller manages the PDF file lifetime; this function does NOT write the PDF.
+ * Use when checking many pages of the same PDF to avoid re-writing on every call.
+ */
+export async function hasDiagramImageFromPath(
+  pdfPath: string,
+  pageNumber: number,
+): Promise<boolean> {
+  const tempDir = await mkdtemp(join(tmpdir(), "pdfdiag-"));
+  const outPrefix = join(tempDir, "img");
+
+  try {
+    await execFileAsync("pdfimages", [
+      "-f", String(pageNumber),
+      "-l", String(pageNumber),
+      "-png",
+      pdfPath,
+      outPrefix,
+    ]);
+
+    const files = await readdir(tempDir);
+    const pngs = files.filter((f) => f.endsWith(".png"));
+    if (pngs.length === 0) return false;
+
+    for (const file of pngs) {
+      const { data, info } = await sharp(join(tempDir, file))
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+
+      const totalPixels = info.width * info.height;
+      const ch = info.channels;
+      let midtoneCount = 0;
+
+      for (let i = 0; i < data.length; i += ch) {
+        const lum = ((data[i] ?? 255) + (data[i + 1] ?? 255) + (data[i + 2] ?? 255)) / 3;
+        if (lum >= 80 && lum <= 180) midtoneCount++;
+      }
+
+      if (midtoneCount / totalPixels < 0.25) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Path-based variant of renderPdfPageToBase64.
+ * Caller manages the PDF file lifetime; this function does NOT write the PDF.
+ * Use when rendering many pages of the same PDF to avoid re-writing on every call.
+ */
+export async function renderPdfPageToBase64FromPath(
+  pdfPath: string,
+  pageNumber: number,
+): Promise<string> {
+  const tempDir = await mkdtemp(join(tmpdir(), "pdfrender-"));
+  const outputPrefix = join(tempDir, "pg");
+
+  try {
+    await execFileAsync("pdftoppm", [
+      "-r", "150",
+      "-f", String(pageNumber),
+      "-l", String(pageNumber),
+      "-png",
+      pdfPath,
+      outputPrefix,
+    ]);
+
+    const files = await readdir(tempDir);
+    const pngFile = files.find((f) => f.endsWith(".png"));
+    if (!pngFile) throw new Error(`pdftoppm produced no PNG for page ${pageNumber}`);
+
+    const imageBuffer = await readFile(join(tempDir, pngFile));
+    return imageBuffer.toString("base64");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 export interface PageContent {
   pageNumber: number;
   text: string;
