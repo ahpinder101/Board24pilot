@@ -582,9 +582,10 @@ async function describePageWithVision(
 async function pass7EmbedChunks(
   manualId: number,
   pages: Array<{ pageNumber: number; text: string }>,
-  pdfBuffer?: Buffer
+  pdfBuffer?: Buffer,
+  options: { updatePass?: boolean } = {}
 ): Promise<void> {
-  await updateManualPass(manualId, 7);
+  if (options.updatePass !== false) await updateManualPass(manualId, 7);
 
   // Delete old chunks for this manual (idempotent re-runs)
   await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
@@ -1258,7 +1259,9 @@ export async function runExtractionPipeline(
     // Pass 7: RAG chunking — runs automatically so search is ready immediately.
     // pdfBuffer is passed so the diagram gate can run pixel analysis and replace
     // garbled OCR on wiring-diagram / schematic pages with a vision description.
-    await pass7EmbedChunks(manualId, pdfContent.pages, pdfBuffer);
+    // updatePass:false keeps the displayed pass number at 3 (not 7) so the UI
+    // progress bar doesn't jump forward and then back when entity extraction starts.
+    await pass7EmbedChunks(manualId, pdfContent.pages, pdfBuffer, { updatePass: false });
 
     // Stop here — entity/relationship extraction is triggered manually by the user
     // so they can choose how much of the document to cover before incurring cost.
