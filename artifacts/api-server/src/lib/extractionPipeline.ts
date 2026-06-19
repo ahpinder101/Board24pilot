@@ -25,7 +25,7 @@ import {
   type InsertEntity,
   type InsertRelationship,
 } from "@workspace/db";
-import { eq, and, count, sql } from "drizzle-orm";
+import { eq, and, count, sql, isNotNull } from "drizzle-orm";
 import { extractPdfText, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
@@ -147,17 +147,31 @@ async function pass3VisionDescriptions(
   // call. Pass 7's tabular gate restructures those pages instead.
   const sparsePages = pages.filter((p) => !p.hasImages && p.text.length < 200);
 
+  // Load any descriptions already written in a previous (interrupted) run so we
+  // can skip those pages and resume from where processing stalled.
+  const existingRows = await db
+    .select({ pageNumber: manualPagesTable.pageNumber, description: manualPagesTable.description })
+    .from(manualPagesTable)
+    .where(and(eq(manualPagesTable.manualId, manualId), isNotNull(manualPagesTable.description)));
+  const existingDescriptions = new Map(existingRows.map((r) => [r.pageNumber, r.description!]));
+
   // Describe all qualifying sparse pages (no cap — full document coverage)
   const toDescribe = sparsePages;
+  const resuming = existingDescriptions.size > 0;
+  const remaining = toDescribe.filter((p) => !existingDescriptions.has(p.pageNumber));
 
   // Return a map of pageNumber → description so the caller can patch pdfContent
   // in-memory before Pass 7 runs, ensuring FTS chunks contain enriched text.
-  const generated = new Map<number, string>();
+  const generated = new Map<number, string>(existingDescriptions);
 
-  for (let i = 0; i < toDescribe.length; i++) {
-    const page = toDescribe[i]!;
+  if (resuming) {
+    await setActivity(manualId, `Pass 3 — resuming: ${existingDescriptions.size} pages already done, ${remaining.length} remaining`);
+  }
+
+  for (let i = 0; i < remaining.length; i++) {
+    const page = remaining[i]!;
     if (i % 10 === 0) {
-      await setActivity(manualId, `Pass 3 — describing sparse page ${page.pageNumber} (${i + 1} of ${toDescribe.length} sparse pages)`);
+      await setActivity(manualId, `Pass 3 — describing sparse page ${page.pageNumber} (${i + 1} of ${remaining.length} remaining)`);
     }
     try {
       const context = fullText.slice(

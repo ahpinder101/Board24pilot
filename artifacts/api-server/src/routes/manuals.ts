@@ -597,9 +597,11 @@ router.post("/manuals/:id/reset-processing", async (req: Request, res: Response)
     return;
   }
 
-  // If it got past Pass 3 (structure_complete), reset only the entity-extraction
-  // phase so the user doesn't have to redo the full text-extraction pipeline.
-  const resumeStatus = (manual.processingPass ?? 0) >= 4 ? "structure_complete" : "pending";
+  // processingPass >= 2 means text extraction (Pass 1+2) is complete; the pipeline
+  // can resume from Pass 3 which now skips already-described pages from the DB.
+  // processingPass >= 4 means Pass 3 is done; jump straight to entity extraction.
+  const pass = manual.processingPass ?? 0;
+  const resumeStatus = pass >= 4 ? "structure_complete" : pass >= 2 ? "pending" : "pending";
 
   const [updated] = await db
     .update(manualsTable)
