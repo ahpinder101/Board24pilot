@@ -5,3 +5,4 @@
 - [GCS object storage reads broken](gcs-reads-broken.md) — Replit object storage sidecar auth is broken for reads; PDF bytes are stored in DB (manuals.pdf_data BYTEA) instead.
 - [Diagram detection midtone heuristic](diagram-detection.md) — validated threshold for detecting wiring diagrams vs photos using pixel midtone fraction.
 - [Extraction status claim guard](extraction-status-claim-guard.md) — atomic processing-claim blocks duplicate LLM jobs; any job setting 'processing' MUST reach a terminal status on every throw or it locks out re-triggers.
+- [RAG chat grounding](rag-chat-grounding.md) — chain-of-thought quote field + verbatim rule + temperature 0 in chat.ts; OCR can corrupt ° and letter-K to look like hallucinations when they aren't.
