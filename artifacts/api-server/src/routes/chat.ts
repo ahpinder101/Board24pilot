@@ -840,56 +840,56 @@ Please answer the question based on the above information from the engineering m
     // Map 1-based source numbers → 0-based chunk indices
     const modelCitedIndices = new Set<number>(citedSourceNumbers.map((n) => n - 1));
 
-    // ── Filter: drop model-cited chunks with no content overlap in the answer ─
-    // Models over-cite topically-related chunks ("mentions TMCC2") even when no
-    // specific fact from that chunk appears in the answer.  We keep a cited chunk
-    // only if at least one of its phrases (3+ consecutive words) or numbers appears
-    // in the answer.  This is a filter on the model's list, not an independent search.
+    // ── Filter: drop model-cited chunks not actually used in the answer ───────
+    // The model over-cites topically-related chunks.  To validate a citation we
+    // check that the ANSWER's own specific phrases appear verbatim in the CHUNK —
+    // i.e. the chunk could plausibly have PRODUCED that sentence.
+    // (Previous approach checked the reverse direction — chunk phrases in answer —
+    //  which passes any chunk sharing domain vocabulary even if it gave nothing.)
     const answerLower = answer.toLowerCase();
 
-    function hasContentOverlap(content: string): boolean {
+    function overlapReason(content: string): string | null {
       const contentLower = content.toLowerCase();
 
-      // Any decimal number present in both chunk and answer
-      for (const m of content.matchAll(/\b\d+\.\d+\b/g)) {
-        if (answer.includes(m[0])) return true;
+      // Decimal numbers (e.g. 1.8, 0.6) appearing in both — symmetric check is fine
+      for (const m of answer.matchAll(/\b\d+\.\d+\b/g)) {
+        if (contentLower.includes(m[0])) return `decimal ${m[0]}`;
       }
 
-      // Any number-with-unit present in both
-      const unitPat = /\b\d+\.?\d*\s*(?:VDC|VAC|mA|bar|rpm|mm|cm|kg|kW|Hz|MHz|%)\b/gi;
-      for (const m of content.matchAll(unitPat)) {
-        if (answerLower.includes(m[0].toLowerCase())) return true;
+      // ±N% patterns from the answer appearing in the chunk
+      for (const m of answer.matchAll(/[±]\s*\d+\s*%/g)) {
+        if (contentLower.includes(m[0].toLowerCase())) return `pct ${m[0]}`;
       }
 
-      // ±N% patterns (e.g. ±10%)
-      for (const m of content.matchAll(/[±]\s*\d+\s*%/g)) {
-        if (answerLower.includes(m[0].toLowerCase())) return true;
+      // Number-with-unit from the answer appearing in the chunk
+      const unitPat = /\b\d+\.?\d*\s*(?:VDC|VAC|mA|bar|rpm|mm|cm|kg|kW|Hz|MHz)\b/gi;
+      for (const m of answer.matchAll(unitPat)) {
+        if (contentLower.includes(m[0].toLowerCase())) return `unit ${m[0]}`;
       }
 
-      // Any run of 3+ words (≥12 chars) from the chunk appears in the answer
-      const words = contentLower.split(/\s+/);
-      for (let i = 0; i <= words.length - 3; i++) {
-        const phrase = words.slice(i, i + 3).join(" ");
-        if (phrase.length >= 12 && answerLower.includes(phrase)) return true;
+      // 4+ consecutive words from the ANSWER appearing in the CHUNK (≥16 chars)
+      // Using 4-word windows from the answer ensures the phrase is specific enough
+      // to only come from the chunk that actually produced it.
+      const answerWords = answerLower.replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean);
+      for (let i = 0; i <= answerWords.length - 4; i++) {
+        const phrase = answerWords.slice(i, i + 4).join(" ");
+        if (phrase.length >= 16 && contentLower.includes(phrase)) return `phrase "${phrase}"`;
       }
 
-      return false;
+      return null;
     }
 
     const indicesToCite = new Set<number>();
     for (const i of modelCitedIndices) {
-      if (hasContentOverlap(ragChunks[i].content)) {
-        indicesToCite.add(i);
-      } else {
-        req.log.info(
-          { chunkPage: ragChunks[i].page_number },
-          "chat: dropped over-cited chunk (no content overlap)"
-        );
-      }
+      const reason = overlapReason(ragChunks[i].content);
+      req.log.info(
+        { chunkPage: ragChunks[i].page_number, overlap: reason ?? "none" },
+        reason ? "chat: citation kept" : "chat: citation dropped (no answer overlap)"
+      );
+      if (reason) indicesToCite.add(i);
     }
 
     // Fall back: if the filter removed everything, keep the first model-cited chunk
-    // (better to show one source than none)
     if (indicesToCite.size === 0) {
       const first = [...modelCitedIndices][0];
       if (first !== undefined) indicesToCite.add(first);
