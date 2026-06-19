@@ -19,6 +19,7 @@ import {
   ExternalLink,
   Layers,
   Sparkles,
+  Play,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -65,6 +66,7 @@ function StatCard({
 
 function ManualRow({ manual, onDelete, getToken }: { manual: any; onDelete: (id: number) => void; getToken: () => Promise<string | null> }) {
   const isReady = manual.status === "structure_complete";
+  const isPending = manual.status === "pending";
   const [pdfLoading, setPdfLoading] = useState(false);
 
   async function openPdf() {
@@ -88,15 +90,18 @@ function ManualRow({ manual, onDelete, getToken }: { manual: any; onDelete: (id:
   return (
     <div className={cn(
       "flex items-center gap-3 py-3 border-b border-gray-100 last:border-0",
-      isReady && "bg-amber-50 -mx-4 px-4 sm:-mx-5 sm:px-5 rounded-lg border-amber-100"
+      isReady && "bg-amber-50 -mx-4 px-4 sm:-mx-5 sm:px-5 rounded-lg border-amber-100",
+      isPending && "bg-gray-50 -mx-4 px-4 sm:-mx-5 sm:px-5 rounded-lg"
     )}>
       <div className={cn(
         "w-8 h-8 rounded flex items-center justify-center shrink-0",
-        isReady ? "bg-amber-100" : "bg-blue-50"
+        isReady ? "bg-amber-100" : isPending ? "bg-gray-100" : "bg-blue-50"
       )}>
         {isReady
           ? <Layers className="w-4 h-4 text-amber-600" />
-          : <FileText className="w-4 h-4 text-blue-500" />
+          : isPending
+            ? <FileText className="w-4 h-4 text-gray-400" />
+            : <FileText className="w-4 h-4 text-blue-500" />
         }
       </div>
       <div className="flex-1 min-w-0">
@@ -123,6 +128,14 @@ function ManualRow({ manual, onDelete, getToken }: { manual: any; onDelete: (id:
             </button>
           </Link>
         )}
+        {isPending && (
+          <Link href={`/manuals/${manual.id}`}>
+            <button className="mt-1.5 flex items-center gap-1 text-xs font-semibold text-gray-500 hover:text-gray-800">
+              <Play className="w-3 h-3" />
+              Start processing →
+            </button>
+          </Link>
+        )}
       </div>
       <div className="flex items-center gap-1 shrink-0">
         {manual.status === "completed" && (
@@ -140,6 +153,17 @@ function ManualRow({ manual, onDelete, getToken }: { manual: any; onDelete: (id:
               variant="ghost"
               size="icon"
               className="w-8 h-8 text-amber-400 hover:text-amber-700 hover:bg-amber-100"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </Button>
+          </Link>
+        )}
+        {isPending && (
+          <Link href={`/manuals/${manual.id}`}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="w-8 h-8 text-gray-300 hover:text-gray-600 hover:bg-gray-100"
             >
               <ChevronRight className="w-3.5 h-3.5" />
             </Button>
