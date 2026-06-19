@@ -720,11 +720,11 @@ CRITICAL RULES FOR ACCURACY:
 6. Machine dimensions vs packaging dimensions: manuals typically contain TWO separate dimension tables — one for the machine itself (e.g. "Machine dimensions and weight", Fig 2.x) and one for the shipping/packaging box (e.g. "Delivery and handling", Fig 3.x). When the question asks about the machine's height/size, answer from the MACHINE dimensions table. When the question asks about the box or packaging the machine ships in, answer from the PACKAGING dimensions table. If both are present in the excerpts, clearly label which is which.
 7. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
 
-CITING SOURCES:
-- Each excerpt is labelled [Source N: ...] in the context.
-- Whenever you use information from a source, place its number in square brackets immediately after the relevant sentence, e.g. "The motor runs at 1450 rpm [1]." or "See the wiring diagram on page 25 [2]."
-- Only cite sources you actually drew on. Do not cite a source just because it was provided.
-- Do not add a "References" or "Sources" section at the end — inline citations only.
+FORMATTING:
+- Write in plain prose. Do NOT use markdown bold (**text**), headers (##), or bullet dashes that start with **.
+- You may use numbered lists (1. 2. 3.) and plain dashes (-) for bullet points.
+- Do NOT include inline source numbers like [1] or [2] — sources are shown separately to the user.
+- Do not add a "References" or "Sources" section.
 
 Structure your answer with:
 - A direct answer to the question
@@ -771,45 +771,37 @@ Please answer the question based on the above information from the engineering m
       temperature: 0.2,
     });
 
-    const answer =
+    const rawAnswer =
       completion.choices[0]?.message?.content ??
       "Unable to generate an answer.";
 
-    // ── 6. Build citations ──────────────────────────────────────────────────
-    // Parse which source numbers the model actually cited inline (e.g. "[2]").
-    // ragChunks[i] corresponds to [Source i+1] in the prompt context.
-    const citedIndices = new Set<number>();
-    for (const m of answer.matchAll(/\[(\d+)\]/g)) {
-      const n = parseInt(m[1], 10);
-      if (n >= 1 && n <= ragChunks.length) citedIndices.add(n - 1);
-    }
-    // Fall back to top 3 if the model cited nothing (safety net).
-    const indicesToCite =
-      citedIndices.size > 0
-        ? citedIndices
-        : new Set(ragChunks.slice(0, 3).map((_, i) => i));
+    // Strip any stray [N] citation markers and ** bold that the model may still
+    // produce despite the prompt instruction (safety net).
+    const answer = rawAnswer
+      .replace(/\s*\[\d+(?:,\s*\d+)*\]/g, "")   // [1], [1, 2], [1,2,18] …
+      .replace(/\*\*([^*]+)\*\*/g, "$1")           // **bold** → plain
+      .trim();
 
-    // ── 6b. Citation validation + content-match recovery ─────────────────────
-    // Two problems this block solves:
+    // ── 6. Build citations via content-match ────────────────────────────────
+    // The model no longer writes inline [N] markers.  Citations are determined
+    // entirely by matching distinctive content from each chunk against the answer.
+    // indicesToCite starts empty and is populated by the scoring pass below.
+    const indicesToCite = new Set<number>();
+
+    // ── 6b. Content-match citation scoring ───────────────────────────────────
+    // Since the model no longer writes [N] markers, citations are determined
+    // purely by checking which chunks contain distinctive content that appears
+    // verbatim in the answer.  Only high-specificity signals count:
     //
-    //   A. Model over-cites: the model often piles [N1, N2, N3] onto a single
-    //      sentence even when only one source actually contains the answer.
-    //      Fix: validate every model-cited chunk — drop it if it scores 0
-    //      against the answer (no distinctive content overlap).
-    //
-    //   B. Model mis-assigns [N]: the model uses data from Source 2 but writes
-    //      [4] in the answer.  Fix: recover un-cited chunks that score high
-    //      (specific decimal numbers or long phrases that appear verbatim).
-    //
-    // Scoring rules — only distinctive signals count:
     //   +3  Exact 3+ word phrase (≥15 chars) from chunk appears in answer
     //   +2  Decimal number (e.g. 0.6, 1.8) from chunk appears in answer
-    //   +1  Number-with-unit (e.g. "10 VDC", "±10%") from chunk in answer
-    //       — round integers (10, 20, 50…) score 0; too common to be signal
+    //   +1  Number-with-unit (e.g. "9.6 VDC", "±10%") from chunk in answer
+    //       — bare round integers (10, 20 …) are excluded; too common
+    //
+    // Threshold: score ≥ 3 → chunk is cited.
     const answerLower = answer.toLowerCase();
 
     function scoreChunk(content: string): number {
-      const contentLower = content.toLowerCase();
       let score = 0;
 
       // +3: long multi-word phrases (≥15 chars, likely unique technical language)
@@ -829,7 +821,7 @@ Please answer the question based on the above information from the engineering m
         if (answerLower.includes(m[0].toLowerCase())) score += 1;
       }
 
-      // +1: percentage with non-round value (e.g. ±10% only if "±10" in chunk too)
+      // +1: ±N% pattern (e.g. ±10%)
       for (const m of content.matchAll(/[±]\d+\s*%/g)) {
         if (answerLower.includes(m[0].toLowerCase())) score += 1;
       }
@@ -837,32 +829,20 @@ Please answer the question based on the above information from the engineering m
       return score;
     }
 
-    // A. Validate model-cited chunks — remove if they score 0
-    for (const i of [...indicesToCite]) {
-      const s = scoreChunk(ragChunks[i].content);
-      if (s === 0) {
-        indicesToCite.delete(i);
-        req.log.info(
-          { chunkPage: ragChunks[i].page_number },
-          "citation-validation: dropped low-signal chunk"
-        );
-      }
-    }
-
-    // B. Recover un-cited chunks that score ≥ 3 (strong content match)
+    // Score every chunk — include those that score ≥ 3
     for (let i = 0; i < ragChunks.length; i++) {
-      if (indicesToCite.has(i)) continue;
       const s = scoreChunk(ragChunks[i].content);
       if (s >= 3) {
         indicesToCite.add(i);
         req.log.info(
           { chunkPage: ragChunks[i].page_number, score: s },
-          "citation-recovery: added content-matched chunk"
+          "citation: content-matched chunk"
         );
       }
     }
 
-    // If validation removed everything, fall back to the top-ranked chunk
+    // Fall back to the top-ranked chunk if nothing scored high enough
+    // (e.g. purely qualitative answers with no numbers or long phrases)
     if (indicesToCite.size === 0 && ragChunks.length > 0) {
       indicesToCite.add(0);
     }
