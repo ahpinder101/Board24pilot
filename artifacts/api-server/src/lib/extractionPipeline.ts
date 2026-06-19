@@ -268,7 +268,7 @@ async function pass4EntityExtraction(
   await updateManualPass(manualId, 4);
 
   const allEntities: ExtractedEntity[] = [];
-  const chunks = chunkText(fullText, 5000);
+  const chunks = chunkText(fullText, 3000);
   const seenNames = new Set<string>();
 
   // Anchor naming to the top-level machines Pass 1 identified, so the same machine
@@ -281,13 +281,12 @@ async function pass4EntityExtraction(
   const totalEntityChunks = Math.min(chunks.length, maxChunks === Infinity ? chunks.length : maxChunks);
   for (let ci = 0; ci < totalEntityChunks; ci++) {
     const chunk = chunks[ci];
-    if (ci % 5 === 0) {
-      await setActivity(manualId, `Pass 4 — extracting entities, chunk ${ci + 1} of ${totalEntityChunks}`);
-    }
+    await setActivity(manualId, `Pass 4 — extracting entities, chunk ${ci + 1} of ${totalEntityChunks}`);
     try {
       const response = await openai.chat.completions.create({
         model: MODEL,
         max_completion_tokens: MAX_TOKENS,
+        signal: AbortSignal.timeout(90_000),
         messages: [
           {
             role: "system",
@@ -382,13 +381,12 @@ async function pass5ExtractPaths(
   const totalPathChunks = Math.min(chunks.length, maxChunks === Infinity ? chunks.length : maxChunks);
   for (let ci = 0; ci < totalPathChunks; ci++) {
     const chunk = chunks[ci];
-    if (ci % 5 === 0) {
-      await setActivity(manualId, `Pass 5b — extracting procedures, chunk ${ci + 1} of ${totalPathChunks}`);
-    }
+    await setActivity(manualId, `Pass 5b — extracting procedures, chunk ${ci + 1} of ${totalPathChunks}`);
     try {
       const response = await openai.chat.completions.create({
         model: MODEL,
         max_completion_tokens: MAX_TOKENS,
+        signal: AbortSignal.timeout(90_000),
         messages: [
           {
             role: "system",
@@ -457,13 +455,12 @@ async function pass5RelationshipExtraction(
   const totalRelChunks = Math.min(chunks.length, maxChunks === Infinity ? chunks.length : maxChunks);
   for (let ci = 0; ci < totalRelChunks; ci++) {
     const chunk = chunks[ci];
-    if (ci % 5 === 0) {
-      await setActivity(manualId, `Pass 5 — mapping relationships, chunk ${ci + 1} of ${totalRelChunks}`);
-    }
+    await setActivity(manualId, `Pass 5 — mapping relationships, chunk ${ci + 1} of ${totalRelChunks}`);
     try {
       const response = await openai.chat.completions.create({
         model: MODEL,
         max_completion_tokens: MAX_TOKENS,
+        signal: AbortSignal.timeout(90_000),
         messages: [
           {
             role: "system",
@@ -929,14 +926,35 @@ async function passVisionOcr(
   const results: Array<{ pageNumber: number; text: string }> = [];
   const CONCURRENCY = 5;
 
+  // Load already-OCR'd pages from DB so we can skip them on resume.
+  const existingRows = await db
+    .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
+    .from(manualPagesTable)
+    .where(eq(manualPagesTable.manualId, manualId));
+  const alreadyOcrd = new Map<number, string>();
+  for (const row of existingRows) {
+    if (row.rawText && row.rawText.trim().length > 0) {
+      alreadyOcrd.set(row.pageNumber, row.rawText);
+    }
+  }
+  const skipCount = alreadyOcrd.size;
+  if (skipCount > 0) {
+    logger.info({ manualId, skipCount, totalPages }, "Vision OCR — skipping already-OCR'd pages");
+    // Pre-populate results with existing data
+    for (const [pageNumber, text] of alreadyOcrd) {
+      results.push({ pageNumber, text });
+    }
+  }
+
   // Write the PDF buffer to disk once; all page renders reuse the same path.
   const { pdfPath, cleanup: cleanupPdf } = await writePdfToTempFile(pdfBuffer);
 
   for (let start = 1; start <= totalPages; start += CONCURRENCY) {
     const batch: number[] = [];
     for (let p = start; p < start + CONCURRENCY && p <= totalPages; p++) {
-      batch.push(p);
+      if (!alreadyOcrd.has(p)) batch.push(p);
     }
+    if (batch.length === 0) continue;
 
     const batchResults = await Promise.all(
       batch.map(async (pageNumber) => {
