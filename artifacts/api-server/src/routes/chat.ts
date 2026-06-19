@@ -221,13 +221,21 @@ router.post("/chat", async (req: Request, res: Response) => {
     // Include 2-char tokens (Sq, mm, LH, RH …) — critical abbreviations in
     // engineering manuals that would otherwise be silently dropped.
     // Vision pre-pass keywords are included in searchText when an image was sent.
-    const tsQuery = searchText
+    const searchTerms = searchText
       .replace(/[^a-zA-Z0-9 ]/g, " ")
       .trim()
       .split(/\s+/)
       .filter((w) => w.length >= 2)
-      .slice(0, 20)  // raised from 12 — image keywords can add many more tokens
-      .join(" | ");
+      .slice(0, 20); // raised from 12 — image keywords can add many more tokens
+
+    const tsQuery = searchTerms.join(" | "); // broad OR query — retrieves context
+
+    // AND query: all terms ≥ 3 chars must be present in the chunk.
+    // Used to identify citation chunks (chunks that contain EVERY key term from
+    // the question are far more likely to be the actual source of the answer than
+    // chunks that just mention one keyword).
+    const andTerms = searchTerms.filter((w) => w.length >= 3);
+    const andQuery = andTerms.length >= 2 ? andTerms.join(" & ") : null;
 
     type ChunkRow = {
       id: number;
@@ -289,6 +297,49 @@ router.post("/chat", async (req: Request, res: Response) => {
           LIMIT ${TOP_K_CHUNKS}
         `);
         ragChunks = fallbackFts.rows;
+      }
+    }
+
+    // ── 1b-AND. Run AND query to identify citation-candidate chunks ───────────
+    // Chunks matching ALL question terms are very likely the actual source of the
+    // answer (e.g. for "TMCC2 Filling OK signal", only the page that talks about
+    // the Filling OK signal has every term).  We store their DB IDs now; the
+    // citation-building step after the model call uses these IDs instead of the
+    // model's self-reported sources (which over-cite topically-related chunks).
+    let andQueryChunkIds = new Set<number>();
+    if (andQuery) {
+      try {
+        const andResult = await db.execute<ChunkRow>(sql`
+          SELECT
+            c.id,
+            c.manual_id,
+            m.name AS manual_name,
+            c.page_number,
+            c.chunk_index,
+            c.content,
+            ts_rank(c.fts_vector, to_tsquery('english', ${andQuery})) AS rank
+          FROM chunks c
+          JOIN manuals m ON m.id = c.manual_id
+          WHERE c.fts_vector @@ to_tsquery('english', ${andQuery})
+          ORDER BY rank DESC
+          LIMIT 5
+        `);
+        andQueryChunkIds = new Set(andResult.rows.map((r) => r.id));
+        req.log.info(
+          { andQuery, count: andResult.rows.length, pages: andResult.rows.map((r) => r.page_number) },
+          "chat: AND-query citation candidates"
+        );
+        // Ensure AND-query chunks are present in ragChunks (they may have been
+        // below the rank threshold in the OR pass if a narrower manual has them)
+        const existingIds = new Set(ragChunks.map((c) => c.id));
+        for (const row of andResult.rows) {
+          if (!existingIds.has(row.id)) {
+            ragChunks.unshift(row); // prepend — highest priority context
+            existingIds.add(row.id);
+          }
+        }
+      } catch {
+        // AND query may fail if a term is a stop-word the FTS engine drops; ignore
       }
     }
 
@@ -840,61 +891,40 @@ Please answer the question based on the above information from the engineering m
     // Map 1-based source numbers → 0-based chunk indices
     const modelCitedIndices = new Set<number>(citedSourceNumbers.map((n) => n - 1));
 
-    // ── Filter: drop model-cited chunks not actually used in the answer ───────
-    // The model over-cites topically-related chunks.  To validate a citation we
-    // check that the ANSWER's own specific phrases appear verbatim in the CHUNK —
-    // i.e. the chunk could plausibly have PRODUCED that sentence.
-    // (Previous approach checked the reverse direction — chunk phrases in answer —
-    //  which passes any chunk sharing domain vocabulary even if it gave nothing.)
-    const answerLower = answer.toLowerCase();
-
-    function overlapReason(content: string): string | null {
-      const contentLower = content.toLowerCase();
-
-      // Decimal numbers (e.g. 1.8, 0.6) appearing in both — symmetric check is fine
-      for (const m of answer.matchAll(/\b\d+\.\d+\b/g)) {
-        if (contentLower.includes(m[0])) return `decimal ${m[0]}`;
-      }
-
-      // ±N% patterns from the answer appearing in the chunk
-      for (const m of answer.matchAll(/[±]\s*\d+\s*%/g)) {
-        if (contentLower.includes(m[0].toLowerCase())) return `pct ${m[0]}`;
-      }
-
-      // Number-with-unit from the answer appearing in the chunk
-      const unitPat = /\b\d+\.?\d*\s*(?:VDC|VAC|mA|bar|rpm|mm|cm|kg|kW|Hz|MHz)\b/gi;
-      for (const m of answer.matchAll(unitPat)) {
-        if (contentLower.includes(m[0].toLowerCase())) return `unit ${m[0]}`;
-      }
-
-      // 4+ consecutive words from the ANSWER appearing in the CHUNK (≥16 chars)
-      // Using 4-word windows from the answer ensures the phrase is specific enough
-      // to only come from the chunk that actually produced it.
-      const answerWords = answerLower.replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter(Boolean);
-      for (let i = 0; i <= answerWords.length - 4; i++) {
-        const phrase = answerWords.slice(i, i + 4).join(" ");
-        if (phrase.length >= 16 && contentLower.includes(phrase)) return `phrase "${phrase}"`;
-      }
-
-      return null;
-    }
-
+    // ── 6b. Determine citations from AND-query results ───────────────────────
+    // The AND query (run before the model call) found chunks containing ALL the
+    // distinctive question terms.  Those are the true source pages — no
+    // content-matching heuristics needed.  Fall back to model-reported sources
+    // only when the AND query returned nothing (vague/single-term questions).
     const indicesToCite = new Set<number>();
-    for (const i of modelCitedIndices) {
-      const reason = overlapReason(ragChunks[i].content);
-      req.log.info(
-        { chunkPage: ragChunks[i].page_number, overlap: reason ?? "none" },
-        reason ? "chat: citation kept" : "chat: citation dropped (no answer overlap)"
-      );
-      if (reason) indicesToCite.add(i);
+
+    if (andQueryChunkIds.size > 0) {
+      for (let i = 0; i < ragChunks.length; i++) {
+        if (andQueryChunkIds.has(ragChunks[i].id)) {
+          indicesToCite.add(i);
+          req.log.info(
+            { chunkPage: ragChunks[i].page_number },
+            "chat: citation from AND-query"
+          );
+        }
+      }
     }
 
-    // Fall back: if the filter removed everything, keep the first model-cited chunk
+    // Fallback: AND query empty → use model-reported sources
     if (indicesToCite.size === 0) {
-      const first = [...modelCitedIndices][0];
-      if (first !== undefined) indicesToCite.add(first);
-      else if (ragChunks.length > 0) indicesToCite.add(0);
+      for (const n of citedSourceNumbers) {
+        if (n >= 1 && n <= ragChunks.length) {
+          indicesToCite.add(n - 1);
+          req.log.info(
+            { chunkPage: ragChunks[n - 1].page_number },
+            "chat: citation fallback to model-reported source"
+          );
+        }
+      }
     }
+
+    // Final fallback: show top chunk rather than no source
+    if (indicesToCite.size === 0 && ragChunks.length > 0) indicesToCite.add(0);
 
     const seenManualPages = new Set<string>();
     const citations: ChatCitation[] = [];
