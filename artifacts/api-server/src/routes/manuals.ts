@@ -55,6 +55,7 @@ const manualCols = {
   totalPages: manualsTable.totalPages,
   documentType: manualsTable.documentType,
   errorMessage: manualsTable.errorMessage,
+  currentActivity: manualsTable.currentActivity,
   createdAt: manualsTable.createdAt,
   updatedAt: manualsTable.updatedAt,
 };
@@ -575,6 +576,39 @@ router.post("/manuals/:id/extract-graph", expensiveOpLimiter, async (req, res) =
       logger.error({ err, manualId }, "Graph extraction failed");
     }
   });
+});
+
+// POST /manuals/:id/reset-processing — unlock a stuck "processing" job so it can be re-triggered
+router.post("/manuals/:id/reset-processing", async (req: Request, res: Response) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
+  if (isNaN(manualId)) {
+    res.status(400).json({ error: "Invalid manual id" });
+    return;
+  }
+
+  const [manual] = await db.select(manualCols).from(manualsTable).where(eq(manualsTable.id, manualId)).limit(1);
+  if (!manual) {
+    res.status(404).json({ error: "Manual not found" });
+    return;
+  }
+
+  if (manual.status !== "processing" && manual.status !== "failed") {
+    res.status(400).json({ error: `Manual is in state "${manual.status}" — nothing to reset` });
+    return;
+  }
+
+  // If it got past Pass 3 (structure_complete), reset only the entity-extraction
+  // phase so the user doesn't have to redo the full text-extraction pipeline.
+  const resumeStatus = (manual.processingPass ?? 0) >= 4 ? "structure_complete" : "pending";
+
+  const [updated] = await db
+    .update(manualsTable)
+    .set({ status: resumeStatus, currentActivity: null, updatedAt: new Date() })
+    .where(eq(manualsTable.id, manualId))
+    .returning(manualCols);
+
+  req.log.info({ manualId, from: manual.status, to: resumeStatus }, "Processing reset by user");
+  res.json(updated);
 });
 
 // POST /manuals/:id/rechunk — admin: re-apply semantic chunker without full pipeline

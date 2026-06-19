@@ -31,5 +31,6 @@ export * from './manualStats';
 export * from './manualStatsEntitiesByType';
 export * from './manualStatsRelationshipsByType';
 export * from './manualStatus';
+export * from './resetProcessing400';
 export * from './uploadUrlRequest';
 export * from './uploadUrlResponse';

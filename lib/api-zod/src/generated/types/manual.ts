@@ -21,6 +21,8 @@ export interface Manual {
   documentType?: string | null;
   /** @nullable */
   errorMessage?: string | null;
+  /** @nullable */
+  currentActivity?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

@@ -40,6 +40,15 @@ async function updateManualPass(manualId: number, pass: number) {
     .where(eq(manualsTable.id, manualId));
 }
 
+/** Write a human-readable activity message + bump updatedAt so the frontend
+ *  heartbeat ticker can tell whether the pipeline is still making progress. */
+async function setActivity(manualId: number, message: string) {
+  await db
+    .update(manualsTable)
+    .set({ currentActivity: message, updatedAt: new Date() })
+    .where(eq(manualsTable.id, manualId));
+}
+
 async function setManualStatus(
   manualId: number,
   status: string,
@@ -145,7 +154,11 @@ async function pass3VisionDescriptions(
   // in-memory before Pass 7 runs, ensuring FTS chunks contain enriched text.
   const generated = new Map<number, string>();
 
-  for (const page of toDescribe) {
+  for (let i = 0; i < toDescribe.length; i++) {
+    const page = toDescribe[i]!;
+    if (i % 10 === 0) {
+      await setActivity(manualId, `Pass 3 — describing sparse page ${page.pageNumber} (${i + 1} of ${toDescribe.length} sparse pages)`);
+    }
     try {
       const context = fullText.slice(
         Math.max(0, page.pageNumber * 500 - 1000),
@@ -233,8 +246,12 @@ async function pass4EntityExtraction(
     ? `\n\nKNOWN TOP-LEVEL MACHINES (use these EXACT names when referring to them; keep naming consistent across the document):\n${knownMachines.map((m) => `- ${m}`).join("\n")}`
     : "";
 
-  for (let ci = 0; ci < Math.min(chunks.length, maxChunks); ci++) {
+  const totalEntityChunks = Math.min(chunks.length, maxChunks === Infinity ? chunks.length : maxChunks);
+  for (let ci = 0; ci < totalEntityChunks; ci++) {
     const chunk = chunks[ci];
+    if (ci % 5 === 0) {
+      await setActivity(manualId, `Pass 4 — extracting entities, chunk ${ci + 1} of ${totalEntityChunks}`);
+    }
     try {
       const response = await openai.chat.completions.create({
         model: MODEL,
@@ -330,8 +347,12 @@ async function pass5ExtractPaths(
     ? `\n\nKNOWN ENTITIES (use these exact names in stepSequence where applicable):\n${entities.map((e) => `- ${e.name} (${e.type})`).join("\n")}`
     : "";
 
-  for (let ci = 0; ci < Math.min(chunks.length, maxChunks); ci++) {
+  const totalPathChunks = Math.min(chunks.length, maxChunks === Infinity ? chunks.length : maxChunks);
+  for (let ci = 0; ci < totalPathChunks; ci++) {
     const chunk = chunks[ci];
+    if (ci % 5 === 0) {
+      await setActivity(manualId, `Pass 5b — extracting procedures, chunk ${ci + 1} of ${totalPathChunks}`);
+    }
     try {
       const response = await openai.chat.completions.create({
         model: MODEL,
@@ -401,8 +422,12 @@ async function pass5RelationshipExtraction(
   const allRelationships: ExtractedRelationship[] = [];
   const chunks = chunkText(fullText, 4000);
 
-  for (let ci = 0; ci < Math.min(chunks.length, maxChunks); ci++) {
+  const totalRelChunks = Math.min(chunks.length, maxChunks === Infinity ? chunks.length : maxChunks);
+  for (let ci = 0; ci < totalRelChunks; ci++) {
     const chunk = chunks[ci];
+    if (ci % 5 === 0) {
+      await setActivity(manualId, `Pass 5 — mapping relationships, chunk ${ci + 1} of ${totalRelChunks}`);
+    }
     try {
       const response = await openai.chat.completions.create({
         model: MODEL,
@@ -685,7 +710,12 @@ async function pass7EmbedChunks(
   let totalChunks = 0;
   let restructuredPages = 0;
   let diagramPages = 0;
+  let pass7PageIdx = 0;
   for (const page of pages) {
+    pass7PageIdx++;
+    if (pass7PageIdx % 20 === 1) {
+      await setActivity(manualId, `Pass 7 — indexing page ${page.pageNumber} of ${pages.length} for search`);
+    }
     if (!page.text || page.text.trim().length < 20) continue;
 
     let textToChunk = page.text;
@@ -898,6 +928,7 @@ async function passVisionOcr(
     );
 
     results.push(...batchResults);
+    await setActivity(manualId, `Vision OCR — processed pages ${batch[0]}–${batch[batch.length - 1]} of ${totalPages}`);
 
     // Persist OCR text to manual_pages immediately so progress is saved
     for (const { pageNumber, text } of batchResults) {
@@ -1199,6 +1230,7 @@ export async function extractGraphFromExistingText(
   const relChunks = opts?.relChunks ?? Infinity;
 
   await setManualStatus(manualId, "processing", { processingPass: 4 });
+  await setActivity(manualId, "Pass 4 — preparing entity extraction...");
 
   // Wrap the whole job so any throw releases the manual from "processing".
   // Without this, a failed background run would leave status stuck at "processing"
@@ -1419,6 +1451,7 @@ export async function runExtractionPipeline(
 ): Promise<void> {
   try {
     await setManualStatus(manualId, "processing", { processingPass: 0 });
+    await setActivity(manualId, "Starting — extracting text from PDF...");
 
     // Extract PDF text
     const pdfContent = await extractPdfText(pdfBuffer);
@@ -1485,6 +1518,7 @@ export async function runExtractionPipeline(
 
     // Stop here — entity/relationship extraction is triggered manually by the user
     // so they can choose how much of the document to cover before incurring cost.
+    await setActivity(manualId, "Done — document indexed. Ready for entity extraction.");
     await setManualStatus(manualId, "structure_complete", { processingPass: 3 });
     logger.info({ manualId }, "Structure passes complete — awaiting entity extraction");
   } catch (err) {

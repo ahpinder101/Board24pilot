@@ -157,6 +157,34 @@ paths:
         "204":
           description: Deleted
 
+  /manuals/{id}/reset-processing:
+    post:
+      operationId: resetProcessing
+      tags: [manuals]
+      summary: Reset a stuck or failed processing job so it can be re-triggered
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Reset successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Manual"
+        "400":
+          description: Manual is not in a resettable state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+
   /manuals/{id}/process:
     post:
       operationId: processManual
@@ -333,6 +361,8 @@ components:
         documentType:
           type: ["string", "null"]
         errorMessage:
+          type: ["string", "null"]
+        currentActivity:
           type: ["string", "null"]
         createdAt:
           type: string

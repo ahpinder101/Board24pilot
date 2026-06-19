@@ -45,6 +45,8 @@ export interface Manual {
   documentType?: string | null;
   /** @nullable */
   errorMessage?: string | null;
+  /** @nullable */
+  currentActivity?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -216,4 +218,8 @@ export interface ChatHistoryMessage {
   citations?: ChatCitation[];
   createdAt: string;
 }
+
+export type ResetProcessing400 = {
+  error?: string;
+};
 

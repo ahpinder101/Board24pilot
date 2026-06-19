@@ -90,6 +90,7 @@ export const ListManualsResponseItem = zod.object({
   "totalPages": zod.number().nullish(),
   "documentType": zod.string().nullish(),
   "errorMessage": zod.string().nullish(),
+  "currentActivity": zod.string().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })
@@ -123,6 +124,7 @@ export const GetManualResponse = zod.object({
   "totalPages": zod.number().nullish(),
   "documentType": zod.string().nullish(),
   "errorMessage": zod.string().nullish(),
+  "currentActivity": zod.string().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })
@@ -133,6 +135,29 @@ export const GetManualResponse = zod.object({
  */
 export const DeleteManualParams = zod.object({
   "id": zod.coerce.number()
+})
+
+
+/**
+ * @summary Reset a stuck or failed processing job so it can be re-triggered
+ */
+export const ResetProcessingParams = zod.object({
+  "id": zod.coerce.number()
+})
+
+export const ResetProcessingResponse = zod.object({
+  "id": zod.number(),
+  "name": zod.string(),
+  "filename": zod.string(),
+  "objectPath": zod.string(),
+  "status": zod.enum(['pending', 'processing', 'completed', 'failed', 'structure_complete']),
+  "processingPass": zod.number().nullish(),
+  "totalPages": zod.number().nullish(),
+  "documentType": zod.string().nullish(),
+  "errorMessage": zod.string().nullish(),
+  "currentActivity": zod.string().nullish(),
+  "createdAt": zod.coerce.date(),
+  "updatedAt": zod.coerce.date()
 })
 
 
@@ -153,6 +178,7 @@ export const ProcessManualResponse = zod.object({
   "totalPages": zod.number().nullish(),
   "documentType": zod.string().nullish(),
   "errorMessage": zod.string().nullish(),
+  "currentActivity": zod.string().nullish(),
   "createdAt": zod.coerce.date(),
   "updatedAt": zod.coerce.date()
 })

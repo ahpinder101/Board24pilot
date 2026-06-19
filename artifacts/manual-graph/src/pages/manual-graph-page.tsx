@@ -17,10 +17,12 @@ import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Clock, CheckCircle2, AlertTriangle, FileText, Database, Network,
-  Layers, Play, ChevronDown, ChevronUp, Info,
+  Layers, Play, ChevronDown, ChevronUp, Info, RefreshCw, WifiOff,
+  Activity,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useAuth } from "@clerk/react";
 
 // ─── Cost model ────────────────────────────────────────────────────────────────
 // Dollar amounts use gpt-4o public rates as a reference baseline.
@@ -64,6 +66,187 @@ const TIER_META: TierMeta[] = [
     warnLarge: true,
   },
 ];
+
+// ─── Reset button for failed manuals ────────────────────────────────────────
+
+function FailedResetButton({ manualId, onReset }: { manualId: number; onReset: () => void }) {
+  const { getToken } = useAuth();
+  const [isResetting, setIsResetting] = useState(false);
+
+  async function handleReset() {
+    setIsResetting(true);
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/manuals/${manualId}/reset-processing`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) onReset();
+    } finally {
+      setIsResetting(false);
+    }
+  }
+
+  return (
+    <button
+      onClick={handleReset}
+      disabled={isResetting}
+      className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium bg-red-600 hover:bg-red-700 text-white shadow transition-all disabled:opacity-50"
+    >
+      <RefreshCw className={["w-4 h-4", isResetting ? "animate-spin" : ""].join(" ")} />
+      {isResetting ? "Resetting..." : "Reset & Retry"}
+    </button>
+  );
+}
+
+// ─── Live processing ticker ─────────────────────────────────────────────────
+
+const STALL_SECONDS = 90;
+
+function ProcessingTicker({
+  manual,
+  manualId,
+  onReset,
+}: {
+  manual: { processingPass?: number | null; currentActivity?: string | null; updatedAt: string };
+  manualId: number;
+  onReset: () => void;
+}) {
+  const { getToken } = useAuth();
+  const [secondsAgo, setSecondsAgo] = useState(0);
+  const [isResetting, setIsResetting] = useState(false);
+  const lastUpdatedRef = useRef(new Date(manual.updatedAt).getTime());
+
+  // Update lastUpdatedRef when server sends a fresh updatedAt
+  useEffect(() => {
+    lastUpdatedRef.current = new Date(manual.updatedAt).getTime();
+    setSecondsAgo(0);
+  }, [manual.updatedAt]);
+
+  // Real-time counter — increments every second independently of polling
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - lastUpdatedRef.current) / 1000);
+      setSecondsAgo(elapsed);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const isStalled = secondsAgo > STALL_SECONDS;
+  const isSlow = secondsAgo > 40;
+
+  async function handleReset() {
+    setIsResetting(true);
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/manuals/${manualId}/reset-processing`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) onReset();
+    } finally {
+      setIsResetting(false);
+    }
+  }
+
+  const pass = manual.processingPass ?? 0;
+  const activity = manual.currentActivity ?? "Initialising...";
+
+  return (
+    <Card className="h-full flex items-center justify-center bg-card/50 border-dashed">
+      <CardContent className="flex flex-col items-center justify-center p-10 max-w-lg w-full text-center space-y-5">
+
+        {/* Live pulse indicator */}
+        <div className="relative flex items-center justify-center">
+          {isStalled ? (
+            <div className="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center">
+              <WifiOff className="w-7 h-7 text-red-500" />
+            </div>
+          ) : (
+            <div className="relative w-14 h-14">
+              <div className={[
+                "absolute inset-0 rounded-full animate-ping opacity-30",
+                isSlow ? "bg-amber-400" : "bg-green-400",
+              ].join(" ")} />
+              <div className={[
+                "relative w-14 h-14 rounded-full flex items-center justify-center",
+                isSlow ? "bg-amber-100" : "bg-green-100",
+              ].join(" ")}>
+                <Activity className={["w-7 h-7", isSlow ? "text-amber-600" : "text-green-600"].join(" ")} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Title + pass */}
+        <div>
+          <h3 className="text-lg font-semibold text-foreground">
+            {isStalled ? "Processing appears stalled" : "Processing Manual"}
+          </h3>
+          <p className="text-sm text-muted-foreground font-mono mt-0.5">
+            Pass {pass} of 7
+          </p>
+        </div>
+
+        {/* Progress bar */}
+        <Progress
+          value={(pass / 7) * 100}
+          className={["h-1.5 w-full", isStalled ? "[&>div]:bg-red-400" : ""].join(" ")}
+        />
+
+        {/* Live activity text — this is the real ticker */}
+        <div className={[
+          "w-full rounded-lg border px-4 py-3 font-mono text-xs text-left leading-relaxed",
+          isStalled
+            ? "border-red-200 bg-red-50 text-red-700"
+            : "border-border bg-muted/40 text-muted-foreground",
+        ].join(" ")}>
+          <div className="flex items-start gap-2">
+            {!isStalled && (
+              <span className="mt-0.5 shrink-0 text-green-500 animate-pulse">▶</span>
+            )}
+            <span>{activity}</span>
+          </div>
+        </div>
+
+        {/* Heartbeat counter */}
+        <div className={[
+          "flex items-center gap-2 text-xs font-mono",
+          isStalled ? "text-red-500 font-semibold" : isSlow ? "text-amber-600" : "text-muted-foreground",
+        ].join(" ")}>
+          <Clock className="w-3.5 h-3.5" />
+          {isStalled
+            ? `No activity for ${secondsAgo}s — pipeline may have crashed`
+            : isSlow
+              ? `Last update ${secondsAgo}s ago — waiting for API response...`
+              : `Last update ${secondsAgo}s ago`}
+        </div>
+
+        {/* Reset button — always available when processing, prominent when stalled */}
+        <button
+          onClick={handleReset}
+          disabled={isResetting}
+          className={[
+            "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all",
+            isStalled
+              ? "bg-red-600 hover:bg-red-700 text-white shadow"
+              : "border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30",
+            isResetting ? "opacity-50 cursor-not-allowed" : "",
+          ].join(" ")}
+        >
+          <RefreshCw className={["w-4 h-4", isResetting ? "animate-spin" : ""].join(" ")} />
+          {isResetting ? "Resetting..." : isStalled ? "Reset & Retry" : "Cancel & Reset"}
+        </button>
+
+        {isStalled && (
+          <p className="text-xs text-muted-foreground max-w-xs">
+            Resetting will not lose extracted data. The job will restart from where it left off.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function ManualGraphPage() {
   const { id } = useParams<{ id: string }>();
@@ -223,28 +406,31 @@ export default function ManualGraphPage() {
 
       <div className="flex-1 min-h-[400px]">
 
-        {/* ── Processing ── */}
+        {/* ── Processing — live ticker ── */}
         {manual.status === "processing" && (
-          <Card className="h-full flex items-center justify-center bg-card/50 border-dashed">
-            <CardContent className="flex flex-col items-center justify-center p-12 max-w-md w-full text-center space-y-6">
-              <Clock className="w-12 h-12 text-primary animate-pulse" />
-              <div className="w-full">
-                <h3 className="text-lg font-medium text-foreground mb-1">Processing Manual</h3>
-                <p className="text-sm text-muted-foreground font-mono mb-4">
-                  Pass {manual.processingPass || 1} of 7
-                </p>
-                <Progress value={((manual.processingPass || 1) / 7) * 100} className="h-2 w-full mb-2" />
-                <div className="text-xs text-muted-foreground font-mono text-left opacity-70">
-                  {manual.processingPass === 1 && "Extracting document structure..."}
-                  {manual.processingPass === 2 && "Parsing page content & text..."}
-                  {manual.processingPass === 3 && "Analysing images and tables..."}
-                  {manual.processingPass === 4 && "Extracting engineering entities..."}
-                  {manual.processingPass === 5 && "Mapping component relationships..."}
-                  {manual.processingPass === 6 && "Finalising hierarchy..."}
-                  {manual.processingPass === 7 && "Indexing text for search (RAG)..."}
-                  {!manual.processingPass && "Initialising..."}
-                </div>
+          <ProcessingTicker
+            manual={manual}
+            manualId={manualId}
+            onReset={() => queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) })}
+          />
+        )}
+
+        {/* ── Failed — reset option ── */}
+        {manual.status === "failed" && (
+          <Card className="h-full flex items-center justify-center bg-card/50 border-dashed border-red-200">
+            <CardContent className="flex flex-col items-center justify-center p-10 max-w-md w-full text-center space-y-4">
+              <div className="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center">
+                <AlertTriangle className="w-7 h-7 text-red-500" />
               </div>
+              <div>
+                <h3 className="text-lg font-semibold text-foreground">Processing failed</h3>
+                {manual.errorMessage && (
+                  <p className="text-xs text-red-600 font-mono mt-1 bg-red-50 border border-red-200 rounded px-3 py-2 text-left">
+                    {manual.errorMessage}
+                  </p>
+                )}
+              </div>
+              <FailedResetButton manualId={manualId} onReset={() => queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) })} />
             </CardContent>
           </Card>
         )}
@@ -477,19 +663,6 @@ export default function ManualGraphPage() {
 
             </div>
           </div>
-        )}
-
-        {/* ── Failed ── */}
-        {manual.status === "failed" && (
-          <Card className="h-full flex items-center justify-center bg-destructive/5 border-destructive/20 border-dashed">
-            <CardContent className="flex flex-col items-center justify-center p-12 text-center max-w-md">
-              <AlertTriangle className="w-12 h-12 text-destructive mb-4" />
-              <h3 className="text-lg font-medium text-destructive mb-2">Processing Failed</h3>
-              <p className="text-sm text-muted-foreground font-mono">
-                {manual.errorMessage || "An unknown error occurred during extraction."}
-              </p>
-            </CardContent>
-          </Card>
         )}
 
         {/* ── Graph loading ── */}

@@ -19,6 +19,7 @@ export const manualsTable = pgTable("manuals", {
   documentType: text("document_type"),
   structure: jsonb("structure").$type<{ overview: string; machines: string[]; sections: string[] }>(),
   errorMessage: text("error_message"),
+  currentActivity: text("current_activity"),
   pdfData: bytea("pdf_data"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

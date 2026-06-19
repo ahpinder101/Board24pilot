@@ -31,6 +31,7 @@ import type {
   Manual,
   ManualInput,
   ManualStats,
+  ResetProcessing400,
   UploadUrlRequest,
   UploadUrlResponse
 } from './api.schemas';
@@ -636,6 +637,76 @@ export const useDeleteManual = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getDeleteManualMutationOptions(options));
+    }
+
+export const getResetProcessingUrl = (id: number,) => {
+
+
+
+
+  return `/api/manuals/${id}/reset-processing`
+}
+
+/**
+ * @summary Reset a stuck or failed processing job so it can be re-triggered
+ */
+export const resetProcessing = async (id: number, options?: RequestInit): Promise<Manual> => {
+
+  return customFetch<Manual>(getResetProcessingUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getResetProcessingMutationOptions = <TError = ErrorType<ResetProcessing400>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof resetProcessing>>, TError,{id: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof resetProcessing>>, TError,{id: number}, TContext> => {
+
+const mutationKey = ['resetProcessing'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof resetProcessing>>, {id: number}> = (props) => {
+          const {id} = props ?? {};
+
+          return  resetProcessing(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ResetProcessingMutationResult = NonNullable<Awaited<ReturnType<typeof resetProcessing>>>
+
+    export type ResetProcessingMutationError = ErrorType<ResetProcessing400>
+
+    /**
+ * @summary Reset a stuck or failed processing job so it can be re-triggered
+ */
+export const useResetProcessing = <TError = ErrorType<ResetProcessing400>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof resetProcessing>>, TError,{id: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof resetProcessing>>,
+        TError,
+        {id: number},
+        TContext
+      > => {
+      return useMutation(getResetProcessingMutationOptions(options));
     }
 
 export const getProcessManualUrl = (id: number,) => {
