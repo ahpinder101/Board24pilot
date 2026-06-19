@@ -5,7 +5,7 @@ import {
   useLocation,
   Router as WouterRouter,
 } from "wouter";
-import { ClerkProvider, SignIn, SignUp, Show, useClerk } from "@clerk/react";
+import { ClerkProvider, SignIn, SignUp, Show, useClerk, ClerkLoading, ClerkLoaded } from "@clerk/react";
 import { publishableKeyFromHost } from "@clerk/react/internal";
 import { shadcn } from "@clerk/themes";
 import {
@@ -155,6 +155,17 @@ function AccessGate() {
       queryKey: getGetGlobalStatsQueryKey(),
     },
   });
+  const [, setLocation] = useLocation();
+
+  useEffect(() => {
+    if (error?.status === 401) {
+      setLocation("/sign-in");
+    }
+  }, [error, setLocation]);
+
+  if (error?.status === 401) {
+    return null;
+  }
 
   if (error?.status === 403) {
     return <AccessDeniedPage />;
@@ -174,12 +185,17 @@ function AccessGate() {
 function ProtectedApp() {
   return (
     <>
-      <Show when="signed-in">
-        <AccessGate />
-      </Show>
-      <Show when="signed-out">
+      <ClerkLoading>
         <LandingPage />
-      </Show>
+      </ClerkLoading>
+      <ClerkLoaded>
+        <Show when="signed-in">
+          <AccessGate />
+        </Show>
+        <Show when="signed-out">
+          <LandingPage />
+        </Show>
+      </ClerkLoaded>
     </>
   );
 }
