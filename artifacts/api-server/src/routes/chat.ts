@@ -343,6 +343,46 @@ router.post("/chat", async (req: Request, res: Response) => {
       }
     }
 
+    // ── 1b-COVERAGE. In-memory fallback when AND SQL returns 0 ────────────────
+    // Long natural-language questions (e.g. "Which circuit breaker protects the
+    // Folder Gluer Power supply…") contain many words; no single chunk can satisfy
+    // the strict AND query.  When AND fails we re-rank the OR results by counting
+    // how many distinct key terms (≥4 chars) each chunk contains.  The chunk(s)
+    // with the best coverage become citation candidates — much more reliable than
+    // trusting the model's self-reported source number.
+    if (andQueryChunkIds.size === 0 && ragChunks.length > 0) {
+      const keyTerms = searchTerms
+        .filter((w) => w.length >= 4)
+        .map((w) => w.toLowerCase());
+
+      if (keyTerms.length >= 2) {
+        const scored = ragChunks.map((chunk) => {
+          const lower = chunk.content.toLowerCase();
+          const matchCount = keyTerms.filter((t) => lower.includes(t)).length;
+          return { id: chunk.id, page: chunk.page_number, matchCount };
+        });
+        const maxMatches = Math.max(...scored.map((s) => s.matchCount));
+        // Only use coverage-based citation if we have meaningful coverage (≥30%)
+        if (maxMatches >= Math.ceil(keyTerms.length * 0.3)) {
+          andQueryChunkIds = new Set(
+            scored
+              .filter((s) => s.matchCount === maxMatches)
+              .slice(0, 3)
+              .map((s) => s.id)
+          );
+          req.log.info(
+            {
+              keyTerms,
+              maxMatches,
+              total: keyTerms.length,
+              pages: scored.filter((s) => s.matchCount === maxMatches).slice(0, 3).map((s) => s.page),
+            },
+            "chat: coverage-based citation candidates (AND fallback)"
+          );
+        }
+      }
+    }
+
     // Fallback: if FTS returns nothing, grab most-recent chunks as context
     if (ragChunks.length === 0) {
       const fallback = await db.execute<ChunkRow>(sql`
