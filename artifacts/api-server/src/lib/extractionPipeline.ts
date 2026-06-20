@@ -1113,34 +1113,17 @@ export async function reprocessManualWithVision(
       }
     }
 
-    // Pass 5: Relationship extraction
-    const extractedRelationships = await pass5RelationshipExtraction(
-      manualId,
-      fullText,
-      extractedEntities
-    );
-
+    // Pass 5: Relationship extraction (saves per-chunk to the DB itself and
+    // returns the number of relationships inserted).
     const nameToId = new Map<string, number>();
     for (const e of insertedEntities) nameToId.set(e.name.toLowerCase().trim(), e.id);
 
-    for (const rel of extractedRelationships) {
-      const sourceId = nameToId.get(rel.sourceName?.toLowerCase().trim() ?? "");
-      const targetId = nameToId.get(rel.targetName?.toLowerCase().trim() ?? "");
-      if (!sourceId || !targetId || sourceId === targetId) continue;
-      try {
-        await db.insert(relationshipsTable).values({
-          manualId,
-          sourceEntityId: sourceId,
-          targetEntityId: targetId,
-          type: rel.type ?? "connects_to",
-          label: rel.label ?? "",
-          orderIndex: rel.orderIndex ?? null,
-          properties: null,
-        });
-      } catch (err) {
-        logger.warn({ err }, "Relationship insert failed");
-      }
-    }
+    await pass5RelationshipExtraction(
+      manualId,
+      fullText,
+      extractedEntities,
+      nameToId
+    );
 
     // Pass 5b: Path extraction — ordered procedural sequences (entity-anchored)
     const extractedPaths = await pass5ExtractPaths(manualId, fullText, undefined, extractedEntities);

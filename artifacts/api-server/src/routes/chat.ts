@@ -300,6 +300,143 @@ router.post("/chat", async (req: Request, res: Response) => {
       }
     }
 
+    // ── 1a-PHRASE. Phrase/adjacency retrieval for multi-word terms ────────────
+    // The broad OR query ranks by ts_rank, which favours topically-dense pages
+    // over the single page holding the precise fact.  Example: for "Folder Gluer
+    // Power" the answer page mentions each word once, while an entire section
+    // repeats "folder"/"main"/"cabinet" and outranks it — the answer page was not
+    // even in the OR top-40.  Phrase search via phraseto_tsquery (the <-> adjacency
+    // operator) finds the chunk where the exact multi-word term actually appears.
+    // Phrase matches are the strongest signal, so they become top-priority context
+    // and (when specific enough) the preferred citation candidates.
+    const PHRASE_STOPWORDS = new Set([
+      "which", "what", "where", "when", "who", "whom", "whose", "why", "how",
+      "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "at", "for",
+      "from", "with", "by", "is", "are", "was", "were", "be", "been", "being",
+      "its", "it", "this", "that", "these", "those", "as", "than", "into", "out",
+      "do", "does", "did", "has", "have", "had", "will", "would", "can", "could",
+      "should", "may", "might", "must", "shall",
+    ]);
+    const phraseChunkIds = new Set<number>(); // specific-phrase matches → citations
+    const phraseContextChunks: ChunkRow[] = []; // all phrase matches → context
+    {
+      // Split the question into runs of consecutive content words (break at stopwords)
+      const rawWords = searchText
+        .replace(/[^a-zA-Z0-9 ]/g, " ")
+        .trim()
+        .split(/\s+/);
+      const sequences: string[][] = [];
+      let current: string[] = [];
+      for (const w of rawWords) {
+        if (w.length < 2 || PHRASE_STOPWORDS.has(w.toLowerCase())) {
+          if (current.length >= 2) sequences.push(current);
+          current = [];
+        } else {
+          current.push(w);
+        }
+      }
+      if (current.length >= 2) sequences.push(current);
+
+      // Generate n-gram phrases (longest first so the most specific matches win)
+      const phrases: { text: string; len: number }[] = [];
+      const seenPhrase = new Set<string>();
+      for (const seq of sequences) {
+        for (let n = Math.min(4, seq.length); n >= 2; n--) {
+          for (let i = 0; i + n <= seq.length; i++) {
+            const text = seq.slice(i, i + n).join(" ");
+            const key = text.toLowerCase();
+            if (!seenPhrase.has(key)) {
+              seenPhrase.add(key);
+              phrases.push({ text, len: n });
+            }
+          }
+        }
+      }
+      phrases.sort((a, b) => b.len - a.len);
+
+      // A phrase that matches only a handful of chunks is highly discriminating
+      // (e.g. "folder gluer power" → the one answer page).  A phrase that matches
+      // many chunks is a common section term (e.g. "main control cabinet") —
+      // useful as context but a poor citation.  Only specific phrases drive
+      // citations; broad phrases still contribute context.
+      const SPECIFIC_PHRASE_MAX_MATCHES = 8;
+      type PhraseRow = ChunkRow & { total_matches: number };
+      const addedContext = new Set<number>();
+      // chunkId → fewest total_matches of any phrase that matched it (specificity)
+      const phraseCitationCandidates = new Map<number, number>();
+      for (const { text } of phrases.slice(0, 12)) {
+        const r = await db.execute<PhraseRow>(sql`
+          SELECT
+            c.id,
+            c.manual_id,
+            m.name AS manual_name,
+            c.page_number,
+            c.chunk_index,
+            c.content,
+            ts_rank(c.fts_vector, phraseto_tsquery('english', ${text})) AS rank,
+            COUNT(*) OVER () AS total_matches
+          FROM chunks c
+          JOIN manuals m ON m.id = c.manual_id
+          WHERE c.fts_vector @@ phraseto_tsquery('english', ${text})
+          ORDER BY rank DESC
+          LIMIT 6
+        `);
+        if (r.rows.length === 0) continue;
+        const totalMatches = Number(r.rows[0].total_matches);
+        const isSpecific = totalMatches <= SPECIFIC_PHRASE_MAX_MATCHES;
+        for (const row of r.rows) {
+          if (isSpecific) {
+            const prev = phraseCitationCandidates.get(row.id);
+            if (prev === undefined || totalMatches < prev) {
+              phraseCitationCandidates.set(row.id, totalMatches);
+            }
+          }
+          if (
+            !addedContext.has(row.id) &&
+            phraseContextChunks.length < TOP_K_CHUNKS
+          ) {
+            phraseContextChunks.push(row);
+            addedContext.add(row.id);
+          }
+        }
+      }
+
+      // Narrow citation candidates to the MOST discriminating phrase (fewest
+      // total matches).  Broader phrase matches remain context-only — a phrase
+      // matching one page is a far stronger source signal than one matching many.
+      if (phraseCitationCandidates.size > 0) {
+        const minMatches = Math.min(...phraseCitationCandidates.values());
+        for (const [id, m] of phraseCitationCandidates) {
+          if (m === minMatches) phraseChunkIds.add(id);
+        }
+      }
+
+      if (phraseContextChunks.length > 0) {
+        req.log.info(
+          {
+            phrases: phrases.slice(0, 12).map((p) => p.text),
+            citationPages: phraseContextChunks
+              .filter((c) => phraseChunkIds.has(c.id))
+              .map((c) => c.page_number),
+            contextPages: phraseContextChunks.map((c) => c.page_number),
+          },
+          "chat: phrase-search candidates"
+        );
+      }
+    }
+
+    // Prepend phrase-matched chunks so the answer page is highest-priority context
+    if (phraseContextChunks.length > 0) {
+      const existing = new Set(ragChunks.map((c) => c.id));
+      for (let i = phraseContextChunks.length - 1; i >= 0; i--) {
+        const chunk = phraseContextChunks[i];
+        if (!existing.has(chunk.id)) {
+          ragChunks.unshift(chunk);
+          existing.add(chunk.id);
+        }
+      }
+    }
+
     // ── 1b-AND. Run AND query to identify citation-candidate chunks ───────────
     // Chunks matching ALL question terms are very likely the actual source of the
     // answer (e.g. for "TMCC2 Filling OK signal", only the page that talks about
@@ -340,46 +477,6 @@ router.post("/chat", async (req: Request, res: Response) => {
         }
       } catch {
         // AND query may fail if a term is a stop-word the FTS engine drops; ignore
-      }
-    }
-
-    // ── 1b-COVERAGE. In-memory fallback when AND SQL returns 0 ────────────────
-    // Long natural-language questions (e.g. "Which circuit breaker protects the
-    // Folder Gluer Power supply…") contain many words; no single chunk can satisfy
-    // the strict AND query.  When AND fails we re-rank the OR results by counting
-    // how many distinct key terms (≥4 chars) each chunk contains.  The chunk(s)
-    // with the best coverage become citation candidates — much more reliable than
-    // trusting the model's self-reported source number.
-    if (andQueryChunkIds.size === 0 && ragChunks.length > 0) {
-      const keyTerms = searchTerms
-        .filter((w) => w.length >= 4)
-        .map((w) => w.toLowerCase());
-
-      if (keyTerms.length >= 2) {
-        const scored = ragChunks.map((chunk) => {
-          const lower = chunk.content.toLowerCase();
-          const matchCount = keyTerms.filter((t) => lower.includes(t)).length;
-          return { id: chunk.id, page: chunk.page_number, matchCount };
-        });
-        const maxMatches = Math.max(...scored.map((s) => s.matchCount));
-        // Only use coverage-based citation if we have meaningful coverage (≥30%)
-        if (maxMatches >= Math.ceil(keyTerms.length * 0.3)) {
-          andQueryChunkIds = new Set(
-            scored
-              .filter((s) => s.matchCount === maxMatches)
-              .slice(0, 3)
-              .map((s) => s.id)
-          );
-          req.log.info(
-            {
-              keyTerms,
-              maxMatches,
-              total: keyTerms.length,
-              pages: scored.filter((s) => s.matchCount === maxMatches).slice(0, 3).map((s) => s.page),
-            },
-            "chat: coverage-based citation candidates (AND fallback)"
-          );
-        }
       }
     }
 
@@ -948,7 +1045,68 @@ Please answer the question based on the above information from the engineering m
     // only when the AND query returned nothing (vague/single-term questions).
     const indicesToCite = new Set<number>();
 
-    if (andQueryChunkIds.size > 0) {
+    // Priority 0: quote-grounded citation.  The model copies the exact sentence
+    // it used into the "quote" field (chain-of-thought rule).  Matching that
+    // verbatim quote back to the chunk it came from is the most reliable possible
+    // citation — it pins the source to the text the answer was actually built on.
+    const normalizeForMatch = (s: string) =>
+      s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const quoteRaw = (parsed.quote ?? "").trim();
+    if (quoteRaw && quoteRaw.toUpperCase() !== "NOT IN EXCERPTS") {
+      const normQuote = normalizeForMatch(quoteRaw);
+      if (normQuote.length >= 8) {
+        // Exact normalised substring match first.
+        let quoteIdx = ragChunks.findIndex((c) =>
+          normalizeForMatch(c.content).includes(normQuote)
+        );
+        // Fallback: high token-coverage match (handles a quote that spans a chunk
+        // boundary or has minor OCR differences from the source text).
+        if (quoteIdx === -1) {
+          const qTokens = [
+            ...new Set(normQuote.split(" ").filter((t) => t.length >= 2)),
+          ];
+          if (qTokens.length >= 3) {
+            let bestScore = 0;
+            ragChunks.forEach((c, i) => {
+              const content = normalizeForMatch(c.content);
+              const score =
+                qTokens.filter((t) => content.includes(t)).length /
+                qTokens.length;
+              if (score > bestScore) {
+                bestScore = score;
+                quoteIdx = i;
+              }
+            });
+            if (bestScore < 0.7) quoteIdx = -1; // not confident enough
+          }
+        }
+        if (quoteIdx >= 0) {
+          indicesToCite.add(quoteIdx);
+          req.log.info(
+            { chunkPage: ragChunks[quoteIdx].page_number },
+            "chat: citation from grounding quote"
+          );
+        }
+      }
+    }
+
+    // Priority 1: phrase matches.  A chunk containing the exact multi-word term
+    // from the question (e.g. "FOLDER GLUER POWER") is a strong source signal —
+    // far more reliable than individual-word overlap or self-reported sources.
+    if (indicesToCite.size === 0 && phraseChunkIds.size > 0) {
+      for (let i = 0; i < ragChunks.length; i++) {
+        if (phraseChunkIds.has(ragChunks[i].id)) {
+          indicesToCite.add(i);
+          req.log.info(
+            { chunkPage: ragChunks[i].page_number },
+            "chat: citation from phrase-search"
+          );
+        }
+      }
+    }
+
+    // Priority 2: chunks containing ALL distinctive question terms (AND query).
+    if (indicesToCite.size === 0 && andQueryChunkIds.size > 0) {
       for (let i = 0; i < ragChunks.length; i++) {
         if (andQueryChunkIds.has(ragChunks[i].id)) {
           indicesToCite.add(i);
