@@ -41,7 +41,7 @@ channel = "stable-25_05"
 [userenv]
 
 [userenv.shared]
-ALLOWED_EMAILS = "ahpinder@gmail.com"
+ALLOWED_EMAILS = "ahpinder@gmail.com, marktefula@googlemail.com"
 
 [userenv.development]
 INTERNAL_ADMIN_KEY = "dev-admin-2026"
