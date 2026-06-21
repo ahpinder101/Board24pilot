@@ -44,4 +44,4 @@ channel = "stable-25_05"
 ALLOWED_EMAILS = "ahpinder@gmail.com"
 
 [userenv.development]
-INTERNAL_ADMIN_KEY = "dev-admin-local-2026"
+INTERNAL_ADMIN_KEY = "dev-admin-2026"
