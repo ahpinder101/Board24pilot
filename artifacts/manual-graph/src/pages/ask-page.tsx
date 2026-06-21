@@ -54,26 +54,49 @@ interface FeedbackState {
 // ── CitationChip ──────────────────────────────────────────────────────────────
 
 function CitationChip({ citation, index }: { citation: Citation; index: number }) {
-  const href = citation.pageNumber
-    ? `/api/manuals/${citation.manualId}/pdf#page=${citation.pageNumber}`
-    : `/api/manuals/${citation.manualId}/pdf`;
+  const [fetching, setFetching] = useState(false);
 
   const shortName =
     citation.manualName.length > 28
       ? citation.manualName.slice(0, 28) + "…"
       : citation.manualName;
 
+  async function openPdf() {
+    if (fetching) return;
+    setFetching(true);
+    try {
+      const res = await fetch(`/api/manuals/${citation.manualId}/pdf`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const target = citation.pageNumber ? `${blobUrl}#page=${citation.pageNumber}` : blobUrl;
+      window.open(target, "_blank", "noopener,noreferrer");
+      // Keep the blob URL alive for 2 minutes so the new tab can fully load
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 120_000);
+    } catch {
+      // Fallback: open the URL directly and let the browser handle auth
+      const fallback = citation.pageNumber
+        ? `/api/manuals/${citation.manualId}/pdf#page=${citation.pageNumber}`
+        : `/api/manuals/${citation.manualId}/pdf`;
+      window.open(fallback, "_blank", "noopener,noreferrer");
+    } finally {
+      setFetching(false);
+    }
+  }
+
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
+    <button
+      type="button"
+      onClick={openPdf}
+      disabled={fetching}
       title={`${citation.manualName}${citation.pageNumber ? ` · page ${citation.pageNumber}` : ""}\n\n${citation.excerpt}`}
-      className="group flex items-start gap-2 px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-blue-300 hover:bg-blue-50 transition-colors text-left"
+      className="group flex items-start gap-2 px-3 py-2 rounded-lg border border-gray-200 bg-white hover:border-blue-300 hover:bg-blue-50 transition-colors text-left disabled:opacity-60 disabled:cursor-wait w-full"
     >
       <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
         <span className="text-[10px] font-bold text-gray-400 w-4 text-center">{index + 1}</span>
-        <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+        {fetching
+          ? <Loader2 className="w-3.5 h-3.5 text-blue-400 shrink-0 animate-spin" />
+          : <FileText className="w-3.5 h-3.5 text-blue-400 shrink-0" />}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5 flex-wrap">
@@ -87,7 +110,7 @@ function CitationChip({ citation, index }: { citation: Citation; index: number }
         </div>
         <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-2 leading-relaxed">{citation.excerpt}</p>
       </div>
-    </a>
+    </button>
   );
 }
 
