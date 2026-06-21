@@ -19,7 +19,7 @@ import {
   GetManualGraphParams,
 } from "@workspace/api-zod";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText } from "../lib/extractionPipeline.js";
+import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText, reprocessCompoundPages } from "../lib/extractionPipeline.js";
 import { logger } from "../lib/logger.js";
 import { expensiveOpLimiter } from "../middlewares/rateLimit.js";
 
@@ -627,6 +627,44 @@ router.post("/manuals/:id/rechunk", expensiveOpLimiter, async (req, res) => {
     req.log.error({ err, manualId }, "Rechunk failed");
     res.status(500).json({ error: String(err) });
   }
+});
+
+// POST /manuals/:id/reprocess-compound-pages — re-run vision for pages that have
+// both a wiring diagram and a parameter table, using a compound prompt that
+// explicitly extracts both halves.  Body: { pages: number[] }
+router.post("/manuals/:id/reprocess-compound-pages", expensiveOpLimiter, async (req: Request, res: Response) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
+  if (isNaN(manualId)) {
+    res.status(400).json({ error: "Invalid manual id" });
+    return;
+  }
+
+  const { pages } = req.body as { pages?: unknown };
+  if (!Array.isArray(pages) || pages.length === 0) {
+    res.status(400).json({ error: "Body must include a non-empty pages array of page numbers" });
+    return;
+  }
+  const pageNumbers = (pages as unknown[])
+    .map((p) => parseInt(String(p), 10))
+    .filter((n) => !isNaN(n) && n > 0);
+  if (pageNumbers.length === 0) {
+    res.status(400).json({ error: "No valid page numbers in pages array" });
+    return;
+  }
+
+  req.log.info({ manualId, pageNumbers }, "Compound page re-process requested");
+
+  // Respond immediately; run in background
+  res.json({ ok: true, manualId, pageNumbers, message: `Re-processing ${pageNumbers.length} page(s) in background` });
+
+  setImmediate(async () => {
+    try {
+      const result = await reprocessCompoundPages(manualId, pageNumbers);
+      logger.info({ manualId, result }, "Compound re-process finished");
+    } catch (err) {
+      logger.error({ err, manualId }, "Compound re-process background task failed");
+    }
+  });
 });
 
 // GET /manuals/:id/pdf — serve PDF stored in the database

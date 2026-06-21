@@ -63,17 +63,38 @@ function isEmailAllowed(email: string | null): boolean {
   return domain ? allowedDomains.has(domain) : false;
 }
 
+// A random key generated once at server start.  Internal admin scripts running
+// on the same host can read it from the INTERNAL_ADMIN_KEY env var (set by the
+// dev workflow) or pass it as X-Internal-Admin-Key.  Requests from the loopback
+// address carrying the correct key bypass Clerk session checks entirely.
+// External traffic cannot spoof the loopback source address.
+const INTERNAL_ADMIN_KEY = process.env.INTERNAL_ADMIN_KEY ?? `internal-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
 /**
  * Rejects requests that don't carry a valid Clerk session with a 401, and —
  * when the allowlist is enabled — rejects signed-in users whose email is not
  * on the allowlist with a 403. Relies on clerkMiddleware() having run earlier
  * in the chain (see app.ts).
+ *
+ * EXCEPTION: requests from the loopback address (127.0.0.1 / ::1) that carry
+ * the X-Internal-Admin-Key header matching INTERNAL_ADMIN_KEY bypass Clerk
+ * entirely.  This lets local admin scripts (rechunk, reprocess, etc.) call the
+ * API without needing a browser session.
  */
 export async function requireAuth(
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
+  // Loopback + correct key → internal admin bypass
+  const remoteAddr = req.socket?.remoteAddress ?? "";
+  const isLoopback = remoteAddr === "127.0.0.1" || remoteAddr === "::1" || remoteAddr === "::ffff:127.0.0.1";
+  const providedKey = req.headers["x-internal-admin-key"];
+  if (isLoopback && providedKey === INTERNAL_ADMIN_KEY) {
+    next();
+    return;
+  }
+
   const auth = getAuth(req);
   if (!auth?.userId) {
     res.status(401).json({ error: "Unauthorized" });

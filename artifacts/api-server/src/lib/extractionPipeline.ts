@@ -1706,3 +1706,182 @@ export async function runExtractionPipeline(
     throw err;
   }
 }
+
+// ─── COMPOUND PAGE RE-PROCESSING ─────────────────────────────────────────────
+//
+// Some pages contain BOTH a wiring diagram AND an inverter/drive parameter table
+// (e.g. a large wiring schematic with a settings table in the lower section).
+// The standard buildPageInterpretationPrompt classifies the page as
+// ELECTRICAL_WIRING and describes only the circuit — the parameter table is
+// silently dropped.
+//
+// buildCompoundPagePrompt always extracts both halves.
+
+function buildCompoundPagePrompt(pageNumber: number): string {
+  return `You are an expert engineering document analyst trained in ISO and IEC technical standards.
+
+This is page ${pageNumber} of an engineering manual. This page may contain MULTIPLE content types — treat each independently and extract all of them in full.
+
+━━━ SECTION 1: PAGE CLASSIFICATION & WIRING DIAGRAM ━━━
+
+If this page contains an electrical wiring diagram or schematic (IEC 60617), extract:
+
+PAGE_TYPE: ELECTRICAL_WIRING
+POWER RAILS: voltage levels and AC/DC type.
+LOADS: each load's label, model, and rating.
+SWITCHING ELEMENTS: relays, contactors, switches — model and coil/contact ratings.
+CIRCUIT TRACES: for each circuit, describe: power source → switching elements → load, with wire colours and terminal numbers where visible.
+
+If instead the page is a pneumatic/hydraulic schematic (ISO 1219-1/2), extract ACTUATORS, DIRECTIONAL CONTROL VALVES, FLOW CONTROL & CHECK VALVES, PRESSURE/FILTER/REGULATOR, and CIRCUIT FLOW DESCRIPTION.
+
+━━━ SECTION 2: PARAMETER / SETTINGS TABLE (MANDATORY — check carefully) ━━━
+
+Inspect the ENTIRE page, including corners, lower sections, and any inset boxes.
+
+If ANY inverter, drive, servo, or motor controller parameter table is present — rows with parameter IDs in formats such as Pr0–Pr999, #xx.xxx, P.xxx, d.xxx, F.xxx, C.xxx, b.xxx, A.xxx, or any other systematic parameter numbering — extract EVERY row WITHOUT exception:
+
+PARAMETER TABLE:
+<inverter label, e.g. "2 INV." or "SP-2403" or "1 INV / A8AP">
+PARAM ID | VALUE
+PARAM ID | VALUE
+... (all rows, do not summarise or skip any)
+
+Rules:
+- Extract ALL rows. Do not skip, summarise, or truncate.
+- Preserve parameter IDs and values EXACTLY as printed (including dots, leading zeros, letters).
+- If the table has multiple columns of parameters side-by-side, read left-to-right across each row.
+- If multiple inverters have separate tables on this page, extract each under its own label.
+- If NO parameter table is visible anywhere on the page, output: PARAMETER TABLE: none
+
+━━━ SECTION 3: TITLE BLOCK ━━━
+
+If a drawing title block is visible (usually bottom-right or bottom), extract:
+DRAWING NO: <value>
+SHEET S/N: <value>
+SHEET NAME: <value>
+PAGE REF: <value>
+
+If the page is blank or contains only unlabelled artwork, output exactly: [diagram only]`;
+}
+
+/**
+ * Re-runs vision extraction for a specific set of pages using the compound
+ * prompt (wiring + parameter table).  Deletes existing chunks for those pages
+ * and inserts fresh ones from the new vision output.
+ *
+ * Used to fix pages where the standard ELECTRICAL_WIRING prompt missed a
+ * parameter table in the lower section of the page.
+ */
+export async function reprocessCompoundPages(
+  manualId: number,
+  pageNumbers: number[]
+): Promise<{ processed: number; errors: number; pages: Array<{ page: number; status: string }> }> {
+  if (pageNumbers.length === 0) return { processed: 0, errors: 0, pages: [] };
+
+  // Load PDF from DB
+  const [manual] = await db
+    .select({ pdfData: manualsTable.pdfData })
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId))
+    .limit(1);
+
+  if (!manual?.pdfData) {
+    throw new Error(`Manual ${manualId} has no PDF data stored`);
+  }
+
+  const pdfBuffer = Buffer.isBuffer(manual.pdfData)
+    ? manual.pdfData
+    : Buffer.from(manual.pdfData as unknown as string, "hex");
+
+  const { pdfPath, cleanup } = await writePdfToTempFile(pdfBuffer);
+
+  const results: Array<{ page: number; status: string }> = [];
+  let processed = 0;
+  let errors = 0;
+
+  try {
+    for (const pageNumber of pageNumbers) {
+      try {
+        logger.info({ manualId, pageNumber }, "Compound re-process: running vision with compound prompt");
+
+        const base64Image = await renderPdfPageToBase64FromPath(pdfPath, pageNumber);
+
+        const response = await openai.chat.completions.create({
+          model: MODEL,
+          max_completion_tokens: 4096,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image_url",
+                  image_url: { url: `data:image/png;base64,${base64Image}`, detail: "high" },
+                },
+                {
+                  type: "text",
+                  text: buildCompoundPagePrompt(pageNumber),
+                },
+              ],
+            },
+          ],
+        });
+
+        const newText = response.choices[0]?.message?.content?.trim() ?? "";
+        if (!newText || newText === "[diagram only]" || newText.length < 30) {
+          results.push({ page: pageNumber, status: "skipped (blank/no content)" });
+          continue;
+        }
+
+        // Update manual_pages raw_text and description with new content
+        await db
+          .update(manualPagesTable)
+          .set({ rawText: newText, description: newText })
+          .where(
+            and(
+              eq(manualPagesTable.manualId, manualId),
+              eq(manualPagesTable.pageNumber, pageNumber)
+            )
+          );
+
+        // Delete existing chunks for this page
+        await db
+          .delete(chunksTable)
+          .where(
+            and(
+              eq(chunksTable.manualId, manualId),
+              eq(chunksTable.pageNumber, pageNumber)
+            )
+          );
+
+        // Re-chunk with the new content
+        const semanticChunks = chunkPageSemantically(newText);
+        for (let ci = 0; ci < semanticChunks.length; ci++) {
+          const content = semanticChunks[ci]!.trim();
+          if (content.length < 15) continue;
+          await db.insert(chunksTable).values({
+            manualId,
+            pageNumber,
+            chunkIndex: ci,
+            content,
+          });
+        }
+
+        logger.info(
+          { manualId, pageNumber, chunks: semanticChunks.length },
+          "Compound re-process: page re-indexed"
+        );
+        results.push({ page: pageNumber, status: `ok (${semanticChunks.length} chunks)` });
+        processed++;
+      } catch (err) {
+        logger.error({ err, manualId, pageNumber }, "Compound re-process: page failed");
+        results.push({ page: pageNumber, status: `error: ${err instanceof Error ? err.message : String(err)}` });
+        errors++;
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+
+  logger.info({ manualId, processed, errors }, "Compound re-process complete");
+  return { processed, errors, pages: results };
+}
