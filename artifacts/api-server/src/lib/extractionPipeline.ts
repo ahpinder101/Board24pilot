@@ -932,6 +932,35 @@ BOM TABLE: if a parts list is visible, extract every row.
 ━━━ TEXT_TABLE ━━━
 Extract ALL text exactly as it appears. Preserve: numbered/lettered steps, table rows, part labels, measurements with units, warnings, and section headings. Do NOT summarize or paraphrase.
 
+━━━ PARAMETER / SETTINGS TABLE (check for this on EVERY page type) ━━━
+
+After completing the section above, inspect the ENTIRE page — including corners, lower sections, and any inset boxes — for inverter, drive, servo, or motor controller parameter tables.
+
+A parameter table has rows with systematic parameter IDs such as: Pr0–Pr999, #xx.xxx, P.xxx, d.xxx, F.xxx, C.xxx, b.xxx, A.xxx, or any other numbered parameter scheme.
+
+If ANY such table is present, extract it in full:
+
+PARAMETER TABLE:
+<inverter/drive label, e.g. "2 INV." or "SP-2403" or "1 INV / A8AP">
+PARAM ID | VALUE
+PARAM ID | VALUE
+(all rows — do not skip, summarise, or truncate any)
+
+Rules:
+- Extract ALL rows without exception.
+- Preserve parameter IDs and values EXACTLY as printed (dots, leading zeros, letters).
+- If multiple columns of parameters appear side-by-side, read left-to-right across each row.
+- If multiple drives have separate tables, extract each under its own label.
+- If NO parameter table is visible anywhere on the page, output: PARAMETER TABLE: none
+
+━━━ TITLE BLOCK ━━━
+
+If a drawing title block is visible (usually bottom-right), extract:
+DRAWING NO: <value>
+SHEET S/N: <value>
+SHEET NAME: <value>
+PAGE REF: <value>
+
 If the page is blank or contains only unlabelled artwork with no text, output exactly: [diagram only]`;
 }
 
