@@ -20,6 +20,8 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AgentChatRequest,
+  AgentChatResponse,
   ChatHistoryMessage,
   ChatRequest,
   ChatResponse,
@@ -117,6 +119,77 @@ export const useSendChatMessage = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getSendChatMessageMutationOptions(options));
+    }
+
+export const getSendAgentChatMessageUrl = () => {
+
+
+
+
+  return `/api/chat/agent`
+}
+
+/**
+ * @summary Ask a question with Domain Specialist validation and confidence scoring
+ */
+export const sendAgentChatMessage = async (agentChatRequest: AgentChatRequest, options?: RequestInit): Promise<AgentChatResponse> => {
+
+  return customFetch<AgentChatResponse>(getSendAgentChatMessageUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      agentChatRequest,)
+  }
+);}
+
+
+
+
+export const getSendAgentChatMessageMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sendAgentChatMessage>>, TError,{data: BodyType<AgentChatRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof sendAgentChatMessage>>, TError,{data: BodyType<AgentChatRequest>}, TContext> => {
+
+const mutationKey = ['sendAgentChatMessage'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof sendAgentChatMessage>>, {data: BodyType<AgentChatRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  sendAgentChatMessage(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SendAgentChatMessageMutationResult = NonNullable<Awaited<ReturnType<typeof sendAgentChatMessage>>>
+    export type SendAgentChatMessageMutationBody = BodyType<AgentChatRequest>
+    export type SendAgentChatMessageMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Ask a question with Domain Specialist validation and confidence scoring
+ */
+export const useSendAgentChatMessage = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof sendAgentChatMessage>>, TError,{data: BodyType<AgentChatRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof sendAgentChatMessage>>,
+        TError,
+        {data: BodyType<AgentChatRequest>},
+        TContext
+      > => {
+      return useMutation(getSendAgentChatMessageMutationOptions(options));
     }
 
 export const getGetChatHistoryUrl = (sessionId: string,) => {

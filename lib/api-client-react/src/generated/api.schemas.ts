@@ -219,6 +219,103 @@ export interface ChatHistoryMessage {
   createdAt: string;
 }
 
+/**
+ * Force a specific technical domain, or "auto" to detect automatically
+ */
+export type AgentChatRequestDomain = typeof AgentChatRequestDomain[keyof typeof AgentChatRequestDomain];
+
+
+export const AgentChatRequestDomain = {
+  auto: 'auto',
+  electrical_control: 'electrical_control',
+  hydraulic_schematic: 'hydraulic_schematic',
+  pneumatic_schematic: 'pneumatic_schematic',
+  mechanical_assembly: 'mechanical_assembly',
+  troubleshooting: 'troubleshooting',
+  generic_process: 'generic_process',
+} as const;
+
+/**
+ * Validation strictness level
+ */
+export type AgentChatRequestStrictness = typeof AgentChatRequestStrictness[keyof typeof AgentChatRequestStrictness];
+
+
+export const AgentChatRequestStrictness = {
+  normal: 'normal',
+  engineering_strict: 'engineering_strict',
+  safety_critical: 'safety_critical',
+} as const;
+
+export interface AgentChatRequest {
+  question: string;
+  sessionId?: string;
+  /** Optional base64 data URL of an image (e.g. data:image/jpeg;base64,...) */
+  imageDataUrl?: string;
+  /** Force a specific technical domain, or "auto" to detect automatically */
+  domain?: AgentChatRequestDomain;
+  /** Validation strictness level */
+  strictness?: AgentChatRequestStrictness;
+}
+
+export type AgentChatResponseConfidence = typeof AgentChatResponseConfidence[keyof typeof AgentChatResponseConfidence];
+
+
+export const AgentChatResponseConfidence = {
+  high: 'high',
+  medium: 'medium',
+  low: 'low',
+  unverified: 'unverified',
+} as const;
+
+export type AgentChatResponseAnswerability = typeof AgentChatResponseAnswerability[keyof typeof AgentChatResponseAnswerability];
+
+
+export const AgentChatResponseAnswerability = {
+  answerable: 'answerable',
+  partially_answerable: 'partially_answerable',
+  not_answerable: 'not_answerable',
+} as const;
+
+export interface EvidenceSummary {
+  chunksFound: number;
+  entitiesFound: number;
+  pathsFound: number;
+  hasGraphContext: boolean;
+  manualsSearched: string[];
+}
+
+export type ValidationSummaryStatus = typeof ValidationSummaryStatus[keyof typeof ValidationSummaryStatus];
+
+
+export const ValidationSummaryStatus = {
+  pass: 'pass',
+  revise: 'revise',
+  fail: 'fail',
+} as const;
+
+export interface ValidationSummary {
+  status: ValidationSummaryStatus;
+  presentItems: string[];
+  missingItems: string[];
+  weakItems: string[];
+  unsupportedClaims: string[];
+  suggestedGuidance: string[];
+}
+
+export interface AgentChatResponse {
+  answer: string;
+  citations: ChatCitation[];
+  sessionId: string;
+  graphEntities?: string[];
+  confidence: AgentChatResponseConfidence;
+  answerability: AgentChatResponseAnswerability;
+  domain: string;
+  isGuided: boolean;
+  evidenceSummary?: EvidenceSummary;
+  validationSummary?: ValidationSummary;
+}
+
 export type ResetProcessing400 = {
   error?: string;
 };

@@ -38,6 +38,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/ChatResponse"
 
+  /chat/agent:
+    post:
+      operationId: sendAgentChatMessage
+      tags: [chat]
+      summary: Ask a question with Domain Specialist validation and confidence scoring
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentChatRequest"
+      responses:
+        "200":
+          description: Answer with citations, confidence, and validation summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentChatResponse"
+
   /chat/{sessionId}/history:
     get:
       operationId: getChatHistory
@@ -598,3 +617,99 @@ components:
             $ref: "#/components/schemas/ChatCitation"
         createdAt:
           type: string
+
+    AgentChatRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+        sessionId:
+          type: string
+        imageDataUrl:
+          type: string
+          description: Optional base64 data URL of an image (e.g. data:image/jpeg;base64,...)
+        domain:
+          type: string
+          enum: [auto, electrical_control, hydraulic_schematic, pneumatic_schematic, mechanical_assembly, troubleshooting, generic_process]
+          description: Force a specific technical domain, or "auto" to detect automatically
+        strictness:
+          type: string
+          enum: [normal, engineering_strict, safety_critical]
+          description: Validation strictness level
+
+    AgentChatResponse:
+      type: object
+      required: [answer, citations, sessionId, confidence, answerability, domain, isGuided]
+      properties:
+        answer:
+          type: string
+        citations:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatCitation"
+        sessionId:
+          type: string
+        graphEntities:
+          type: array
+          items:
+            type: string
+        confidence:
+          type: string
+          enum: [high, medium, low, unverified]
+        answerability:
+          type: string
+          enum: [answerable, partially_answerable, not_answerable]
+        domain:
+          type: string
+        isGuided:
+          type: boolean
+        evidenceSummary:
+          $ref: "#/components/schemas/EvidenceSummary"
+        validationSummary:
+          $ref: "#/components/schemas/ValidationSummary"
+
+    EvidenceSummary:
+      type: object
+      required: [chunksFound, entitiesFound, pathsFound, hasGraphContext, manualsSearched]
+      properties:
+        chunksFound:
+          type: integer
+        entitiesFound:
+          type: integer
+        pathsFound:
+          type: integer
+        hasGraphContext:
+          type: boolean
+        manualsSearched:
+          type: array
+          items:
+            type: string
+
+    ValidationSummary:
+      type: object
+      required: [status, presentItems, missingItems, weakItems, unsupportedClaims, suggestedGuidance]
+      properties:
+        status:
+          type: string
+          enum: [pass, revise, fail]
+        presentItems:
+          type: array
+          items:
+            type: string
+        missingItems:
+          type: array
+          items:
+            type: string
+        weakItems:
+          type: array
+          items:
+            type: string
+        unsupportedClaims:
+          type: array
+          items:
+            type: string
+        suggestedGuidance:
+          type: array
+          items:
+            type: string

@@ -32,6 +32,50 @@ export const SendChatMessageResponse = zod.object({
 
 
 /**
+ * @summary Ask a question with Domain Specialist validation and confidence scoring
+ */
+export const SendAgentChatMessageBody = zod.object({
+  "question": zod.string(),
+  "sessionId": zod.string().optional(),
+  "imageDataUrl": zod.string().optional().describe('Optional base64 data URL of an image (e.g. data:image\/jpeg;base64,...)'),
+  "domain": zod.enum(['auto', 'electrical_control', 'hydraulic_schematic', 'pneumatic_schematic', 'mechanical_assembly', 'troubleshooting', 'generic_process']).optional().describe('Force a specific technical domain, or \"auto\" to detect automatically'),
+  "strictness": zod.enum(['normal', 'engineering_strict', 'safety_critical']).optional().describe('Validation strictness level')
+})
+
+export const SendAgentChatMessageResponse = zod.object({
+  "answer": zod.string(),
+  "citations": zod.array(zod.object({
+  "manualId": zod.number(),
+  "manualName": zod.string(),
+  "pageNumber": zod.number().optional(),
+  "excerpt": zod.string(),
+  "entityNames": zod.array(zod.string()).optional()
+})),
+  "sessionId": zod.string(),
+  "graphEntities": zod.array(zod.string()).optional(),
+  "confidence": zod.enum(['high', 'medium', 'low', 'unverified']),
+  "answerability": zod.enum(['answerable', 'partially_answerable', 'not_answerable']),
+  "domain": zod.string(),
+  "isGuided": zod.boolean(),
+  "evidenceSummary": zod.object({
+  "chunksFound": zod.number(),
+  "entitiesFound": zod.number(),
+  "pathsFound": zod.number(),
+  "hasGraphContext": zod.boolean(),
+  "manualsSearched": zod.array(zod.string())
+}).optional(),
+  "validationSummary": zod.object({
+  "status": zod.enum(['pass', 'revise', 'fail']),
+  "presentItems": zod.array(zod.string()),
+  "missingItems": zod.array(zod.string()),
+  "weakItems": zod.array(zod.string()),
+  "unsupportedClaims": zod.array(zod.string()),
+  "suggestedGuidance": zod.array(zod.string())
+}).optional()
+})
+
+
+/**
  * @summary Get message history for a session
  */
 export const GetChatHistoryParams = zod.object({

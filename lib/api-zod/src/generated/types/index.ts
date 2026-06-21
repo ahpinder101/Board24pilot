@@ -6,11 +6,18 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './agentChatRequest';
+export * from './agentChatRequestDomain';
+export * from './agentChatRequestStrictness';
+export * from './agentChatResponse';
+export * from './agentChatResponseAnswerability';
+export * from './agentChatResponseConfidence';
 export * from './chatCitation';
 export * from './chatHistoryMessage';
 export * from './chatRequest';
 export * from './chatResponse';
 export * from './entityDetail';
+export * from './evidenceSummary';
 export * from './extractionPlan';
 export * from './extractionPlanTiers';
 export * from './extractionTier';
@@ -34,3 +41,5 @@ export * from './manualStatus';
 export * from './resetProcessing400';
 export * from './uploadUrlRequest';
 export * from './uploadUrlResponse';
+export * from './validationSummary';
+export * from './validationSummaryStatus';

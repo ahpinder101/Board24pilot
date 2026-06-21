@@ -2,6 +2,8 @@ import { useState, useRef, useEffect } from "react";
 import {
   Bot, User, Send, BookOpen, Loader2, MessageSquare, ExternalLink,
   FileText, Paperclip, X, Image, Globe, ThumbsUp, ThumbsDown,
+  ChevronDown, ChevronRight, Zap, Shield, FlaskConical, CheckCircle2,
+  AlertTriangle, XCircle, Database, GitBranch,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -37,6 +39,26 @@ interface Citation {
   entityNames?: string[];
 }
 
+type ConfidenceLevel = "high" | "medium" | "low" | "unverified";
+type AnswerabilityStatus = "answerable" | "partially_answerable" | "not_answerable";
+
+interface EvidenceSummary {
+  chunksFound: number;
+  entitiesFound: number;
+  pathsFound: number;
+  hasGraphContext: boolean;
+  manualsSearched: string[];
+}
+
+interface ValidationSummary {
+  status: "pass" | "revise" | "fail";
+  presentItems: string[];
+  missingItems: string[];
+  weakItems: string[];
+  unsupportedClaims: string[];
+  suggestedGuidance: string[];
+}
+
 interface Message {
   id: string;
   role: "user" | "assistant";
@@ -44,11 +66,188 @@ interface Message {
   imageDataUrl?: string;
   citations?: Citation[];
   pending?: boolean;
+  confidence?: ConfidenceLevel;
+  answerability?: AnswerabilityStatus;
+  domain?: string;
+  isGuided?: boolean;
+  evidenceSummary?: EvidenceSummary;
+  validationSummary?: ValidationSummary;
 }
 
 interface FeedbackState {
   rating: "positive" | "negative";
   submitted: boolean;
+}
+
+// ── ConfidenceBadge ───────────────────────────────────────────────────────────
+
+const CONFIDENCE_CONFIG: Record<ConfidenceLevel, { label: string; className: string; icon: React.ReactNode }> = {
+  high: {
+    label: "High confidence",
+    className: "bg-green-50 text-green-700 border-green-200",
+    icon: <CheckCircle2 className="w-3 h-3" />,
+  },
+  medium: {
+    label: "Medium confidence",
+    className: "bg-yellow-50 text-yellow-700 border-yellow-200",
+    icon: <AlertTriangle className="w-3 h-3" />,
+  },
+  low: {
+    label: "Low confidence",
+    className: "bg-orange-50 text-orange-700 border-orange-200",
+    icon: <AlertTriangle className="w-3 h-3" />,
+  },
+  unverified: {
+    label: "Unverified",
+    className: "bg-gray-50 text-gray-500 border-gray-200",
+    icon: <XCircle className="w-3 h-3" />,
+  },
+};
+
+function ConfidenceBadge({ level }: { level: ConfidenceLevel }) {
+  const cfg = CONFIDENCE_CONFIG[level];
+  return (
+    <span className={cn("inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border", cfg.className)}>
+      {cfg.icon}
+      {cfg.label}
+    </span>
+  );
+}
+
+const DOMAIN_LABELS: Record<string, string> = {
+  electrical_control: "Electrical",
+  hydraulic_schematic: "Hydraulic",
+  pneumatic_schematic: "Pneumatic",
+  mechanical_assembly: "Mechanical",
+  troubleshooting: "Troubleshooting",
+  generic_process: "General",
+};
+
+// ── EvidencePanel ─────────────────────────────────────────────────────────────
+
+function EvidencePanel({ evidence, open, onToggle }: {
+  evidence: EvidenceSummary;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 text-xs overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-3 py-2 text-gray-600 hover:bg-gray-100 transition-colors"
+      >
+        <span className="flex items-center gap-1.5 font-medium">
+          <Database className="w-3.5 h-3.5 text-gray-400" />
+          Evidence retrieved
+        </span>
+        {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 space-y-1.5 border-t border-gray-200 pt-2">
+          <div className="flex items-center gap-2 text-gray-500">
+            <span className="font-medium text-gray-700">{evidence.chunksFound}</span> text chunk{evidence.chunksFound !== 1 ? "s" : ""}
+            {evidence.manualsSearched.length > 0 && (
+              <span>from <span className="font-medium text-gray-700">{evidence.manualsSearched.join(", ")}</span></span>
+            )}
+          </div>
+          {evidence.entitiesFound > 0 && (
+            <div className="text-gray-500">
+              <span className="font-medium text-gray-700">{evidence.entitiesFound}</span> entity/relationship record{evidence.entitiesFound !== 1 ? "s" : ""}
+            </div>
+          )}
+          {evidence.pathsFound > 0 && (
+            <div className="flex items-center gap-1.5 text-gray-500">
+              <GitBranch className="w-3 h-3" />
+              <span className="font-medium text-gray-700">{evidence.pathsFound}</span> procedural path{evidence.pathsFound !== 1 ? "s" : ""}
+            </div>
+          )}
+          {evidence.chunksFound === 0 && evidence.entitiesFound === 0 && (
+            <div className="text-gray-400 italic">No relevant evidence found in the manuals.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── ValidationPanel ───────────────────────────────────────────────────────────
+
+function ValidationPanel({ validation, open, onToggle }: {
+  validation: ValidationSummary;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const statusIcon =
+    validation.status === "pass" ? <CheckCircle2 className="w-3.5 h-3.5 text-green-500" /> :
+    validation.status === "revise" ? <AlertTriangle className="w-3.5 h-3.5 text-yellow-500" /> :
+    <XCircle className="w-3.5 h-3.5 text-red-500" />;
+
+  const statusLabel =
+    validation.status === "pass" ? "Validation passed" :
+    validation.status === "revise" ? "Answer revised by specialist" :
+    "Evidence not found";
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-50 text-xs overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-3 py-2 text-gray-600 hover:bg-gray-100 transition-colors"
+      >
+        <span className="flex items-center gap-1.5 font-medium">
+          {statusIcon}
+          {statusLabel}
+        </span>
+        {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 border-t border-gray-200 pt-2 space-y-2">
+          {validation.presentItems.length > 0 && (
+            <div>
+              <p className="font-medium text-green-700 mb-1">Covered:</p>
+              {validation.presentItems.map((item, i) => (
+                <div key={i} className="flex items-start gap-1 text-gray-600">
+                  <CheckCircle2 className="w-3 h-3 text-green-500 mt-0.5 shrink-0" />
+                  {item}
+                </div>
+              ))}
+            </div>
+          )}
+          {validation.missingItems.length > 0 && (
+            <div>
+              <p className="font-medium text-orange-700 mb-1">Missing:</p>
+              {validation.missingItems.map((item, i) => (
+                <div key={i} className="flex items-start gap-1 text-gray-600">
+                  <XCircle className="w-3 h-3 text-orange-400 mt-0.5 shrink-0" />
+                  {item}
+                </div>
+              ))}
+            </div>
+          )}
+          {validation.unsupportedClaims.length > 0 && (
+            <div>
+              <p className="font-medium text-red-700 mb-1">Unsupported claims:</p>
+              {validation.unsupportedClaims.map((item, i) => (
+                <div key={i} className="flex items-start gap-1 text-gray-600">
+                  <AlertTriangle className="w-3 h-3 text-red-400 mt-0.5 shrink-0" />
+                  {item}
+                </div>
+              ))}
+            </div>
+          )}
+          {validation.suggestedGuidance.length > 0 && (
+            <div>
+              <p className="font-medium text-blue-700 mb-1">Suggestions:</p>
+              {validation.suggestedGuidance.map((item, i) => (
+                <div key={i} className="text-gray-600 pl-3 border-l-2 border-blue-200">{item}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ── CitationChip ──────────────────────────────────────────────────────────────
@@ -327,9 +526,20 @@ export default function AskPage() {
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [isLoading, setIsLoading] = useState(false);
+  const [agentMode, setAgentMode] = useState(false);
+  const [domain, setDomain] = useState("auto");
+  const [strictness, setStrictness] = useState<"normal" | "engineering_strict" | "safety_critical">("normal");
+  const [expandedPanels, setExpandedPanels] = useState<Record<string, { evidence?: boolean; validation?: boolean }>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const togglePanel = (msgId: string, panel: "evidence" | "validation") => {
+    setExpandedPanels((prev) => ({
+      ...prev,
+      [msgId]: { ...prev[msgId], [panel]: !(prev[msgId]?.[panel] ?? false) },
+    }));
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -451,10 +661,15 @@ export default function AskPage() {
     setIsLoading(true);
 
     try {
+      const endpoint = agentMode ? "/api/chat/agent" : "/api/chat";
       const body: Record<string, unknown> = { question, sessionId };
       if (imageSnapshot) body.imageDataUrl = imageSnapshot;
+      if (agentMode) {
+        body.domain = domain;
+        body.strictness = strictness;
+      }
 
-      const res = await fetch("/api/chat", {
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -466,13 +681,30 @@ export default function AskPage() {
         answer: string;
         citations: Citation[];
         sessionId: string;
+        confidence?: ConfidenceLevel;
+        answerability?: AnswerabilityStatus;
+        domain?: string;
+        isGuided?: boolean;
+        evidenceSummary?: EvidenceSummary;
+        validationSummary?: ValidationSummary;
       };
 
       setSessionId(data.sessionId);
       setMessages((prev) =>
         prev.map((m) =>
           m.pending
-            ? { ...m, content: data.answer, citations: data.citations, pending: false }
+            ? {
+                ...m,
+                content: data.answer,
+                citations: data.citations,
+                pending: false,
+                confidence: data.confidence,
+                answerability: data.answerability,
+                domain: data.domain,
+                isGuided: data.isGuided,
+                evidenceSummary: data.evidenceSummary,
+                validationSummary: data.validationSummary,
+              }
             : m
         )
       );
@@ -510,10 +742,70 @@ export default function AskPage() {
       <div className="h-full flex flex-col max-w-4xl mx-auto w-full px-3 sm:px-6 py-4 sm:py-6">
         {/* Header */}
         <div className="mb-4 shrink-0">
-          <h1 className="text-lg sm:text-xl font-bold text-gray-900">Ask Engineer</h1>
-          <p className="text-xs sm:text-sm text-gray-500 mt-0.5 hidden sm:block">
-            Ask anything about your uploaded manuals — or attach a photo of a part and ask about it.
-          </p>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h1 className="text-lg sm:text-xl font-bold text-gray-900">Ask Engineer</h1>
+              <p className="text-xs sm:text-sm text-gray-500 mt-0.5 hidden sm:block">
+                Ask anything about your uploaded manuals — or attach a photo of a part and ask about it.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAgentMode((v) => !v)}
+              title={agentMode ? "Enhanced Analysis on — click to use standard mode" : "Enable Enhanced Analysis (Domain Specialist + confidence scoring)"}
+              className={cn(
+                "flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors shrink-0",
+                agentMode
+                  ? "bg-violet-600 text-white border-violet-700 hover:bg-violet-700"
+                  : "bg-white text-gray-500 border-gray-200 hover:border-violet-300 hover:text-violet-600"
+              )}
+            >
+              <Zap className="w-3.5 h-3.5" />
+              {agentMode ? "Enhanced" : "Enhanced"}
+            </button>
+          </div>
+
+          {/* Agent settings row — only shown when enhanced mode is on */}
+          {agentMode && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 p-2.5 rounded-lg bg-violet-50 border border-violet-100">
+              <FlaskConical className="w-3.5 h-3.5 text-violet-500 shrink-0" />
+              <span className="text-[11px] font-medium text-violet-600 shrink-0">Enhanced Analysis</span>
+
+              <div className="flex items-center gap-1.5 ml-auto">
+                <label className="text-[11px] text-gray-500">Domain:</label>
+                <select
+                  value={domain}
+                  onChange={(e) => setDomain(e.target.value)}
+                  className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700"
+                >
+                  <option value="auto">Auto-detect</option>
+                  <option value="electrical_control">Electrical</option>
+                  <option value="hydraulic_schematic">Hydraulic</option>
+                  <option value="pneumatic_schematic">Pneumatic</option>
+                  <option value="mechanical_assembly">Mechanical</option>
+                  <option value="troubleshooting">Troubleshooting</option>
+                  <option value="generic_process">General</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <label className="text-[11px] text-gray-500">Strictness:</label>
+                <select
+                  value={strictness}
+                  onChange={(e) => setStrictness(e.target.value as typeof strictness)}
+                  className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700"
+                >
+                  <option value="normal">Normal</option>
+                  <option value="engineering_strict">Engineering Strict</option>
+                  <option value="safety_critical">Safety Critical</option>
+                </select>
+              </div>
+
+              <span title="Domain Specialist validates the answer before it reaches you" className="ml-1 text-[10px] text-violet-400 hidden sm:inline">
+                <Shield className="w-3 h-3 inline mr-0.5" />GPT-4o validates
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Chat container */}
@@ -598,7 +890,7 @@ export default function AskPage() {
                         {msg.pending ? (
                           <span className="flex items-center gap-2 text-gray-400">
                             <Loader2 className="w-3 h-3 animate-spin" />
-                            Searching manuals…
+                            {agentMode ? "Searching + validating…" : "Searching manuals…"}
                           </span>
                         ) : translation?.loading ? (
                           <span className="flex items-center gap-2 text-gray-400">
@@ -607,6 +899,24 @@ export default function AskPage() {
                           </span>
                         ) : (
                           <span className="whitespace-pre-wrap">{displayText}</span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Confidence badge + domain tag (agent mode only) */}
+                    {!msg.pending && msg.role === "assistant" && msg.confidence && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <ConfidenceBadge level={msg.confidence} />
+                        {msg.domain && DOMAIN_LABELS[msg.domain] && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border bg-blue-50 text-blue-600 border-blue-200">
+                            {DOMAIN_LABELS[msg.domain]}
+                          </span>
+                        )}
+                        {msg.isGuided && (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full border bg-orange-50 text-orange-600 border-orange-200">
+                            <AlertTriangle className="w-2.5 h-2.5" />
+                            Guided response
+                          </span>
                         )}
                       </div>
                     )}
@@ -643,6 +953,22 @@ export default function AskPage() {
                           ))}
                         </div>
                       </div>
+                    )}
+
+                    {/* Evidence + Validation panels (agent mode only) */}
+                    {!msg.pending && msg.role === "assistant" && msg.evidenceSummary && (
+                      <EvidencePanel
+                        evidence={msg.evidenceSummary}
+                        open={expandedPanels[msg.id]?.evidence ?? false}
+                        onToggle={() => togglePanel(msg.id, "evidence")}
+                      />
+                    )}
+                    {!msg.pending && msg.role === "assistant" && msg.validationSummary && (
+                      <ValidationPanel
+                        validation={msg.validationSummary}
+                        open={expandedPanels[msg.id]?.validation ?? false}
+                        onToggle={() => togglePanel(msg.id, "validation")}
+                      />
                     )}
                   </div>
 

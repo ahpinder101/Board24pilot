@@ -8,3 +8,4 @@
 - [RAG chat grounding](rag-chat-grounding.md) — chain-of-thought quote field + verbatim rule + temperature 0 in chat.ts; OCR can corrupt ° and letter-K to look like hallucinations when they aren't.
 - [RAG retrieval phrase vs OR rank](rag-retrieval-phrase-vs-orrank.md) — OR ts_rank buries the precise-fact page under topically-dense sections; fix with phraseto_tsquery adjacency retrieval + quote-grounded citation.
 - [Never restart API server during extraction](api-restart-during-extraction.md) — background extraction jobs die on server restart; relationships lost if pass 5 bulk-inserts at end.
+- [drizzle-kit push blocks on schema drift](drizzle-push-schema-drift.md) — db push in non-TTY shells asks about data-loss columns (embedding, fts_vector drift); use executeSql code_execution tool to CREATE TABLE IF NOT EXISTS directly instead.

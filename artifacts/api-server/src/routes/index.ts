@@ -5,6 +5,7 @@ import storageRouter from "./storage.js";
 import manualsRouter from "./manuals.js";
 import graphRouter from "./graph.js";
 import chatRouter from "./chat.js";
+import agentChatRouter from "./agentChat.js";
 import translateRouter from "./translate.js";
 import feedbackRouter from "./feedback.js";
 
@@ -18,6 +19,7 @@ router.use(storageRouter);
 router.use(manualsRouter);
 router.use(graphRouter);
 router.use(chatRouter);
+router.use(agentChatRouter);
 router.use(translateRouter);
 router.use(feedbackRouter);
 
