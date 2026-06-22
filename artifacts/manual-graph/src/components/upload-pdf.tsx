@@ -1,10 +1,9 @@
 import { useState, useRef } from "react";
-import { UploadCloud, File, AlertCircle, Loader2, CheckCircle2 } from "lucide-react";
+import { UploadCloud, Loader2, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Card, CardContent } from "@/components/ui/card";
 import { useLocation } from "wouter";
 
 function formatBytes(bytes: number) {
@@ -26,8 +25,6 @@ function UploadOverlay({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md mx-4 flex flex-col items-center gap-6">
-
-        {/* Icon */}
         <div className="relative w-16 h-16 flex items-center justify-center">
           {isDone ? (
             <div className="w-16 h-16 rounded-full bg-green-100 flex items-center justify-center">
@@ -43,7 +40,6 @@ function UploadOverlay({
           )}
         </div>
 
-        {/* Title */}
         <div className="text-center">
           <h2 className="text-lg font-semibold text-gray-900">
             {isDone ? "Upload complete" : "Uploading PDF…"}
@@ -52,7 +48,6 @@ function UploadOverlay({
           <p className="text-xs text-gray-400 font-mono">{formatBytes(fileSize)}</p>
         </div>
 
-        {/* Progress bar */}
         <div className="w-full space-y-2">
           <Progress value={progress} className="h-3 w-full rounded-full" />
           <div className="flex justify-between text-xs font-mono text-gray-500">
@@ -71,7 +66,11 @@ function UploadOverlay({
   );
 }
 
-export function UploadPDF() {
+interface UploadPDFProps {
+  onUploaded?: (id: number) => void;
+}
+
+export function UploadPDF({ onUploaded }: UploadPDFProps = {}) {
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
   const [isUploading, setIsUploading] = useState(false);
@@ -124,11 +123,16 @@ export function UploadPDF() {
       queryClient.invalidateQueries({ queryKey: ["/api/manuals"] });
       queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
 
-      // Brief pause so user sees 100% before navigating
       await new Promise((r) => setTimeout(r, 600));
-      navigate(`/manuals/${result.id}`);
+
+      if (onUploaded) {
+        onUploaded(result.id);
+      } else {
+        navigate(`/manuals/${result.id}`);
+      }
     } catch (err) {
       toast.error("Upload failed", { description: err instanceof Error ? err.message : "Unknown error" });
+    } finally {
       setIsUploading(false);
       setCurrentFile(null);
       setProgress(0);
@@ -137,7 +141,6 @@ export function UploadPDF() {
 
   return (
     <>
-      {/* Full-screen upload overlay */}
       {isUploading && currentFile && (
         <UploadOverlay
           fileName={currentFile.name}
@@ -146,35 +149,29 @@ export function UploadPDF() {
         />
       )}
 
-      {/* Upload card (always visible) */}
-      <Card className="border-border bg-card border-dashed">
-        <CardContent className="p-6">
-          <div className="flex flex-col items-center justify-center space-y-4 text-center">
-            <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center">
-              <UploadCloud className="w-6 h-6 text-primary" />
-            </div>
-            <div>
-              <h3 className="text-lg font-medium text-foreground">Upload Engineering Manual</h3>
-              <p className="text-sm text-muted-foreground mt-1 font-mono">PDF format only. Max 300MB.</p>
-            </div>
-            <div className="relative">
-              <input
-                ref={inputRef}
-                type="file"
-                accept="application/pdf"
-                onChange={handleFileSelect}
-                disabled={isUploading}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
-              />
-              <Button className="font-mono" variant="secondary" disabled={isUploading}>
-                {isUploading ? (
-                  <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Uploading…</>
-                ) : "Select File"}
-              </Button>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="flex items-center gap-2">
+        <input
+          ref={inputRef}
+          type="file"
+          accept="application/pdf"
+          onChange={handleFileSelect}
+          disabled={isUploading}
+          className="hidden"
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          className="gap-1.5 text-gray-600 font-medium"
+          disabled={isUploading}
+          onClick={() => inputRef.current?.click()}
+        >
+          {isUploading ? (
+            <><Loader2 className="w-3.5 h-3.5 animate-spin" />Uploading…</>
+          ) : (
+            <><UploadCloud className="w-3.5 h-3.5" />Upload PDF</>
+          )}
+        </Button>
+      </div>
     </>
   );
 }
