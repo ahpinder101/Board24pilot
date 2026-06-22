@@ -1,7 +1,16 @@
-import { useEffect, useState } from "react";
-import { AlertTriangle, BookOpen, AlignJustify, FileText, Play, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AlertTriangle, BookOpen, AlignJustify, FileText, Play, RefreshCw, Info } from "lucide-react";
 
 type ScopeMode = "whole" | "range" | "single";
+
+interface CostEstimate {
+  estimatedCostUsd: number;
+  modelLabel: string;
+  inputPer1MUsd: number;
+  outputPer1MUsd: number;
+  isActual: boolean;
+  disclaimer: string;
+}
 
 interface ScopeSelectorProps {
   manualId: number;
@@ -18,10 +27,45 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
   const [rangeEnd, setRangeEnd] = useState(totalPages || 1);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState("");
+  const [costEstimate, setCostEstimate] = useState<CostEstimate | null>(null);
+  const [costLoading, setCostLoading] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     if (totalPages > 0 && rangeEnd === 1) setRangeEnd(totalPages);
   }, [totalPages, rangeEnd]);
+
+  const fetchCost = useCallback(async () => {
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setCostLoading(true);
+    try {
+      const token = await getToken();
+      const params = new URLSearchParams();
+      if (mode === "single") {
+        params.set("startPage", String(singlePage));
+        params.set("endPage", String(singlePage));
+      } else if (mode === "range") {
+        params.set("startPage", String(rangeStart));
+        params.set("endPage", String(rangeEnd));
+      }
+      const res = await fetch(`/api/manuals/${manualId}/cost-estimate?${params.toString()}`, {
+        signal: ctrl.signal,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) setCostEstimate(await res.json());
+    } catch {
+      // abort or network error — silently ignore
+    } finally {
+      setCostLoading(false);
+    }
+  }, [manualId, mode, singlePage, rangeStart, rangeEnd, getToken]);
+
+  useEffect(() => {
+    const timer = setTimeout(fetchCost, 350);
+    return () => clearTimeout(timer);
+  }, [fetchCost]);
 
   function pageCount(): number {
     if (mode === "whole") return totalPages;
@@ -68,6 +112,29 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
   ];
 
   const inputCls = "w-20 rounded border border-gray-200 bg-white px-2 py-1 text-xs font-mono text-center text-gray-900 focus:outline-none focus:ring-1 focus:ring-slate-400";
+
+  const tooltipText = costEstimate
+    ? `Model: ${costEstimate.modelLabel}\nInput: $${costEstimate.inputPer1MUsd.toFixed(2)}/1M tokens · Output: $${costEstimate.outputPer1MUsd.toFixed(2)}/1M tokens\n\n${costEstimate.disclaimer}`
+    : "";
+
+  const costRow = (
+    <div className="flex items-center gap-1 text-[11px] text-gray-400 min-h-[16px]">
+      {costLoading && !costEstimate && (
+        <span className="animate-pulse">Estimating cost…</span>
+      )}
+      {costEstimate && (
+        <>
+          <span>
+            {costEstimate.isActual ? "Est. cost:" : "~"}<span className="font-mono font-medium text-gray-500 ml-0.5">${costEstimate.estimatedCostUsd.toFixed(2)}</span>
+            {!costEstimate.isActual && " estimated"}
+          </span>
+          <span title={tooltipText} className="cursor-help text-gray-300 hover:text-gray-500 transition-colors">
+            <Info className="w-3 h-3" />
+          </span>
+        </>
+      )}
+    </div>
+  );
 
   if (compact) {
     return (
@@ -149,6 +216,8 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
           </p>
         )}
 
+        {costRow}
+
         {error && (
           <div className="flex items-center gap-1.5 text-red-600 text-xs bg-red-50 border border-red-200 rounded px-2.5 py-1.5">
             <AlertTriangle className="w-3 h-3 shrink-0" />
@@ -174,7 +243,7 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
       <div>
         <h3 className="text-lg font-semibold text-foreground">Choose what to process</h3>
         <p className="text-sm text-muted-foreground mt-1">
-          All 7 extraction passes will run automatically on the pages you select.
+          All extraction passes will run automatically on the pages you select.
         </p>
       </div>
 
@@ -260,6 +329,8 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
           Processing all <span className="font-semibold text-foreground">{totalPages}</span> pages.
         </p>
       )}
+
+      <div className="w-full text-left">{costRow}</div>
 
       {error && (
         <div className="flex items-center gap-2 text-red-600 text-xs bg-red-50 border border-red-200 rounded-lg px-3 py-2 w-full text-left">

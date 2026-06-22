@@ -276,6 +276,37 @@ paths:
               schema:
                 $ref: "#/components/schemas/ManualStats"
 
+  /manuals/{id}/cost-estimate:
+    get:
+      operationId: getManualCostEstimate
+      tags: [manuals]
+      summary: Estimate (or calculate post-run) the AI processing cost for a page range
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: startPage
+          in: query
+          schema:
+            type: integer
+          description: First page of range (inclusive). Omit for whole document.
+        - name: endPage
+          in: query
+          schema:
+            type: integer
+          description: Last page of range (inclusive). Omit for whole document.
+      responses:
+        "200":
+          description: Cost estimate (pre-run heuristic or post-run from actual metrics)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CostEstimate"
+        "404":
+          description: Not found
+
   /manuals/{id}/extraction-plan:
     get:
       operationId: getExtractionPlan
@@ -627,6 +658,51 @@ components:
           type: array
           items:
             type: string
+
+    CostEstimateStep:
+      type: object
+      required: [step, callCount, inputTokens, outputTokens, costUsd]
+      properties:
+        step:
+          type: string
+        callCount:
+          type: integer
+        inputTokens:
+          type: integer
+        outputTokens:
+          type: integer
+        costUsd:
+          type: number
+
+    CostEstimate:
+      type: object
+      required: [model, modelLabel, inputPer1MUsd, outputPer1MUsd, pageCount, inputTokensTotal, outputTokensTotal, estimatedCostUsd, steps, isActual, disclaimer]
+      properties:
+        model:
+          type: string
+        modelLabel:
+          type: string
+        inputPer1MUsd:
+          type: number
+        outputPer1MUsd:
+          type: number
+        pageCount:
+          type: integer
+        inputTokensTotal:
+          type: integer
+        outputTokensTotal:
+          type: integer
+        estimatedCostUsd:
+          type: number
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/CostEstimateStep"
+        isActual:
+          type: boolean
+          description: true = computed from real processed data (post-completion)
+        disclaimer:
+          type: string
 
     ExtractionTier:
       type: object

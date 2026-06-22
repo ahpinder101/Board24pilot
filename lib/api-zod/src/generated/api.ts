@@ -334,6 +334,39 @@ export const GetManualStatsResponse = zod.object({
 
 
 /**
+ * @summary Estimate (or calculate post-run) the AI processing cost for a page range
+ */
+export const GetManualCostEstimateParams = zod.object({
+  "id": zod.coerce.number()
+})
+
+export const GetManualCostEstimateQueryParams = zod.object({
+  "startPage": zod.coerce.number().optional().describe('First page of range (inclusive). Omit for whole document.'),
+  "endPage": zod.coerce.number().optional().describe('Last page of range (inclusive). Omit for whole document.')
+})
+
+export const GetManualCostEstimateResponse = zod.object({
+  "model": zod.string(),
+  "modelLabel": zod.string(),
+  "inputPer1MUsd": zod.number(),
+  "outputPer1MUsd": zod.number(),
+  "pageCount": zod.number(),
+  "inputTokensTotal": zod.number(),
+  "outputTokensTotal": zod.number(),
+  "estimatedCostUsd": zod.number(),
+  "steps": zod.array(zod.object({
+  "step": zod.string(),
+  "callCount": zod.number(),
+  "inputTokens": zod.number(),
+  "outputTokens": zod.number(),
+  "costUsd": zod.number()
+})),
+  "isActual": zod.boolean().describe('true = computed from real processed data (post-completion)'),
+  "disclaimer": zod.string()
+})
+
+
+/**
  * @summary Get AI-computed extraction plan based on actual document content
  */
 export const GetExtractionPlanParams = zod.object({

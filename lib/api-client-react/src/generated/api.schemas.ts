@@ -226,6 +226,29 @@ export interface ChatResponse {
   graphEntities?: string[];
 }
 
+export interface CostEstimateStep {
+  step: string;
+  callCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+export interface CostEstimate {
+  model: string;
+  modelLabel: string;
+  inputPer1MUsd: number;
+  outputPer1MUsd: number;
+  pageCount: number;
+  inputTokensTotal: number;
+  outputTokensTotal: number;
+  estimatedCostUsd: number;
+  steps: CostEstimateStep[];
+  /** true = computed from real processed data (post-completion) */
+  isActual: boolean;
+  disclaimer: string;
+}
+
 export interface ExtractionTier {
   pages: number;
   entityChunks: number;
@@ -428,5 +451,16 @@ export interface AgentChatResponse {
 
 export type ResetProcessing400 = {
   error?: string;
+};
+
+export type GetManualCostEstimateParams = {
+/**
+ * First page of range (inclusive). Omit for whole document.
+ */
+startPage?: number;
+/**
+ * Last page of range (inclusive). Omit for whole document.
+ */
+endPage?: number;
 };
 

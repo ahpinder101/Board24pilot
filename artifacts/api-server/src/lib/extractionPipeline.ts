@@ -3,11 +3,10 @@
  *
  * Pass 1: Document structure analysis (type, sections, overview)
  * Pass 2: Per-page content (text, image/table detection)
- * Pass 3: Vision pass — describe images and tables from page images
  * Pass 4: Entity extraction (machines, components, subsystems, processes, parts, etc.)
  * Pass 5: Relationship extraction (connects-to, part-of, contains, sequence, etc.)
  * Pass 6: Ordering & hierarchy (sequences, procedures, dependency order)
- * Pass 7: Embedding generation for RAG (chunks → pgvector)
+ * Pass 7: RAG chunking — element-aware chunks + vision descriptions for diagram pages
  */
 
 import { openai } from "./openai.js";
@@ -155,93 +154,6 @@ async function pass2PageContent(
   for (let i = 0; i < pageRecords.length; i += 20) {
     await db.insert(manualPagesTable).values(pageRecords.slice(i, i + 20));
   }
-}
-
-// ─── PASS 3: Vision / description pass ─────────────────────────────────────
-
-async function pass3VisionDescriptions(
-  manualId: number,
-  fullText: string,
-  pages: Array<{ pageNumber: number; text: string; hasImages: boolean; hasTables: boolean }>
-): Promise<Map<number, string>> {
-  await updateManualPass(manualId, 3);
-
-  // For sparse non-image pages, generate context-based descriptions using AI.
-  // Image pages are excluded — Pass 7's diagram gate handles them with true vision
-  // analysis (more accurate than Pass 3's context-only guess), so describing them
-  // here would waste an LLM call whose output Pass 7 overwrites anyway.
-  // Tabular pages that still have substantial text are also excluded: their
-  // description is never preferred downstream (consumers only swap in the
-  // description for genuinely sparse text), so describing them would be a wasted
-  // call. Pass 7's tabular gate restructures those pages instead.
-  const sparsePages = pages.filter((p) => !p.hasImages && p.text.length < 200);
-
-  // Load any descriptions already written in a previous (interrupted) run so we
-  // can skip those pages and resume from where processing stalled.
-  const existingRows = await db
-    .select({ pageNumber: manualPagesTable.pageNumber, description: manualPagesTable.description })
-    .from(manualPagesTable)
-    .where(and(eq(manualPagesTable.manualId, manualId), isNotNull(manualPagesTable.description)));
-  const existingDescriptions = new Map(existingRows.map((r) => [r.pageNumber, r.description!]));
-
-  // Describe all qualifying sparse pages (no cap — full document coverage)
-  const toDescribe = sparsePages;
-  const resuming = existingDescriptions.size > 0;
-  const remaining = toDescribe.filter((p) => !existingDescriptions.has(p.pageNumber));
-
-  // Return a map of pageNumber → description so the caller can patch pdfContent
-  // in-memory before Pass 7 runs, ensuring FTS chunks contain enriched text.
-  const generated = new Map<number, string>(existingDescriptions);
-
-  if (resuming) {
-    await setActivity(manualId, `Pass 3 — resuming: ${existingDescriptions.size} pages already done, ${remaining.length} remaining`);
-  }
-
-  for (let i = 0; i < remaining.length; i++) {
-    const page = remaining[i]!;
-    if (i % 10 === 0) {
-      await setActivity(manualId, `Pass 3 — describing sparse page ${page.pageNumber} (${i + 1} of ${remaining.length} remaining)`);
-    }
-    try {
-      const context = fullText.slice(
-        Math.max(0, page.pageNumber * 500 - 1000),
-        page.pageNumber * 500 + 1000
-      );
-
-      const response = await openai.chat.completions.create({
-        model: MODEL,
-        max_completion_tokens: 1024,
-        messages: [
-          {
-            role: "system",
-            content: `You are analyzing a page from an engineering manual. Based on the available text and context, describe what this page likely contains (diagrams, schematics, tables, charts, etc.) and what technical information it conveys. Be specific and technical.`,
-          },
-          {
-            role: "user",
-            content: `Page ${page.pageNumber} text: "${page.text.slice(0, 500)}"\n\nContext from surrounding pages: "${context.slice(0, 500)}"\n\nDescribe this page's content and any diagrams, tables, or images it likely contains.`,
-          },
-        ],
-      });
-
-      const description = response.choices[0]?.message?.content ?? "";
-
-      await db
-        .update(manualPagesTable)
-        .set({ description })
-        .where(
-          and(
-            eq(manualPagesTable.manualId, manualId),
-            eq(manualPagesTable.pageNumber, page.pageNumber)
-          )
-        );
-
-      if (description) generated.set(page.pageNumber, description);
-    } catch (err) {
-      logger.warn({ err, page: page.pageNumber }, "Vision pass failed for page");
-    }
-  }
-
-  return generated;
 }
 
 // ─── PASS 4: Entity extraction ──────────────────────────────────────────────
@@ -1566,8 +1478,8 @@ export async function extractGraphFromExistingText(
     )
     .orderBy(manualPagesTable.pageNumber);
 
-  // For pages where OCR is sparse but Pass 3 generated a vision description,
-  // use the description instead — it captures diagram/table content that OCR misses.
+  // For pages where OCR is sparse, Vision OCR runs to capture diagram/table
+  // content that pdf-parse misses.
   const fullText = pages
     .map((p) => {
       const raw = (p.rawText ?? "").trim();
@@ -2006,21 +1918,16 @@ export async function runExtractionPipeline(
     // pass2PageContent already checks which pages exist and only inserts new ones.
     await pass2PageContent(manualId, pdfContent.pages);
 
-    // ── Sparse-page Vision OCR (MUST happen before Pass 3) ───────────────────
+    // ── Sparse-page Vision OCR ────────────────────────────────────────────────
     // Run Vision OCR on every page where pdf-parse returned < 20 chars —
     // these are either scanned pages or blank pages.  We decide per-page rather
     // than using a whole-document ratio so mixed-format PDFs (part text, part
     // scanned wiring diagrams) get correct OCR on their image pages without
     // flooding fully-text pages through the vision pipeline.
-    //
-    // The check uses RAW extracted text, before any Pass 3 description patching.
-    // If we did it after, Pass 3's placeholder descriptions would look non-empty
-    // and prevent Vision OCR from running at all.
     const sparsePages = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20);
     const sparsePageNums = sparsePages.map((p) => p.pageNumber);
 
     if (sparsePageNums.length > 0) {
-      // ── Vision OCR runs BEFORE Pass 3 so Pass 3 gets real image text ──────
       // Check whether vision OCR was already fully (or partially) completed
       // for the sparse pages (resume-safe: passVisionOcr skips already-written rows).
       const ocrRows = await db
@@ -2046,7 +1953,7 @@ export async function runExtractionPipeline(
       } else {
         // Run/resume vision OCR only for sparse pages (passVisionOcr saves
         // rawText per-page so a resume skips pages already written).
-        logger.info({ manualId, sparsePages: sparsePageNums.length }, "Sparse pages detected — running Vision OCR before Pass 3");
+        logger.info({ manualId, sparsePages: sparsePageNums.length }, "Sparse pages detected — running Vision OCR");
         await setActivity(manualId, `Vision OCR — scanning ${sparsePageNums.length} sparse/scanned pages (pages: ${sparsePageNums.join(", ")})`);
         const ocrPages = await passVisionOcr(manualId, pdfBuffer, sparsePageNums);
         for (const ocrPage of ocrPages) {
@@ -2055,20 +1962,6 @@ export async function runExtractionPipeline(
         }
       }
       pdfContent.fullText = pdfContent.pages.map((p) => p.text).join("\n\n");
-    }
-
-    // ── Pass 3: Vision descriptions ──────────────────────────────────────────
-    // Runs AFTER vision OCR (if this is an image-based PDF) so it has real text
-    // context instead of empty strings.  pass3VisionDescriptions loads existing
-    // descriptions from DB and skips pages that already have one.
-    const pass3Descriptions = await pass3VisionDescriptions(manualId, pdfContent.fullText, pdfContent.pages);
-
-    // Patch sparse pages in-memory with the AI descriptions Pass 3 generated.
-    for (const page of pdfContent.pages) {
-      const desc = pass3Descriptions.get(page.pageNumber);
-      if (desc && page.text.trim().length < 200) {
-        page.text = desc;
-      }
     }
 
     // ── Pass 7: RAG chunking ─────────────────────────────────────────────────

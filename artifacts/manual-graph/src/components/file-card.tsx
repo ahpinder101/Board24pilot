@@ -3,17 +3,17 @@ import { Link } from "wouter";
 import { formatDistanceToNow } from "date-fns";
 import { toast } from "sonner";
 import {
-  AlertTriangle, CheckCircle2, Clock, ExternalLink,
+  AlertTriangle, CheckCircle2, ExternalLink,
   FileText, Network, Database, RefreshCw, Trash2,
   Activity, WifiOff, Network as GraphIcon, RotateCcw,
-  ChevronDown, ChevronUp, Wrench,
+  ChevronDown, ChevronUp, Wrench, Info,
 } from "lucide-react";
 import { useGetManualStats, getGetManualStatsQueryKey, type Manual } from "@workspace/api-client-react";
 import { ScopeSelector } from "@/components/scope-selector";
 import { cn } from "@/lib/utils";
 
 const STALL_SECONDS = 90;
-const PASS_PROGRESS: Record<number, number> = { 0: 5, 1: 15, 2: 28, 3: 40, 4: 58, 5: 72, 6: 86 };
+const PASS_PROGRESS: Record<number, number> = { 0: 5, 1: 15, 2: 28, 4: 52, 5: 68, 6: 84 };
 
 interface FileCardProps {
   manual: Manual;
@@ -129,9 +129,31 @@ function CompletedSection({
 }) {
   const [pdfLoading, setPdfLoading] = useState(false);
   const [reExtractOpen, setReExtractOpen] = useState(false);
+  const [costEstimate, setCostEstimate] = useState<{
+    estimatedCostUsd: number;
+    modelLabel: string;
+    inputPer1MUsd: number;
+    outputPer1MUsd: number;
+    isActual: boolean;
+    disclaimer: string;
+  } | null>(null);
   const { data: stats } = useGetManualStats(manualId, {
     query: { queryKey: getGetManualStatsQueryKey(manualId) },
   });
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = await getToken();
+        const res = await fetch(`/api/manuals/${manualId}/cost-estimate`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!cancelled && res.ok) setCostEstimate(await res.json());
+      } catch { /* ignore */ }
+    })();
+    return () => { cancelled = true; };
+  }, [manualId, getToken]);
 
   const density =
     stats && totalPages > 0
@@ -166,16 +188,16 @@ function CompletedSection({
       <div className="flex items-center gap-2 flex-wrap">
         <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-medium text-green-700">
           <CheckCircle2 className="w-3 h-3" />
-          All 7 passes complete
+          Processing complete
         </span>
         {density !== null && (
           <span className="text-[11px] text-gray-400 font-mono">~{density} entities/page</span>
         )}
       </div>
 
-      {/* Entity / relationship counts */}
+      {/* Entity / relationship counts + cost estimate */}
       {stats && (
-        <div className="flex items-center gap-3 text-xs font-mono text-gray-500">
+        <div className="flex items-center gap-3 text-xs font-mono text-gray-500 flex-wrap">
           <span className="flex items-center gap-1">
             <Database className="w-3 h-3 text-blue-400" />
             {stats.totalEntities.toLocaleString()} entities
@@ -185,6 +207,18 @@ function CompletedSection({
             <Network className="w-3 h-3 text-purple-400" />
             {stats.totalRelationships.toLocaleString()} relations
           </span>
+          {costEstimate && (
+            <>
+              <span className="text-gray-200">|</span>
+              <span
+                className="flex items-center gap-0.5 cursor-help"
+                title={`Est. processing cost — Model: ${costEstimate.modelLabel} · $${costEstimate.inputPer1MUsd.toFixed(2)}/1M input · $${costEstimate.outputPer1MUsd.toFixed(2)}/1M output\n\n${costEstimate.disclaimer}`}
+              >
+                ~${costEstimate.estimatedCostUsd.toFixed(2)}
+                <Info className="w-2.5 h-2.5 text-gray-300" />
+              </span>
+            </>
+          )}
         </div>
       )}
 

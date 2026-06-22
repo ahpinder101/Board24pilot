@@ -8,8 +8,10 @@ import {
   entitiesTable,
   relationshipsTable,
   manualPagesTable,
+  chunksTable,
 } from "@workspace/db";
-import { eq, sql, and, ne } from "drizzle-orm";
+import { eq, sql, and, ne, gte, lte, count } from "drizzle-orm";
+import { estimateProcessingCost, calculateActualCost } from "../lib/costEstimator.js";
 import {
   CreateManualBody,
   GetManualParams,
@@ -506,6 +508,69 @@ router.post("/manuals/:id/reprocess-vision-pages", expensiveOpLimiter, async (re
     req.log.error({ err, manualId }, "Page-range vision OCR failed");
     res.status(500).json({ error: String(err) });
   }
+});
+
+// GET /manuals/:id/cost-estimate — estimate processing cost from document metrics
+router.get("/manuals/:id/cost-estimate", async (req, res) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
+  if (isNaN(manualId)) { res.status(400).json({ error: "Invalid manual id" }); return; }
+
+  const startPage = req.query.startPage !== undefined ? parseInt(String(req.query.startPage), 10) : undefined;
+  const endPage   = req.query.endPage   !== undefined ? parseInt(String(req.query.endPage),   10) : undefined;
+
+  const [manual] = await db
+    .select({ id: manualsTable.id, status: manualsTable.status, totalPages: manualsTable.totalPages })
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId));
+  if (!manual) { res.status(404).json({ error: "Manual not found" }); return; }
+
+  // Query page metrics, optionally filtered to the requested page range
+  const pageConditions = [eq(manualPagesTable.manualId, manualId)] as Parameters<typeof and>;
+  if (startPage !== undefined && !isNaN(startPage)) pageConditions.push(gte(manualPagesTable.pageNumber, startPage));
+  if (endPage   !== undefined && !isNaN(endPage))   pageConditions.push(lte(manualPagesTable.pageNumber, endPage));
+
+  const pages = await db
+    .select({
+      rawText:      manualPagesTable.rawText,
+      hasImages:    manualPagesTable.hasImages,
+      pictureCount: manualPagesTable.pictureCount,
+    })
+    .from(manualPagesTable)
+    .where(and(...pageConditions));
+
+  // Fall back to totalPages estimate when page rows aren't stored yet
+  const pageCount        = pages.length > 0 ? pages.length : (manual.totalPages ?? 1);
+  const totalTextChars   = pages.length > 0
+    ? pages.reduce((s, p) => s + (p.rawText?.length ?? 0), 0)
+    : pageCount * 500; // 500 chars/page if no page data yet
+  const imagePageCount   = pages.filter(p => p.hasImages === 1).length;
+  const picturePageCount = pages.filter(p => (p.pictureCount ?? 0) > 0).length;
+
+  if (manual.status === "completed") {
+    // Post-run: use actual chunk count for a more accurate calculation
+    const [chunkRow] = await db
+      .select({ cnt: count() })
+      .from(chunksTable)
+      .where(eq(chunksTable.manualId, manualId));
+    const estimate = calculateActualCost({
+      pageCount,
+      chunkCount:    chunkRow?.cnt ?? 0,
+      imagePageCount,
+      picturePageCount,
+      totalTextChars,
+    });
+    res.json(estimate);
+    return;
+  }
+
+  // Pre-run estimate
+  const estimate = estimateProcessingCost({
+    pageCount,
+    totalTextChars,
+    imagePageCount,
+    picturePageCount,
+  });
+  res.json(estimate);
 });
 
 // GET /manuals/:id/extraction-plan — compute extraction tiers from actual page text stats

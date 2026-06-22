@@ -19,6 +19,8 @@ export * from './chatCitationCitationQuality';
 export * from './chatHistoryMessage';
 export * from './chatRequest';
 export * from './chatResponse';
+export * from './costEstimate';
+export * from './costEstimateStep';
 export * from './domainCoverageReport';
 export * from './domainScore';
 export * from './entityDetail';

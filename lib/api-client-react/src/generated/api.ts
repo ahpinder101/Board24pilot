@@ -25,9 +25,11 @@ import type {
   ChatHistoryMessage,
   ChatRequest,
   ChatResponse,
+  CostEstimate,
   DomainCoverageReport,
   EntityDetail,
   ExtractionPlan,
+  GetManualCostEstimateParams,
   GlobalStats,
   GraphData,
   HealthStatus,
@@ -1072,6 +1074,95 @@ export function useGetManualStats<TData = Awaited<ReturnType<typeof getManualSta
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetManualStatsQueryOptions(id,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getGetManualCostEstimateUrl = (id: number,
+    params?: GetManualCostEstimateParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : value.toString())
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/manuals/${id}/cost-estimate?${stringifiedParams}` : `/api/manuals/${id}/cost-estimate`
+}
+
+/**
+ * @summary Estimate (or calculate post-run) the AI processing cost for a page range
+ */
+export const getManualCostEstimate = async (id: number,
+    params?: GetManualCostEstimateParams, options?: RequestInit): Promise<CostEstimate> => {
+
+  return customFetch<CostEstimate>(getGetManualCostEstimateUrl(id,params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetManualCostEstimateQueryKey = (id: number,
+    params?: GetManualCostEstimateParams,) => {
+    return [
+    `/api/manuals/${id}/cost-estimate`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetManualCostEstimateQueryOptions = <TData = Awaited<ReturnType<typeof getManualCostEstimate>>, TError = ErrorType<void>>(id: number,
+    params?: GetManualCostEstimateParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getManualCostEstimate>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetManualCostEstimateQueryKey(id,params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getManualCostEstimate>>> = ({ signal }) => getManualCostEstimate(id,params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: !!(id), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getManualCostEstimate>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetManualCostEstimateQueryResult = NonNullable<Awaited<ReturnType<typeof getManualCostEstimate>>>
+export type GetManualCostEstimateQueryError = ErrorType<void>
+
+
+/**
+ * @summary Estimate (or calculate post-run) the AI processing cost for a page range
+ */
+
+export function useGetManualCostEstimate<TData = Awaited<ReturnType<typeof getManualCostEstimate>>, TError = ErrorType<void>>(
+ id: number,
+    params?: GetManualCostEstimateParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getManualCostEstimate>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetManualCostEstimateQueryOptions(id,params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
