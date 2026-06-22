@@ -624,7 +624,6 @@ export default function AskPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [agentMode, setAgentMode] = useState(true);
   const [strictness, setStrictness] = useState<"normal" | "engineering_strict" | "safety_critical">("normal");
-  const [retrievalMode, setRetrievalMode] = useState<"fact_lookup" | "process_trace">("fact_lookup");
   const [expandedPanels, setExpandedPanels] = useState<Record<string, { evidence?: boolean; validation?: boolean }>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -735,14 +734,9 @@ export default function AskPage() {
     const question = input.trim() || "What can you tell me about this?";
     if (!canSend) return;
 
-    // Auto-switch to Procedure mode when the question clearly asks for steps.
-    // Only promotes from Quick Answer → Procedure (never demotes a manual selection).
-    const isProceduralQ = agentMode && PROCEDURAL_QUERY_RE.test(question);
+    // Auto-detect procedural questions and route to process_trace retrieval.
     const effectiveRetrievalMode: "fact_lookup" | "process_trace" =
-      isProceduralQ && retrievalMode === "fact_lookup" ? "process_trace" : retrievalMode;
-    if (effectiveRetrievalMode !== retrievalMode) {
-      setRetrievalMode(effectiveRetrievalMode);
-    }
+      agentMode && PROCEDURAL_QUERY_RE.test(question) ? "process_trace" : "fact_lookup";
 
     saveRecentQuestion(question);
     const imageSnapshot = attachedImage;
@@ -892,18 +886,6 @@ export default function AskPage() {
                   <option value="normal">Standard</option>
                   <option value="engineering_strict">Thorough</option>
                   <option value="safety_critical">Safety Critical</option>
-                </select>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                <label className="text-[11px] text-gray-500">Mode:</label>
-                <select
-                  value={retrievalMode}
-                  onChange={(e) => setRetrievalMode(e.target.value as typeof retrievalMode)}
-                  className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700"
-                >
-                  <option value="fact_lookup">Quick Answer</option>
-                  <option value="process_trace">Procedure / Step-by-Step</option>
                 </select>
               </div>
 
