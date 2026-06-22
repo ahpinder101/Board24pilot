@@ -26,7 +26,10 @@ export interface ValidationSummary {
   presentItems: string[];
   missingItems: string[];
   weakItems: string[];
+  /** Steps/claims not found in the retrieved chunks (retrieval gap — does not mean the answer is wrong). */
   unsupportedClaims: string[];
+  /** Steps/claims that DIRECTLY contradict what the retrieved evidence says (genuine error). */
+  conflictingClaims: string[];
   suggestedGuidance: string[];
   citationIssues: string[];
   sequenceIssues: string[];
@@ -158,6 +161,10 @@ Evidence available:
   - Procedural paths: ${input.evidence.pathsFound}
   - Grounding quote present: ${hasValidQuote ? "YES — model found a verbatim source sentence" : "NO — model could not find a verbatim sentence in the excerpts"}
 
+CRITICAL DISTINCTION — two separate categories of claim problem:
+- "unsupported_claims": steps or claims in the answer that are NOT PRESENT in the retrieved excerpts. This is a RETRIEVAL GAP, not proof the answer is wrong. The manual likely covers this on a page that was not retrieved.
+- "conflicting_claims": steps or claims that DIRECTLY CONTRADICT what a retrieved excerpt explicitly states (e.g. answer says "turn clockwise" but evidence says "turn anti-clockwise"). These are GENUINE ERRORS that should lower confidence significantly.
+
 Validation rules:
 1. Any specific technical claim (a number, step, path, state, relationship) must appear verbatim or paraphrased from the provided evidence.
 2. Strong evidence + all required stages covered → PASS.
@@ -168,6 +175,12 @@ Validation rules:
 7. citation_issues: list any case where a cited source does not actually contain the claim it is used to support.
 8. sequence_issues: list any case where the answer presents steps out of the order shown in the evidence.
 
+CONFIDENCE SCORE GUIDANCE:
+- Use 0.85–1.0 when: most required stages are covered by evidence AND there are zero conflicting_claims (retrieval gaps in unsupported_claims alone do not reduce confidence to below 0.85).
+- Use 0.65–0.84 when: some required stages are missing from the answer itself, OR citation quality is weak.
+- Use 0.40–0.64 when: multiple required stages are uncovered, OR conflicting_claims exist.
+- Use < 0.40 when: the answer cannot be grounded at all, or directly contradicts most of the evidence.
+
 Respond with valid JSON only, no other text:
 {
   "validation_status": "pass" | "revise" | "fail",
@@ -175,7 +188,8 @@ Respond with valid JSON only, no other text:
   "present_items": ["required stages that are covered"],
   "missing_items": ["required stages that are missing"],
   "weak_items": ["items present but poorly supported"],
-  "unsupported_claims": ["specific claims not backed by evidence"],
+  "unsupported_claims": ["claims not found in retrieved excerpts — retrieval gap only"],
+  "conflicting_claims": ["claims that directly contradict retrieved evidence"],
   "citation_issues": ["e.g. Citation 2 does not contain the relay contact claim"],
   "sequence_issues": ["e.g. Step 3 appears before Step 2 in the answer"],
   "revision_instructions": ["concrete instructions — only if revise"],
@@ -215,6 +229,7 @@ Validate the draft answer.`;
       missing_items?: string[];
       weak_items?: string[];
       unsupported_claims?: string[];
+      conflicting_claims?: string[];
       citation_issues?: string[];
       sequence_issues?: string[];
       revision_instructions?: string[];
@@ -233,10 +248,15 @@ Validate the draft answer.`;
       ? parsed.answerability!
       : "partially_answerable") as AnswerabilityStatus;
 
+    const conflictingClaims = parsed.conflicting_claims ?? [];
+    const hasGenuineConflicts = conflictingClaims.length > 0;
+
     let confidence: ConfidenceLevel;
     if (!hasEvidence) {
       confidence = "unverified";
-    } else if (score >= 0.85 && status === "pass") {
+    } else if (score >= 0.82 && !hasGenuineConflicts) {
+      // High: well-grounded answer with no genuine contradictions.
+      // Retrieval gaps (unsupported_claims) alone do not prevent High confidence.
       confidence = "high";
     } else if (score >= 0.6) {
       confidence = "medium";
@@ -256,6 +276,7 @@ Validate the draft answer.`;
         missingItems: parsed.missing_items ?? [],
         weakItems: parsed.weak_items ?? [],
         unsupportedClaims: parsed.unsupported_claims ?? [],
+        conflictingClaims,
         suggestedGuidance: parsed.suggested_guidance ?? [],
         citationIssues: parsed.citation_issues ?? [],
         sequenceIssues: parsed.sequence_issues ?? [],
@@ -273,6 +294,7 @@ Validate the draft answer.`;
         missingItems: [],
         weakItems: [],
         unsupportedClaims: [],
+        conflictingClaims: [],
         suggestedGuidance: [],
         citationIssues: [],
         sequenceIssues: [],

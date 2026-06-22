@@ -58,7 +58,10 @@ interface ValidationSummary {
   presentItems: string[];
   missingItems: string[];
   weakItems: string[];
+  /** Retrieval gap — step not found in retrieved excerpts, not necessarily wrong. */
   unsupportedClaims: string[];
+  /** Genuine error — step directly contradicts retrieved evidence. */
+  conflictingClaims?: string[];
   suggestedGuidance: string[];
   citationIssues: string[];
   sequenceIssues: string[];
@@ -245,12 +248,23 @@ function ValidationPanel({ validation, validationMetadata, open, onToggle }: {
               ))}
             </div>
           )}
+          {(validation.conflictingClaims ?? []).length > 0 && (
+            <div>
+              <p className="font-medium text-red-700 mb-1">Conflicts with evidence:</p>
+              {(validation.conflictingClaims ?? []).map((item, i) => (
+                <div key={i} className="flex items-start gap-1 text-gray-600">
+                  <XCircle className="w-3 h-3 text-red-500 mt-0.5 shrink-0" />
+                  {item}
+                </div>
+              ))}
+            </div>
+          )}
           {validation.unsupportedClaims.length > 0 && (
             <div>
-              <p className="font-medium text-red-700 mb-1">Unsupported claims:</p>
+              <p className="font-medium text-amber-700 mb-1">Not in retrieved pages:</p>
               {validation.unsupportedClaims.map((item, i) => (
                 <div key={i} className="flex items-start gap-1 text-gray-600">
-                  <AlertTriangle className="w-3 h-3 text-red-400 mt-0.5 shrink-0" />
+                  <AlertTriangle className="w-3 h-3 text-amber-400 mt-0.5 shrink-0" />
                   {item}
                 </div>
               ))}

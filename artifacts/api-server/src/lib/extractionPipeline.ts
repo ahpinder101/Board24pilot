@@ -856,7 +856,7 @@ async function pass7EmbedChunks(
       try {
         await db
           .update(manualPagesTable)
-          .set({ description: textToChunk })
+          .set({ description: sanitizeText(textToChunk) })
           .where(
             and(
               eq(manualPagesTable.manualId, manualId),
@@ -874,7 +874,7 @@ async function pass7EmbedChunks(
     const semanticChunks = chunkPageSemantically(textToChunk);
 
     for (let ci = 0; ci < semanticChunks.length; ci++) {
-      const content = semanticChunks[ci]!.trim();
+      const content = sanitizeText(semanticChunks[ci]!.trim());
       if (content.length < 15) continue;
 
       try {

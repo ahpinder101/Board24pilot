@@ -22,8 +22,13 @@ const router = Router();
 const CHAT_MODEL = "gpt-4o";
 const TOP_K_CHUNKS = 8;
 const TOP_K_SCOPED = 14;
+const TOP_K_PROCEDURAL = 24;
 const TOP_K_ENTITIES = 10;
 const FTS_RANK_THRESHOLD = 0.01;
+
+/** Matches questions that ask for a full multi-step procedure. */
+const PROCEDURAL_QUERY_RE =
+  /\b(walk\s+me\s+through|step[-\s]by[-\s]step|steps?\s+to\s+\w|how\s+(do\s+I|to)\s+(replace|remove|install|disassemble|assemble|adjust|clean|set\s+up|change|perform|fix)|procedure\s+for|guide\s+me|show\s+me\s+(how|the\s+steps?)|all\s+steps?|sequence\s+for|process\s+of)\b/i;
 
 const GENERIC_NAME_WORDS = new Set([
   "manual", "unit", "machine", "system", "maintenance",
@@ -241,6 +246,12 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         ? `${trimmedQuestion} ${visionKeywords.replace(/,/g, " ")}`
         : trimmedQuestion;
 
+    // Procedural walk-through queries get a larger retrieval window so multi-page
+    // procedures can pull all relevant pages into the validator's evidence window.
+    const isProceduralQuery = PROCEDURAL_QUERY_RE.test(trimmedQuestion) || retrievalMode === "process_trace";
+    const topK = isProceduralQuery ? TOP_K_PROCEDURAL : TOP_K_CHUNKS;
+    const topKScoped = isProceduralQuery ? TOP_K_PROCEDURAL * 2 : TOP_K_SCOPED;
+
     // ── 1. FTS retrieval ─────────────────────────────────────────────────────
     const searchTerms = searchText
       .replace(/[^a-zA-Z0-9 ]/g, " ")
@@ -269,7 +280,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         ) ranked
         WHERE rank > ${ftsRankThreshold}
         ORDER BY rank DESC
-        LIMIT ${TOP_K_CHUNKS}
+        LIMIT ${topK}
       `);
 
       if (ftsResult.rows.length > 0) {
@@ -282,7 +293,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
           ORDER BY rank DESC
-          LIMIT ${TOP_K_CHUNKS}
+          LIMIT ${topK}
         `);
         ragChunks = fallback.rows;
       }
@@ -342,7 +353,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
             const prev = citationCandidates.get(row.id);
             if (prev === undefined || total < prev) citationCandidates.set(row.id, total);
           }
-          if (!addedCtx.has(row.id) && phraseContextChunks.length < TOP_K_CHUNKS) {
+          if (!addedCtx.has(row.id) && phraseContextChunks.length < topK) {
             phraseContextChunks.push(row);
             addedCtx.add(row.id);
           }
@@ -393,7 +404,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
                c.page_number, c.chunk_index, c.content, 0::float AS rank
         FROM chunks c JOIN manuals m ON m.id = c.manual_id
         ORDER BY c.manual_id DESC, c.page_number ASC
-        LIMIT ${TOP_K_CHUNKS}
+        LIMIT ${topK}
       `);
       ragChunks = fallback.rows;
     }
@@ -409,7 +420,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
                c.page_number, c.chunk_index, c.content, 0.3::float AS rank
         FROM chunks c JOIN manuals m ON m.id = c.manual_id
         WHERE ${sql.join(ilikeConditions, sql` OR `)}
-        LIMIT ${TOP_K_CHUNKS}
+        LIMIT ${topK}
       `);
       const existing = new Set(ragChunks.map((c) => c.id));
       for (const row of identResult.rows) {
@@ -473,7 +484,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         ) ranked
         WHERE rank > ${ftsRankThreshold}
         ORDER BY rank DESC
-        LIMIT ${TOP_K_SCOPED}
+        LIMIT ${topKScoped}
       `);
 
       const existingIds = new Set(ragChunks.map((c) => c.id));
