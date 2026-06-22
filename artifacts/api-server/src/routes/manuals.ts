@@ -160,30 +160,42 @@ router.get("/manuals/domain-coverage", async (req, res) => {
     const manualIds = completedManuals.map((m) => m.id);
     const manualIdArray = `{${manualIds.join(",")}}`;
 
-    const [entityRows, chunkRows] = await Promise.all([
+    // element_type weights: tables are the richest evidence (structured specs/fault codes),
+    // list_items are strong procedural evidence, everything else counts as 1.
+    const ELEM_WEIGHT: Record<string, number> = { table: 3, list_item: 2 };
+    const elemWeight = (t: string | null) => ELEM_WEIGHT[t ?? ""] ?? 1;
+
+    type SectionRow = {
+      manual_id: number; element_type: string | null; top_section: string;
+      total: string; elec: string; hydro: string; pneu: string;
+      mech: string; trouble: string; proc: string;
+    };
+
+    const [entityRows, sectionRows] = await Promise.all([
       db.execute<{ manual_id: number; type: string; cnt: string }>(sql`
         SELECT manual_id, type, COUNT(*)::text AS cnt
         FROM entities
         WHERE manual_id = ANY(${manualIdArray}::integer[])
         GROUP BY manual_id, type
       `),
-      db.execute<{
-        manual_id: number; total: string;
-        elec: string; hydro: string; pneu: string;
-        mech: string; trouble: string; proc: string;
-      }>(sql`
+      // Group by (manual_id, element_type, top-level section) so we can weight by
+      // element quality and break down coverage by document section.
+      db.execute<SectionRow>(sql`
         SELECT
-          manual_id,
+          c.manual_id,
+          c.element_type,
+          COALESCE(NULLIF(SPLIT_PART(c.section_path, ' > ', 1), ''), '__none__') AS top_section,
           COUNT(*)::text AS total,
-          COUNT(*) FILTER (WHERE content ~* 'relay|voltage|current|fuse|contactor|circuit breaker|wiring|PLC|ampere|ohm|coil|solenoid coil|electric')::text AS elec,
-          COUNT(*) FILTER (WHERE content ~* 'hydraulic|hydraulics|oil pump|cylinder|piston|actuator|manifold|hydraul|pressure relief|flow control')::text AS hydro,
-          COUNT(*) FILTER (WHERE content ~* 'pneumatic|compressed air|air valve|air cylinder|compressor|air pressure|air supply')::text AS pneu,
-          COUNT(*) FILTER (WHERE content ~* 'bearing|shaft|gear|coupling|bracket|bolt|torque|clearance|wear|bushing|lubrication|grease|mechanical')::text AS mech,
-          COUNT(*) FILTER (WHERE content ~* 'fault|alarm|error code|symptom|diagnosis|malfunction|defect|troubleshoot|cause|remedy|failure mode')::text AS trouble,
-          COUNT(*) FILTER (WHERE content ~* 'procedure|sequence|step \d|maintenance|installation|calibrat|adjustment|operation|commissioning|start-up')::text AS proc
-        FROM chunks
-        WHERE manual_id = ANY(${manualIdArray}::integer[])
-        GROUP BY manual_id
+          COUNT(*) FILTER (WHERE c.content ~* 'relay|voltage|current|fuse|contactor|circuit breaker|wiring|PLC|ampere|ohm|coil|solenoid coil|electric')::text AS elec,
+          COUNT(*) FILTER (WHERE c.content ~* 'hydraulic|oil pump|cylinder|piston|actuator|manifold|hydraul|pressure relief|flow control')::text AS hydro,
+          COUNT(*) FILTER (WHERE c.content ~* 'pneumatic|compressed air|air valve|air cylinder|compressor|air pressure|air supply')::text AS pneu,
+          COUNT(*) FILTER (WHERE c.content ~* 'bearing|shaft|gear|coupling|bracket|bolt|torque|clearance|wear|bushing|lubrication|grease|mechanical')::text AS mech,
+          COUNT(*) FILTER (WHERE c.content ~* 'fault|alarm|error code|symptom|diagnosis|malfunction|defect|troubleshoot|cause|remedy|failure mode')::text AS trouble,
+          COUNT(*) FILTER (WHERE c.content ~* 'procedure|sequence|step |maintenance|installation|calibrat|adjustment|operation|commissioning|start-up')::text AS proc
+        FROM chunks c
+        WHERE c.manual_id = ANY(${manualIdArray}::integer[])
+        GROUP BY c.manual_id, c.element_type,
+          COALESCE(NULLIF(SPLIT_PART(c.section_path, ' > ', 1), ''), '__none__')
       `),
     ]);
 
@@ -197,15 +209,44 @@ router.get("/manuals/domain-coverage", async (req, res) => {
 
     const DOMAINS = [
       { id: "electrical_control", label: "Electrical Control", field: "elec" },
-      { id: "hydraulic_schematic", label: "Hydraulic", field: "hydro" },
-      { id: "pneumatic_schematic", label: "Pneumatic", field: "pneu" },
-      { id: "mechanical_assembly", label: "Mechanical", field: "mech" },
-      { id: "troubleshooting", label: "Troubleshooting", field: "trouble" },
-      { id: "process_procedure", label: "Procedures", field: "proc" },
+      { id: "hydraulic_schematic", label: "Hydraulic",         field: "hydro" },
+      { id: "pneumatic_schematic", label: "Pneumatic",         field: "pneu" },
+      { id: "mechanical_assembly", label: "Mechanical",        field: "mech" },
+      { id: "troubleshooting",     label: "Troubleshooting",   field: "trouble" },
+      { id: "process_procedure",   label: "Procedures",        field: "proc" },
     ] as const;
 
-    // Build entity count maps
-    const entityByDomain = new Map<string, number>(); // "manualId:domain" → count
+    type DomainField = "elec" | "hydro" | "pneu" | "mech" | "trouble" | "proc";
+    const DOMAIN_FIELDS = DOMAINS.map((d) => d.field) as DomainField[];
+
+    type Accum = { total: number } & Record<DomainField, number>;
+    const emptyAccum = (): Accum => ({ total: 0, elec: 0, hydro: 0, pneu: 0, mech: 0, trouble: 0, proc: 0 });
+
+    // Accumulate weighted hits per manual and per section
+    const manualAccum = new Map<number, Accum>();
+    const sectionAccum = new Map<string, Accum & { name: string }>(); // key: `${manualId}:${section}`
+
+    for (const row of sectionRows.rows) {
+      const w = elemWeight(row.element_type);
+      if (!manualAccum.has(row.manual_id)) manualAccum.set(row.manual_id, emptyAccum());
+      const ma = manualAccum.get(row.manual_id)!;
+      ma.total += Number(row.total) * w;
+      for (const f of DOMAIN_FIELDS) ma[f] += Number(row[f]) * w;
+
+      const sKey = `${row.manual_id}:${row.top_section}`;
+      if (!sectionAccum.has(sKey)) {
+        sectionAccum.set(sKey, {
+          ...emptyAccum(),
+          name: row.top_section === "__none__" ? "Uncategorized" : row.top_section,
+        });
+      }
+      const sa = sectionAccum.get(sKey)!;
+      sa.total += Number(row.total) * w;
+      for (const f of DOMAIN_FIELDS) sa[f] += Number(row[f]) * w;
+    }
+
+    // Entity scores (unchanged)
+    const entityByDomain = new Map<string, number>();
     const totalEntityByManual = new Map<number, number>();
     for (const row of entityRows.rows) {
       const domain = ENTITY_DOMAIN[row.type];
@@ -216,39 +257,67 @@ router.get("/manuals/domain-coverage", async (req, res) => {
       totalEntityByManual.set(row.manual_id, (totalEntityByManual.get(row.manual_id) ?? 0) + Number(row.cnt));
     }
 
-    const chunkByManual = new Map<number, typeof chunkRows.rows[0]>();
-    for (const row of chunkRows.rows) chunkByManual.set(row.manual_id, row);
+    function buildDomainScores(accum: Accum, manualId: number | null) {
+      return DOMAINS.map((d) => {
+        const hits = accum[d.field as DomainField];
+        const total = accum.total;
+        const chunkScore = total > 0 ? Math.min(75, Math.round((hits / total) * 200)) : 0;
+        const entityCount = manualId !== null ? (entityByDomain.get(`${manualId}:${d.id}`) ?? 0) : 0;
+        const entityScore = Math.min(25, entityCount > 0 ? Math.min(25, Math.round(Math.sqrt(entityCount) * 5)) : 0);
+        return { domain: d.id, label: d.label, score: Math.min(100, chunkScore + entityScore), chunkHits: hits, entityCount };
+      });
+    }
 
-    // Global accumulators
-    const globalHits = new Map<string, { chunkHits: number; entityCount: number }>();
-    for (const d of DOMAINS) globalHits.set(d.id, { chunkHits: 0, entityCount: 0 });
-    let globalTotalChunks = 0;
+    // Global accumulators for cross-manual totals
+    const globalAccum = emptyAccum();
+    const globalEntityByDomain = new Map<string, number>();
 
     const manuals = completedManuals.map((m) => {
-      const cr = chunkByManual.get(m.id);
-      const totalChunks = Number(cr?.total ?? 0);
-      globalTotalChunks += totalChunks;
+      const ma = manualAccum.get(m.id) ?? emptyAccum();
+      globalAccum.total += ma.total;
+      for (const f of DOMAIN_FIELDS) globalAccum[f] += ma[f];
 
-      const domains = DOMAINS.map((d) => {
-        const chunkHits = Number(cr?.[d.field as keyof typeof cr] ?? 0);
-        const entityCount = entityByDomain.get(`${m.id}:${d.id}`) ?? 0;
-        const chunkScore = totalChunks > 0 ? Math.min(75, Math.round((chunkHits / totalChunks) * 200)) : 0;
-        const entityScore = Math.min(25, entityCount > 0 ? Math.min(25, Math.round(Math.sqrt(entityCount) * 5)) : 0);
-        const g = globalHits.get(d.id)!;
-        g.chunkHits += chunkHits;
-        g.entityCount += entityCount;
-        return { domain: d.id, label: d.label, score: Math.min(100, chunkScore + entityScore), chunkHits, entityCount };
-      });
+      const domains = buildDomainScores(ma, m.id);
+      for (const d of domains) {
+        globalEntityByDomain.set(d.domain, (globalEntityByDomain.get(d.domain) ?? 0) + d.entityCount);
+      }
 
       const primaryDomain = domains.reduce((a, b) => (a.score > b.score ? a : b)).domain;
-      return { manualId: m.id, manualName: m.name, domains, primaryDomain, totalChunks, totalEntities: totalEntityByManual.get(m.id) ?? 0 };
+
+      // Build section breakdown — top 10 by weighted chunk count, skip uncategorized-only entries
+      const sections = [...sectionAccum.entries()]
+        .filter(([k]) => k.startsWith(`${m.id}:`))
+        .map(([, sa]) => {
+          const domainHits = DOMAINS.map((d) => ({ id: d.id, label: d.label, hits: sa[d.field as DomainField] }));
+          const primary = domainHits.reduce((a, b) => (a.hits > b.hits ? a : b));
+          return {
+            name: sa.name,
+            weightedChunks: Math.round(sa.total),
+            primaryDomain: primary.hits > 0 ? primary.id : "general",
+            label: primary.hits > 0 ? primary.label : "General",
+          };
+        })
+        .sort((a, b) => b.weightedChunks - a.weightedChunks)
+        .slice(0, 10);
+
+      return {
+        manualId: m.id,
+        manualName: m.name,
+        domains,
+        primaryDomain,
+        totalChunks: Math.round(ma.total), // weighted equivalent
+        totalEntities: totalEntityByManual.get(m.id) ?? 0,
+        sections,
+      };
     });
 
     const globalDomains = DOMAINS.map((d) => {
-      const g = globalHits.get(d.id)!;
-      const chunkScore = globalTotalChunks > 0 ? Math.min(75, Math.round((g.chunkHits / globalTotalChunks) * 200)) : 0;
-      const entityScore = Math.min(25, g.entityCount > 0 ? Math.min(25, Math.round(Math.sqrt(g.entityCount) * 3)) : 0);
-      return { domain: d.id, label: d.label, score: Math.min(100, chunkScore + entityScore), chunkHits: g.chunkHits, entityCount: g.entityCount };
+      const hits = globalAccum[d.field as DomainField];
+      const total = globalAccum.total;
+      const chunkScore = total > 0 ? Math.min(75, Math.round((hits / total) * 200)) : 0;
+      const entityCount = globalEntityByDomain.get(d.id) ?? 0;
+      const entityScore = Math.min(25, entityCount > 0 ? Math.min(25, Math.round(Math.sqrt(entityCount) * 3)) : 0);
+      return { domain: d.id, label: d.label, score: Math.min(100, chunkScore + entityScore), chunkHits: hits, entityCount };
     });
 
     res.json({ manuals, globalDomains, totalManuals: completedManuals.length, scannedAt: new Date().toISOString() });

@@ -41,6 +41,13 @@ interface DomainScore {
   entityCount: number;
 }
 
+interface SectionCoverage {
+  name: string;
+  weightedChunks: number;
+  primaryDomain: string;
+  label: string;
+}
+
 interface ManualDomainCoverage {
   manualId: number;
   manualName: string;
@@ -48,6 +55,7 @@ interface ManualDomainCoverage {
   primaryDomain: string;
   totalChunks: number;
   totalEntities: number;
+  sections?: SectionCoverage[];
 }
 
 interface DomainCoverageReport {
@@ -120,13 +128,41 @@ function CoveragePanel({ data }: { data: DomainCoverageReport }) {
                   <ChevronDown className={cn("w-3 h-3 text-gray-400 shrink-0 transition-transform", isOpen && "rotate-180")} />
                 </button>
                 {isOpen && (
-                  <div className="px-3 pb-2.5 border-t border-gray-100 pt-2 bg-gray-50/50">
-                    {[...m.domains].sort((a, b) => b.score - a.score).map((d) => (
-                      <DomainBar key={d.domain} domain={d} compact />
-                    ))}
-                    <p className="text-[10px] text-gray-400 mt-1.5">
-                      {m.totalEntities} entities · {m.totalChunks} text chunks
-                    </p>
+                  <div className="px-3 pb-2.5 border-t border-gray-100 pt-2 bg-gray-50/50 space-y-2.5">
+                    {/* Domain score bars */}
+                    <div>
+                      {[...m.domains].sort((a, b) => b.score - a.score).map((d) => (
+                        <DomainBar key={d.domain} domain={d} compact />
+                      ))}
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        {m.totalEntities} entities · {m.totalChunks} weighted chunks
+                      </p>
+                    </div>
+
+                    {/* Section breakdown */}
+                    {m.sections && m.sections.filter(s => s.name !== "Uncategorized").length > 0 && (
+                      <div className="border-t border-gray-100 pt-2">
+                        <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1.5">
+                          Sections
+                        </p>
+                        <div className="space-y-1">
+                          {m.sections
+                            .filter(s => s.name !== "Uncategorized")
+                            .map((s) => {
+                              const colours = DOMAIN_COLOURS[s.primaryDomain] ?? { bg: "bg-gray-100", text: "text-gray-500" };
+                              return (
+                                <div key={s.name} className="flex items-center gap-2 min-w-0">
+                                  <span className={cn("shrink-0 text-[8px] font-bold px-1 py-0.5 rounded uppercase leading-none", colours.bg, colours.text)}>
+                                    {s.label.slice(0, 5)}
+                                  </span>
+                                  <span className="text-[10px] text-gray-600 truncate flex-1 min-w-0">{s.name}</span>
+                                  <span className="text-[10px] text-gray-400 shrink-0">{s.weightedChunks}</span>
+                                </div>
+                              );
+                            })}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
