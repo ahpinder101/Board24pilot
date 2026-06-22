@@ -1376,11 +1376,73 @@ Please answer based on the above information.`;
 
     req.log.info({ technicalDomain, strictness }, "agent-chat: domain + strictness");
 
+    // ── 6b. Build answer-overlap specialist context ────────────────────────────
+    // The specialist validates the draft answer against evidence. Passing the full
+    // ragContext in page order causes truncation: the specialist may not see the
+    // chunks the answer was actually drawn from (which can be anywhere in the
+    // retrieval set). Instead, rank all retrieved chunks by token overlap with the
+    // draft answer — the chunks that look most like the answer are the ones that
+    // supported it. Pass only the top-K so the specialist always sees the right
+    // evidence in a compact window, regardless of total retrieval size.
+    const SPEC_STOPWORDS = new Set([
+      "the","a","an","and","or","but","is","are","was","were","be","been",
+      "being","have","has","had","do","does","did","will","would","could",
+      "should","may","might","must","can","to","of","in","on","at","for",
+      "from","with","by","into","it","its","this","that","these","those",
+      "not","no","you","your","they","their","we","our","if","then","when",
+      "also","about","more","some","what","how","which","there","here","use",
+    ]);
+    const draftTokens = new Set(
+      draftAnswer.toLowerCase().split(/\W+/).filter(t => t.length > 3 && !SPEC_STOPWORDS.has(t))
+    );
+    const computeAnswerOverlap = (content: string): number => {
+      if (draftTokens.size === 0) return 0;
+      const words = content.toLowerCase().split(/\W+/);
+      return words.filter(t => draftTokens.has(t)).length / draftTokens.size;
+    };
+
+    const scoredForSpec = ragChunks
+      .map((c, originalIndex) => ({ chunk: c, originalIndex, overlap: computeAnswerOverlap(c.content) }))
+      .sort((a, b) => b.overlap - a.overlap);
+
+    // Top 10 chunks by answer overlap
+    const specIdxSet = new Set<number>(scoredForSpec.slice(0, 10).map(s => s.originalIndex));
+
+    // Always include the quote-matched chunk — it is the most precisely grounded evidence
+    const quoteNorm = quoteRaw ? normalizeForMatch(quoteRaw) : "";
+    if (quoteNorm.length >= 8) {
+      const qIdx = ragChunks.findIndex(c => normalizeForMatch(c.content).includes(quoteNorm));
+      if (qIdx >= 0) specIdxSet.add(qIdx);
+    }
+
+    // Build the specialist context, re-sorted by page/chunk order for readability
+    const specialistContext = [...specIdxSet]
+      .sort((a, b) =>
+        ragChunks[a].page_number - ragChunks[b].page_number ||
+        ragChunks[a].chunk_index - ragChunks[b].chunk_index
+      )
+      .map((idx, i) => {
+        const c = ragChunks[idx];
+        const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
+        const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
+        const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}]`;
+        const typeHint =
+          c.element_type === "table" ? "[TABLE] " :
+          c.element_type === "list_item" ? "[LIST] " : "";
+        return `${header}\n${typeHint}${c.content}`;
+      })
+      .join("\n\n---\n\n");
+
+    req.log.info(
+      { specChunks: specIdxSet.size, totalChunks: ragChunks.length, topOverlap: scoredForSpec[0]?.overlap.toFixed(3) },
+      "agent-chat: specialist context built from answer-overlap ranking"
+    );
+
     // ── 7. Domain Specialist validation ──────────────────────────────────────
     const specialistResult = await runDomainSpecialist({
       question: trimmedQuestion,
       draftAnswer,
-      ragContext,
+      ragContext: specialistContext,
       graphContext,
       domain: technicalDomain,
       strictness,
