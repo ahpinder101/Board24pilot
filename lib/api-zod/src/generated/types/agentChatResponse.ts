@@ -9,6 +9,8 @@ import type { AgentChatResponseAnswerability } from './agentChatResponseAnswerab
 import type { AgentChatResponseConfidence } from './agentChatResponseConfidence';
 import type { ChatCitation } from './chatCitation';
 import type { EvidenceSummary } from './evidenceSummary';
+import type { MissingOrWeakEvidenceItem } from './missingOrWeakEvidenceItem';
+import type { ValidationMetadata } from './validationMetadata';
 import type { ValidationSummary } from './validationSummary';
 
 export interface AgentChatResponse {
@@ -22,4 +24,7 @@ export interface AgentChatResponse {
   isGuided: boolean;
   evidenceSummary?: EvidenceSummary;
   validationSummary?: ValidationSummary;
+  /** Flat list of missing or weak evidence items derived from validation */
+  missingOrWeakEvidence?: MissingOrWeakEvidenceItem[];
+  validationMetadata?: ValidationMetadata;
 }

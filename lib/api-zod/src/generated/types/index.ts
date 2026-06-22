@@ -8,11 +8,14 @@
 
 export * from './agentChatRequest';
 export * from './agentChatRequestDomain';
+export * from './agentChatRequestMinConfidence';
+export * from './agentChatRequestRetrievalMode';
 export * from './agentChatRequestStrictness';
 export * from './agentChatResponse';
 export * from './agentChatResponseAnswerability';
 export * from './agentChatResponseConfidence';
 export * from './chatCitation';
+export * from './chatCitationCitationQuality';
 export * from './chatHistoryMessage';
 export * from './chatRequest';
 export * from './chatResponse';
@@ -38,8 +41,12 @@ export * from './manualStats';
 export * from './manualStatsEntitiesByType';
 export * from './manualStatsRelationshipsByType';
 export * from './manualStatus';
+export * from './missingOrWeakEvidenceItem';
+export * from './missingOrWeakEvidenceItemIssue';
 export * from './resetProcessing400';
 export * from './uploadUrlRequest';
 export * from './uploadUrlResponse';
+export * from './validationMetadata';
+export * from './validationMetadataFinalValidationStatus';
 export * from './validationSummary';
 export * from './validationSummaryStatus';

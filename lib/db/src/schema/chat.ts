@@ -1,11 +1,14 @@
 import { pgTable, serial, text, timestamp, jsonb } from "drizzle-orm/pg-core";
 
+export type CitationQuality = "strong" | "partial" | "weak" | "unverified";
+
 export interface ChatCitation {
   manualId: number;
   manualName: string;
   pageNumber?: number;
   excerpt: string;
   entityNames?: string[];
+  citationQuality?: CitationQuality;
 }
 
 export const chatMessagesTable = pgTable("chat_messages", {

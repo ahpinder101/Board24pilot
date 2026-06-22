@@ -166,12 +166,20 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     imageDataUrl,
     domain: requestedDomain,
     strictness: requestedStrictness,
+    retrievalMode: requestedRetrievalMode,
+    fromPage: requestedFromPage,
+    toPage: requestedToPage,
+    minConfidence: requestedMinConfidence,
   } = req.body as {
     question?: string;
     sessionId?: string;
     imageDataUrl?: string;
     domain?: string;
     strictness?: string;
+    retrievalMode?: string;
+    fromPage?: number;
+    toPage?: number;
+    minConfidence?: string;
   };
 
   if (!question || typeof question !== "string" || question.trim().length === 0) {
@@ -191,6 +199,16 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     requestedStrictness === "engineering_strict" || requestedStrictness === "safety_critical"
       ? (requestedStrictness as AnswerStrictness)
       : "normal";
+
+  type RetrievalMode = "fact_lookup" | "process_trace" | "troubleshooting_flow" | "relationship_trace";
+  const retrievalMode: RetrievalMode = (
+    ["fact_lookup", "process_trace", "troubleshooting_flow", "relationship_trace"].includes(requestedRetrievalMode ?? "")
+      ? (requestedRetrievalMode as RetrievalMode)
+      : "fact_lookup"
+  );
+  const fromPage = typeof requestedFromPage === "number" && requestedFromPage > 0 ? requestedFromPage : null;
+  const toPage = typeof requestedToPage === "number" && requestedToPage > 0 ? requestedToPage : null;
+  const ftsRankThreshold = requestedMinConfidence === "high" ? 0.15 : requestedMinConfidence === "medium" ? 0.05 : FTS_RANK_THRESHOLD;
 
   try {
     // ── 0. Load manuals + machine entities ───────────────────────────────────
@@ -249,7 +267,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
           ORDER BY rank DESC
           LIMIT 50
         ) ranked
-        WHERE rank > ${FTS_RANK_THRESHOLD}
+        WHERE rank > ${ftsRankThreshold}
         ORDER BY rank DESC
         LIMIT ${TOP_K_CHUNKS}
       `);
@@ -404,7 +422,8 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       const retrievedIds = new Set(ragChunks.map((c) => c.id));
       const adjacentIds = new Set<string>();
       for (const c of ragChunks) {
-        for (const delta of [-2, -1, 1, 2]) {
+        const windowDeltas = retrievalMode === "process_trace" ? [-3, -2, -1, 1, 2, 3] : [-2, -1, 1, 2];
+      for (const delta of windowDeltas) {
           const adj = c.chunk_index + delta;
           if (adj >= 0) adjacentIds.add(`${c.manual_id}:${c.page_number}:${adj}`);
         }
@@ -447,10 +466,12 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
             AND c.fts_vector @@ to_tsquery('english', ${tsQuery})
+            ${fromPage !== null ? sql`AND c.page_number >= ${fromPage}` : sql``}
+            ${toPage !== null ? sql`AND c.page_number <= ${toPage}` : sql``}
           ORDER BY rank DESC
           LIMIT 100
         ) ranked
-        WHERE rank > ${FTS_RANK_THRESHOLD}
+        WHERE rank > ${ftsRankThreshold}
         ORDER BY rank DESC
         LIMIT ${TOP_K_SCOPED}
       `);
@@ -668,6 +689,17 @@ FORMATTING: Write in plain prose. You may use numbered lists (1. 2. 3.) and plai
     : ""
 }
 
+FAULT DIAGNOSIS REASONING — apply when the question describes a fault with confirmed component states (e.g. "relay KA33 is energised", "lamp H06 is lit", "coil is healthy"):
+1. SYMPTOM FILTER: Use each confirmed-working component to eliminate upstream causes. If relay KA33 is confirmed energised, its supply and coil are healthy — the fault must be downstream of KA33.
+2. CIRCUIT TOPOLOGY: Trace the complete path from supply to load. Identify series components (a fault blocks all downstream loads) vs parallel components (a fault removes only that branch, others continue).
+3. COMPONENT FAILURE MODES — reason about realistic failure modes per component type:
+   - Diode/rectifier: fails SHORT (passes current in reverse direction, common under overcurrent) or OPEN (blocks current entirely). Short-circuit is more common early in a failure.
+   - Relay contact: fails OPEN (load stays off even when coil is energised) or WELDED (load cannot be de-energised).
+   - Fuse/breaker: fails OPEN only — it cannot fail short.
+   - Solenoid coil: fails OPEN (no energisation / valve won't move) or SHORT (draws excess current and trips upstream protection).
+4. ELIMINATION RANKING: List suspects from most to least likely, excluding any component already confirmed healthy. For each suspect, state the specific failure mode (open/short/welded) and why it matches the observed symptom.
+5. SUPPLY RAIL CHECK: Always include the supply rail (e.g. P1, 24VDC bus, phase L1) as a candidate — a rail fault affects every load on that rail simultaneously.
+
 OUTPUT FORMAT — respond with valid JSON only:
 {
   "quote": "Copy the single sentence from the excerpts that most directly answers the question — character-for-character. If none answers it, write: NOT IN EXCERPTS",
@@ -764,18 +796,40 @@ Please answer based on the above information.`;
     // ── 8. Determine final answer ─────────────────────────────────────────────
     let finalAnswer = draftAnswer;
     let isGuided = false;
+    let validationPassCount = 1;
+    let revisedOnce = false;
+    let finalSpecialistResult = specialistResult;
 
     if (specialistResult.validationStatus === "revise" && specialistResult.revisedAnswer) {
-      // Use the specialist's revised answer
+      revisedOnce = true;
       finalAnswer = specialistResult.revisedAnswer
         .replace(/\*\*([^*]+)\*\*/g, "$1")
         .trim();
-      req.log.info("agent-chat: using specialist-revised answer");
+      req.log.info("agent-chat: using specialist-revised answer — running second validation pass");
+
+      const secondPassResult = await runDomainSpecialist({
+        question: trimmedQuestion,
+        draftAnswer: finalAnswer,
+        ragContext,
+        graphContext,
+        domain: technicalDomain,
+        strictness,
+        evidence: evidenceSummary,
+        quote: quoteRaw,
+      });
+      validationPassCount = 2;
+      finalSpecialistResult = secondPassResult;
+      req.log.info({ secondPassStatus: secondPassResult.validationStatus }, "agent-chat: second validation pass complete");
+
+      if (secondPassResult.validationStatus === "fail" || secondPassResult.answerability === "not_answerable") {
+        finalAnswer = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, secondPassResult.validationSummary);
+        isGuided = true;
+        req.log.info("agent-chat: second pass failed — using guided no-answer");
+      }
     } else if (
       specialistResult.validationStatus === "fail" ||
       specialistResult.answerability === "not_answerable"
     ) {
-      // Build a guided no-answer
       finalAnswer = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, specialistResult.validationSummary);
       isGuided = true;
       req.log.info("agent-chat: using guided no-answer");
@@ -856,6 +910,13 @@ Please answer based on the above information.`;
         pageNumber: chunk.page_number,
         excerpt: chunk.content.slice(0, 200) + (chunk.content.length > 200 ? "…" : ""),
         entityNames: entityNames.length > 0 ? entityNames : undefined,
+        citationQuality: phraseChunkIds.has(chunk.id)
+          ? "strong"
+          : andQueryChunkIds.has(chunk.id)
+          ? "partial"
+          : chunk.rank > 0.01
+          ? "weak"
+          : "unverified",
       });
     }
 
@@ -874,17 +935,43 @@ Please answer based on the above information.`;
       citations,
     });
 
+    const finalValidationStatus =
+      isGuided ? "failed" :
+      finalSpecialistResult.validationStatus === "pass" ? "passed" :
+      "passed_with_warnings";
+
+    const missingOrWeakEvidence = [
+      ...finalSpecialistResult.validationSummary.missingItems.map((m) => ({
+        claimOrQuestionPart: m,
+        issue: "missing" as const,
+      })),
+      ...finalSpecialistResult.validationSummary.weakItems.map((w) => ({
+        claimOrQuestionPart: w,
+        issue: "weak" as const,
+      })),
+      ...finalSpecialistResult.validationSummary.unsupportedClaims.map((u) => ({
+        claimOrQuestionPart: u,
+        issue: "conflicting" as const,
+      })),
+    ];
+
     res.json({
       answer: finalAnswer,
       citations,
       sessionId,
       graphEntities: graphEntities.map((e) => e.name),
-      confidence: specialistResult.confidence,
-      answerability: specialistResult.answerability,
+      confidence: finalSpecialistResult.confidence,
+      answerability: finalSpecialistResult.answerability,
       domain: technicalDomain,
       isGuided,
       evidenceSummary,
-      validationSummary: specialistResult.validationSummary,
+      validationSummary: finalSpecialistResult.validationSummary,
+      missingOrWeakEvidence,
+      validationMetadata: {
+        validationPassCount,
+        revisedOnce,
+        finalValidationStatus,
+      },
     });
   } catch (err) {
     req.log.error({ err }, "Agent chat endpoint error");

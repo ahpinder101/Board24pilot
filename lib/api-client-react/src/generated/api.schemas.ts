@@ -164,12 +164,27 @@ export interface GlobalStats {
   relationshipsByType: GlobalStatsRelationshipsByType;
 }
 
+/**
+ * How strongly this citation supports the answer — strong=phrase/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback
+ */
+export type ChatCitationCitationQuality = typeof ChatCitationCitationQuality[keyof typeof ChatCitationCitationQuality];
+
+
+export const ChatCitationCitationQuality = {
+  strong: 'strong',
+  partial: 'partial',
+  weak: 'weak',
+  unverified: 'unverified',
+} as const;
+
 export interface ChatCitation {
   manualId: number;
   manualName: string;
   pageNumber?: number;
   excerpt: string;
   entityNames?: string[];
+  /** How strongly this citation supports the answer — strong=phrase/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback */
+  citationQuality?: ChatCitationCitationQuality;
 }
 
 export interface ChatRequest {
@@ -247,6 +262,31 @@ export const AgentChatRequestStrictness = {
   safety_critical: 'safety_critical',
 } as const;
 
+/**
+ * Controls retrieval strategy — fact_lookup=tight phrase, process_trace=wider window+paths, troubleshooting_flow=symptom-first+graph, relationship_trace=graph-first
+ */
+export type AgentChatRequestRetrievalMode = typeof AgentChatRequestRetrievalMode[keyof typeof AgentChatRequestRetrievalMode];
+
+
+export const AgentChatRequestRetrievalMode = {
+  fact_lookup: 'fact_lookup',
+  process_trace: 'process_trace',
+  troubleshooting_flow: 'troubleshooting_flow',
+  relationship_trace: 'relationship_trace',
+} as const;
+
+/**
+ * Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15
+ */
+export type AgentChatRequestMinConfidence = typeof AgentChatRequestMinConfidence[keyof typeof AgentChatRequestMinConfidence];
+
+
+export const AgentChatRequestMinConfidence = {
+  any: 'any',
+  medium: 'medium',
+  high: 'high',
+} as const;
+
 export interface AgentChatRequest {
   question: string;
   sessionId?: string;
@@ -256,6 +296,44 @@ export interface AgentChatRequest {
   domain?: AgentChatRequestDomain;
   /** Validation strictness level */
   strictness?: AgentChatRequestStrictness;
+  /** Controls retrieval strategy — fact_lookup=tight phrase, process_trace=wider window+paths, troubleshooting_flow=symptom-first+graph, relationship_trace=graph-first */
+  retrievalMode?: AgentChatRequestRetrievalMode;
+  /** Filter retrieved chunks to pages >= this value */
+  fromPage?: number;
+  /** Filter retrieved chunks to pages <= this value */
+  toPage?: number;
+  /** Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15 */
+  minConfidence?: AgentChatRequestMinConfidence;
+}
+
+export type MissingOrWeakEvidenceItemIssue = typeof MissingOrWeakEvidenceItemIssue[keyof typeof MissingOrWeakEvidenceItemIssue];
+
+
+export const MissingOrWeakEvidenceItemIssue = {
+  missing: 'missing',
+  weak: 'weak',
+  conflicting: 'conflicting',
+} as const;
+
+export interface MissingOrWeakEvidenceItem {
+  claimOrQuestionPart: string;
+  issue: MissingOrWeakEvidenceItemIssue;
+  explanation?: string;
+}
+
+export type ValidationMetadataFinalValidationStatus = typeof ValidationMetadataFinalValidationStatus[keyof typeof ValidationMetadataFinalValidationStatus];
+
+
+export const ValidationMetadataFinalValidationStatus = {
+  passed: 'passed',
+  passed_with_warnings: 'passed_with_warnings',
+  failed: 'failed',
+} as const;
+
+export interface ValidationMetadata {
+  validationPassCount: number;
+  revisedOnce: boolean;
+  finalValidationStatus: ValidationMetadataFinalValidationStatus;
 }
 
 export type AgentChatResponseConfidence = typeof AgentChatResponseConfidence[keyof typeof AgentChatResponseConfidence];
@@ -301,6 +379,10 @@ export interface ValidationSummary {
   weakItems: string[];
   unsupportedClaims: string[];
   suggestedGuidance: string[];
+  /** Citations that do not actually support the claims they are attached to */
+  citationIssues: string[];
+  /** Steps or events presented out of order compared to the evidence */
+  sequenceIssues: string[];
 }
 
 export interface AgentChatResponse {
@@ -314,6 +396,9 @@ export interface AgentChatResponse {
   isGuided: boolean;
   evidenceSummary?: EvidenceSummary;
   validationSummary?: ValidationSummary;
+  /** Flat list of missing or weak evidence items derived from validation */
+  missingOrWeakEvidence?: MissingOrWeakEvidenceItem[];
+  validationMetadata?: ValidationMetadata;
 }
 
 export type ResetProcessing400 = {

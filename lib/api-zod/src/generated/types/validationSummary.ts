@@ -14,4 +14,8 @@ export interface ValidationSummary {
   weakItems: string[];
   unsupportedClaims: string[];
   suggestedGuidance: string[];
+  /** Citations that do not actually support the claims they are attached to */
+  citationIssues: string[];
+  /** Steps or events presented out of order compared to the evidence */
+  sequenceIssues: string[];
 }

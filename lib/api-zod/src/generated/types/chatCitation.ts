@@ -5,6 +5,7 @@
  * Engineering Manual Knowledge Graph API
  * OpenAPI spec version: 0.1.0
  */
+import type { ChatCitationCitationQuality } from './chatCitationCitationQuality';
 
 export interface ChatCitation {
   manualId: number;
@@ -12,4 +13,6 @@ export interface ChatCitation {
   pageNumber?: number;
   excerpt: string;
   entityNames?: string[];
+  /** How strongly this citation supports the answer — strong=phrase/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback */
+  citationQuality?: ChatCitationCitationQuality;
 }

@@ -24,7 +24,8 @@ export const SendChatMessageResponse = zod.object({
   "manualName": zod.string(),
   "pageNumber": zod.number().optional(),
   "excerpt": zod.string(),
-  "entityNames": zod.array(zod.string()).optional()
+  "entityNames": zod.array(zod.string()).optional(),
+  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback')
 })),
   "sessionId": zod.string(),
   "graphEntities": zod.array(zod.string()).optional()
@@ -39,7 +40,11 @@ export const SendAgentChatMessageBody = zod.object({
   "sessionId": zod.string().optional(),
   "imageDataUrl": zod.string().optional().describe('Optional base64 data URL of an image (e.g. data:image\/jpeg;base64,...)'),
   "domain": zod.enum(['auto', 'electrical_control', 'hydraulic_schematic', 'pneumatic_schematic', 'mechanical_assembly', 'troubleshooting', 'generic_process']).optional().describe('Force a specific technical domain, or \"auto\" to detect automatically'),
-  "strictness": zod.enum(['normal', 'engineering_strict', 'safety_critical']).optional().describe('Validation strictness level')
+  "strictness": zod.enum(['normal', 'engineering_strict', 'safety_critical']).optional().describe('Validation strictness level'),
+  "retrievalMode": zod.enum(['fact_lookup', 'process_trace', 'troubleshooting_flow', 'relationship_trace']).optional().describe('Controls retrieval strategy — fact_lookup=tight phrase, process_trace=wider window+paths, troubleshooting_flow=symptom-first+graph, relationship_trace=graph-first'),
+  "fromPage": zod.number().optional().describe('Filter retrieved chunks to pages >= this value'),
+  "toPage": zod.number().optional().describe('Filter retrieved chunks to pages <= this value'),
+  "minConfidence": zod.enum(['any', 'medium', 'high']).optional().describe('Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15')
 })
 
 export const SendAgentChatMessageResponse = zod.object({
@@ -49,7 +54,8 @@ export const SendAgentChatMessageResponse = zod.object({
   "manualName": zod.string(),
   "pageNumber": zod.number().optional(),
   "excerpt": zod.string(),
-  "entityNames": zod.array(zod.string()).optional()
+  "entityNames": zod.array(zod.string()).optional(),
+  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback')
 })),
   "sessionId": zod.string(),
   "graphEntities": zod.array(zod.string()).optional(),
@@ -70,7 +76,19 @@ export const SendAgentChatMessageResponse = zod.object({
   "missingItems": zod.array(zod.string()),
   "weakItems": zod.array(zod.string()),
   "unsupportedClaims": zod.array(zod.string()),
-  "suggestedGuidance": zod.array(zod.string())
+  "suggestedGuidance": zod.array(zod.string()),
+  "citationIssues": zod.array(zod.string()).describe('Citations that do not actually support the claims they are attached to'),
+  "sequenceIssues": zod.array(zod.string()).describe('Steps or events presented out of order compared to the evidence')
+}).optional(),
+  "missingOrWeakEvidence": zod.array(zod.object({
+  "claimOrQuestionPart": zod.string(),
+  "issue": zod.enum(['missing', 'weak', 'conflicting']),
+  "explanation": zod.string().optional()
+})).optional().describe('Flat list of missing or weak evidence items derived from validation'),
+  "validationMetadata": zod.object({
+  "validationPassCount": zod.number(),
+  "revisedOnce": zod.boolean(),
+  "finalValidationStatus": zod.enum(['passed', 'passed_with_warnings', 'failed'])
 }).optional()
 })
 
@@ -91,7 +109,8 @@ export const GetChatHistoryResponseItem = zod.object({
   "manualName": zod.string(),
   "pageNumber": zod.number().optional(),
   "excerpt": zod.string(),
-  "entityNames": zod.array(zod.string()).optional()
+  "entityNames": zod.array(zod.string()).optional(),
+  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback')
 })).optional(),
   "createdAt": zod.string()
 })

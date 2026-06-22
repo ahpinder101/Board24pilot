@@ -1,0 +1,20 @@
+🟠 P2 — Retrieval precision
+Priority	Capability	Delta Table #	Original Status	Why P2
+P2-6	retrieval_mode parameter — fact_lookup / process_trace / relationship_trace / troubleshooting_flow / safety_or_validation	#6	❌ Missing	One-mode-fits-all degrades both part-lookup and process-trace questions
+P2-7	Page and diagram-type filters in retrieval input	#7	🟡 Partial	Scoping to a known page/diagram dramatically improves precision when the user knows where to look
+P2-8	Structured graph context in retrieval output — seed nodes → expanded nodes/edges → matched paths	#10	🟡 Partial	Entities/relationships retrieved but not traversable; blocks "trace the circuit" style answers
+P2-9	Electrical wiring chain reconstruction — source → control element → coil → contacts → load → return → stop	#13, #14	🟡 Partial	Most common advanced use case in engineering manuals; without it, electrical answers are chunk guesses
+P2-10	min_confidence filter on retrieval	#7	🟡 Partial	Stops low-confidence chunks polluting the evidence package
+🟡 P3 — Validation completeness
+Priority	Capability	Delta Table #	Original Status	Why P3
+P3-11	Formal validation output fields — coverage.present_items, missing_items, citation_issues, sequence_issues	#19	🟡 Partial	Specialist verdicts are currently narrative; structured fields let UI surface gaps without parsing free text
+P3-12	strictness selector in UI — Balanced / Strict / Safety-critical	#20, #35	🟡 Partial (#20) / ❌ Missing (#35)	Backend already supports it; surfacing it lets users demand higher evidence standards
+P3-13	Hydraulic/pneumatic stage tracing as structured evidence sequence	#16	🟡 Partial	Same pattern as electrical; needed for complete domain coverage
+P3-14	Validation summary shown in result panel — what specialist checked, passed, flagged	#41	🟡 Partial	Users have no visibility into whether the answer was challenged; showing this builds justified trust
+🔵 P4 — Infrastructure (enables improvement over time)
+Priority	Capability	Delta Table #	Original Status	Why P4
+P4-15	scan_domain_coverage() — inventory mapping documents to domains	#17	❌ Missing	Required before reliable auto-routing of questions to the right domain validator
+P4-16	Schema discovery diagnostics endpoint — adapter confidence, fallback modes, weak citation warnings	#4	❌ Missing	Tells you what the retrieval layer is actually working with; critical for ongoing maintenance
+P4-17	Run scratchpad per query — temp working memory cleared after each response	#21	❌ Missing	Prevents context leakage between unrelated questions in the same session
+P4-18	Retained summary scratchpad — compressed cross-query context, top-3 recall by relevance	#22, #24	❌ Missing	Allows follow-up questions to build on prior retrieval without re-running full pipeline
+P4-19	Formal test scripts for the 24 acceptance criteria	#46	❌ Missing	Without these you cannot verify fixes don't regress other capabilities

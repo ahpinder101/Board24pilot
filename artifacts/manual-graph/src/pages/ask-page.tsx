@@ -37,6 +37,7 @@ interface Citation {
   pageNumber?: number;
   excerpt: string;
   entityNames?: string[];
+  citationQuality?: "strong" | "partial" | "weak" | "unverified";
 }
 
 type ConfidenceLevel = "high" | "medium" | "low" | "unverified";
@@ -57,6 +58,20 @@ interface ValidationSummary {
   weakItems: string[];
   unsupportedClaims: string[];
   suggestedGuidance: string[];
+  citationIssues: string[];
+  sequenceIssues: string[];
+}
+
+interface MissingOrWeakEvidenceItem {
+  claimOrQuestionPart: string;
+  issue: "missing" | "weak" | "conflicting";
+  explanation?: string;
+}
+
+interface ValidationMetadata {
+  validationPassCount: number;
+  revisedOnce: boolean;
+  finalValidationStatus: "passed" | "passed_with_warnings" | "failed";
 }
 
 interface Message {
@@ -72,6 +87,8 @@ interface Message {
   isGuided?: boolean;
   evidenceSummary?: EvidenceSummary;
   validationSummary?: ValidationSummary;
+  missingOrWeakEvidence?: MissingOrWeakEvidenceItem[];
+  validationMetadata?: ValidationMetadata;
 }
 
 interface FeedbackState {
@@ -173,8 +190,9 @@ function EvidencePanel({ evidence, open, onToggle }: {
 
 // ── ValidationPanel ───────────────────────────────────────────────────────────
 
-function ValidationPanel({ validation, open, onToggle }: {
+function ValidationPanel({ validation, validationMetadata, open, onToggle }: {
   validation: ValidationSummary;
+  validationMetadata?: ValidationMetadata;
   open: boolean;
   onToggle: () => void;
 }) {
@@ -236,12 +254,50 @@ function ValidationPanel({ validation, open, onToggle }: {
               ))}
             </div>
           )}
+          {validation.citationIssues?.length > 0 && (
+            <div>
+              <p className="font-medium text-yellow-700 mb-1">Citation issues:</p>
+              {validation.citationIssues.map((item, i) => (
+                <div key={i} className="flex items-start gap-1 text-gray-600">
+                  <AlertTriangle className="w-3 h-3 text-yellow-500 mt-0.5 shrink-0" />
+                  {item}
+                </div>
+              ))}
+            </div>
+          )}
+          {validation.sequenceIssues?.length > 0 && (
+            <div>
+              <p className="font-medium text-yellow-700 mb-1">Sequence issues:</p>
+              {validation.sequenceIssues.map((item, i) => (
+                <div key={i} className="flex items-start gap-1 text-gray-600">
+                  <AlertTriangle className="w-3 h-3 text-yellow-500 mt-0.5 shrink-0" />
+                  {item}
+                </div>
+              ))}
+            </div>
+          )}
           {validation.suggestedGuidance.length > 0 && (
             <div>
               <p className="font-medium text-blue-700 mb-1">Suggestions:</p>
               {validation.suggestedGuidance.map((item, i) => (
                 <div key={i} className="text-gray-600 pl-3 border-l-2 border-blue-200">{item}</div>
               ))}
+            </div>
+          )}
+          {validationMetadata && (
+            <div className="pt-1 mt-1 border-t border-gray-200 flex items-center gap-3 text-gray-400">
+              <span>Passes: <span className="font-medium text-gray-600">{validationMetadata.validationPassCount}</span></span>
+              {validationMetadata.revisedOnce && <span className="text-yellow-600">· Revised once</span>}
+              <span className={cn(
+                "ml-auto font-medium",
+                validationMetadata.finalValidationStatus === "passed" ? "text-green-600" :
+                validationMetadata.finalValidationStatus === "passed_with_warnings" ? "text-yellow-600" :
+                "text-red-600"
+              )}>
+                {validationMetadata.finalValidationStatus === "passed" ? "✓ Passed" :
+                 validationMetadata.finalValidationStatus === "passed_with_warnings" ? "⚠ With warnings" :
+                 "✗ Failed"}
+              </span>
             </div>
           )}
         </div>
@@ -283,6 +339,14 @@ function CitationChip({ citation, index }: { citation: Citation; index: number }
     }
   }
 
+  const qualityConfig = {
+    strong: { dot: "bg-green-500", label: "Direct match" },
+    partial: { dot: "bg-yellow-400", label: "Related" },
+    weak: { dot: "bg-gray-300", label: "Keyword" },
+    unverified: { dot: "bg-gray-200", label: null },
+  };
+  const quality = citation.citationQuality ? qualityConfig[citation.citationQuality] : null;
+
   return (
     <button
       type="button"
@@ -303,6 +367,14 @@ function CitationChip({ citation, index }: { citation: Citation; index: number }
           {citation.pageNumber && (
             <span className="text-[10px] font-mono bg-blue-100 text-blue-600 px-1.5 py-0.5 rounded shrink-0">
               p.{citation.pageNumber}
+            </span>
+          )}
+          {quality && (
+            <span className="flex items-center gap-1 shrink-0">
+              <span className={cn("w-1.5 h-1.5 rounded-full", quality.dot)} />
+              {quality.label && (
+                <span className="text-[9px] text-gray-400">{quality.label}</span>
+              )}
             </span>
           )}
           <ExternalLink className="w-2.5 h-2.5 text-gray-300 group-hover:text-blue-400 shrink-0 ml-auto" />
@@ -526,9 +598,10 @@ export default function AskPage() {
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [isLoading, setIsLoading] = useState(false);
-  const [agentMode, setAgentMode] = useState(false);
+  const [agentMode, setAgentMode] = useState(true);
   const [domain, setDomain] = useState("auto");
   const [strictness, setStrictness] = useState<"normal" | "engineering_strict" | "safety_critical">("normal");
+  const [retrievalMode, setRetrievalMode] = useState<"fact_lookup" | "process_trace" | "troubleshooting_flow" | "relationship_trace">("fact_lookup");
   const [expandedPanels, setExpandedPanels] = useState<Record<string, { evidence?: boolean; validation?: boolean }>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -667,6 +740,7 @@ export default function AskPage() {
       if (agentMode) {
         body.domain = domain;
         body.strictness = strictness;
+        body.retrievalMode = retrievalMode;
       }
 
       const res = await fetch(endpoint, {
@@ -687,6 +761,8 @@ export default function AskPage() {
         isGuided?: boolean;
         evidenceSummary?: EvidenceSummary;
         validationSummary?: ValidationSummary;
+        missingOrWeakEvidence?: MissingOrWeakEvidenceItem[];
+        validationMetadata?: ValidationMetadata;
       };
 
       setSessionId(data.sessionId);
@@ -704,6 +780,8 @@ export default function AskPage() {
                 isGuided: data.isGuided,
                 evidenceSummary: data.evidenceSummary,
                 validationSummary: data.validationSummary,
+                missingOrWeakEvidence: data.missingOrWeakEvidence,
+                validationMetadata: data.validationMetadata,
               }
             : m
         )
@@ -798,6 +876,20 @@ export default function AskPage() {
                   <option value="normal">Normal</option>
                   <option value="engineering_strict">Engineering Strict</option>
                   <option value="safety_critical">Safety Critical</option>
+                </select>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <label className="text-[11px] text-gray-500">Mode:</label>
+                <select
+                  value={retrievalMode}
+                  onChange={(e) => setRetrievalMode(e.target.value as typeof retrievalMode)}
+                  className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700"
+                >
+                  <option value="fact_lookup">Fact lookup</option>
+                  <option value="process_trace">Process trace</option>
+                  <option value="troubleshooting_flow">Troubleshooting</option>
+                  <option value="relationship_trace">Relationship trace</option>
                 </select>
               </div>
 
@@ -963,9 +1055,29 @@ export default function AskPage() {
                         onToggle={() => togglePanel(msg.id, "evidence")}
                       />
                     )}
+                    {!msg.pending && msg.role === "assistant" && msg.missingOrWeakEvidence && msg.missingOrWeakEvidence.length > 0 && (
+                      <div className="rounded-lg border border-yellow-200 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 flex items-start gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5 text-yellow-500 mt-0.5 shrink-0" />
+                        <div>
+                          <span className="font-medium">Partial evidence: </span>
+                          {msg.missingOrWeakEvidence.slice(0, 2).map((item, i) => (
+                            <span key={i}>
+                              {i > 0 && " · "}
+                              <span className="italic">{item.claimOrQuestionPart}</span>
+                              {" "}
+                              <span className="text-yellow-600">({item.issue})</span>
+                            </span>
+                          ))}
+                          {msg.missingOrWeakEvidence.length > 2 && (
+                            <span className="text-yellow-600"> +{msg.missingOrWeakEvidence.length - 2} more</span>
+                          )}
+                        </div>
+                      </div>
+                    )}
                     {!msg.pending && msg.role === "assistant" && msg.validationSummary && (
                       <ValidationPanel
                         validation={msg.validationSummary}
+                        validationMetadata={msg.validationMetadata}
                         open={expandedPanels[msg.id]?.validation ?? false}
                         onToggle={() => togglePanel(msg.id, "validation")}
                       />

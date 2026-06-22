@@ -6,6 +6,8 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { AgentChatRequestDomain } from './agentChatRequestDomain';
+import type { AgentChatRequestMinConfidence } from './agentChatRequestMinConfidence';
+import type { AgentChatRequestRetrievalMode } from './agentChatRequestRetrievalMode';
 import type { AgentChatRequestStrictness } from './agentChatRequestStrictness';
 
 export interface AgentChatRequest {
@@ -17,4 +19,12 @@ export interface AgentChatRequest {
   domain?: AgentChatRequestDomain;
   /** Validation strictness level */
   strictness?: AgentChatRequestStrictness;
+  /** Controls retrieval strategy — fact_lookup=tight phrase, process_trace=wider window+paths, troubleshooting_flow=symptom-first+graph, relationship_trace=graph-first */
+  retrievalMode?: AgentChatRequestRetrievalMode;
+  /** Filter retrieved chunks to pages >= this value */
+  fromPage?: number;
+  /** Filter retrieved chunks to pages <= this value */
+  toPage?: number;
+  /** Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15 */
+  minConfidence?: AgentChatRequestMinConfidence;
 }

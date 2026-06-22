@@ -10,3 +10,4 @@
 - [Never restart API server during extraction](api-restart-during-extraction.md) — background extraction jobs die on server restart; relationships lost if pass 5 bulk-inserts at end.
 - [drizzle-kit push blocks on schema drift](drizzle-push-schema-drift.md) — db push in non-TTY shells asks about data-loss columns (embedding, fts_vector drift); use executeSql code_execution tool to CREATE TABLE IF NOT EXISTS directly instead.
 - [Vision OCR and Pass 7 page scoping](vision-ocr-page-scoping.md) — passVisionOcr takes page numbers array not totalPages; sparse-page detection is per-page not 80% ratio; Pass 7 must delete stale chunks before re-indexing.
+- [Agent chat second validation pass](agent-chat-second-pass.md) — agentChat.ts runs up to 2 specialist passes; first pass may revise, second pass validates the revised answer; fail on pass 2 → guided no-answer

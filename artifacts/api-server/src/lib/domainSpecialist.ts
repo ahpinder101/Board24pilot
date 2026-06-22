@@ -28,6 +28,8 @@ export interface ValidationSummary {
   weakItems: string[];
   unsupportedClaims: string[];
   suggestedGuidance: string[];
+  citationIssues: string[];
+  sequenceIssues: string[];
 }
 
 export interface DomainSpecialistInput {
@@ -112,7 +114,7 @@ export function detectDomain(question: string, ragContext: string): TechnicalDom
   }
 
   let bestDomain: TechnicalDomain = "generic_process";
-  let bestScore = 1; // minimum threshold of 2 to override generic
+  let bestScore = 1;
   for (const [domain, score] of Object.entries(scores) as Array<[TechnicalDomain, number]>) {
     if (score > bestScore) {
       bestScore = score;
@@ -163,6 +165,8 @@ Validation rules:
 4. No supporting evidence, "NOT IN EXCERPTS" quote, or answer directly contradicts evidence → FAIL.
 5. Do not fail solely because optional stages are absent.
 6. If the draft answer says "the manual does not specify this" and evidence is truly empty → PASS (that is the correct answer).
+7. citation_issues: list any case where a cited source does not actually contain the claim it is used to support.
+8. sequence_issues: list any case where the answer presents steps out of the order shown in the evidence.
 
 Respond with valid JSON only, no other text:
 {
@@ -172,6 +176,8 @@ Respond with valid JSON only, no other text:
   "missing_items": ["required stages that are missing"],
   "weak_items": ["items present but poorly supported"],
   "unsupported_claims": ["specific claims not backed by evidence"],
+  "citation_issues": ["e.g. Citation 2 does not contain the relay contact claim"],
+  "sequence_issues": ["e.g. Step 3 appears before Step 2 in the answer"],
   "revision_instructions": ["concrete instructions — only if revise"],
   "revised_answer": "improved answer text — only if revise, otherwise null",
   "suggested_guidance": ["helpful suggestions for the user if evidence is weak or missing"],
@@ -197,7 +203,7 @@ Validate the draft answer.`;
         { role: "user", content: userPrompt },
       ],
       response_format: { type: "json_object" },
-      max_tokens: 900,
+      max_tokens: 1000,
       temperature: 0,
     });
 
@@ -209,6 +215,8 @@ Validate the draft answer.`;
       missing_items?: string[];
       weak_items?: string[];
       unsupported_claims?: string[];
+      citation_issues?: string[];
+      sequence_issues?: string[];
       revision_instructions?: string[];
       revised_answer?: string | null;
       suggested_guidance?: string[];
@@ -249,6 +257,8 @@ Validate the draft answer.`;
         weakItems: parsed.weak_items ?? [],
         unsupportedClaims: parsed.unsupported_claims ?? [],
         suggestedGuidance: parsed.suggested_guidance ?? [],
+        citationIssues: parsed.citation_issues ?? [],
+        sequenceIssues: parsed.sequence_issues ?? [],
       },
       revisedAnswer: parsed.revised_answer ?? undefined,
     };
@@ -264,6 +274,8 @@ Validate the draft answer.`;
         weakItems: [],
         unsupportedClaims: [],
         suggestedGuidance: [],
+        citationIssues: [],
+        sequenceIssues: [],
       },
     };
   }

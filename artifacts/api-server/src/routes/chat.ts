@@ -962,6 +962,17 @@ The user has attached a photo along with their question. Analyse the image caref
     : ""
 }
 
+FAULT DIAGNOSIS REASONING — apply when the question describes a fault with confirmed component states (e.g. "relay KA33 is energised", "lamp H06 is lit", "coil is healthy"):
+1. SYMPTOM FILTER: Use each confirmed-working component to eliminate upstream causes. If relay KA33 is confirmed energised, its supply and coil are healthy — the fault must be downstream of KA33.
+2. CIRCUIT TOPOLOGY: Trace the complete path from supply to load. Identify series components (a fault blocks all downstream loads) vs parallel components (a fault removes only that branch, others continue).
+3. COMPONENT FAILURE MODES — reason about realistic failure modes per component type:
+   - Diode/rectifier: fails SHORT (passes current in reverse direction, common under overcurrent) or OPEN (blocks current entirely). Short-circuit is more common early in a failure.
+   - Relay contact: fails OPEN (load stays off even when coil is energised) or WELDED (load cannot be de-energised).
+   - Fuse/breaker: fails OPEN only — it cannot fail short.
+   - Solenoid coil: fails OPEN (no energisation / valve won't move) or SHORT (draws excess current and trips upstream protection).
+4. ELIMINATION RANKING: List suspects from most to least likely, excluding any component already confirmed healthy. For each suspect, state the specific failure mode (open/short/welded) and why it matches the observed symptom.
+5. SUPPLY RAIL CHECK: Always include the supply rail (e.g. P1, 24VDC bus, phase L1) as a candidate — a rail fault affects every load on that rail simultaneously.
+
 OUTPUT FORMAT — respond with valid JSON only, no other text:
 {
   "quote": "Copy here, character-for-character, the single sentence or phrase from the excerpts above that most directly answers the question. If no sentence in the excerpts answers it, write exactly: NOT IN EXCERPTS",
@@ -1158,6 +1169,13 @@ Please answer the question based on the above information from the engineering m
           (chunk.content.length > 200 ? "…" : ""),
         entityNames:
           entityNamesOnPage.length > 0 ? entityNamesOnPage : undefined,
+        citationQuality: phraseChunkIds.has(chunk.id)
+          ? "strong"
+          : andQueryChunkIds.has(chunk.id)
+          ? "partial"
+          : chunk.rank > 0.01
+          ? "weak"
+          : "unverified",
       });
     }
 

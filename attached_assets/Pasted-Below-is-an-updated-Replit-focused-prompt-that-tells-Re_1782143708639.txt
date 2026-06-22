@@ -1,0 +1,402 @@
+Below is an updated **Replit-focused prompt** that tells Replit the gap analysis has already been done, and that it should focus only on the P1 trust-gate items first.
+
+You are working inside an existing Replit application. Do not rebuild the app from scratch.
+
+Important context: a prior gap analysis has already been completed. Treat the analysis below as the current known state of the application. Do not spend time re-discovering every missing area unless needed to implement the specific P1 tasks.
+
+Known current state from prior analysis:
+
+* Core retrieval and chat logic already exists in `chat.ts` / `agentChat.ts`.
+* Domain detection exists, but user-facing domain selection is missing.
+* Citations currently include manual/page/excerpt, but do not consistently include `citation_quality`, `trust_status`, or canonical `evidence_id`.
+* Guided no-answer behavior exists through `buildGuidedNoAnswer`, but answerability and missing evidence are mostly narrative rather than structured fields.
+* Domain specialist validation exists and can revise/fail/pass, but structured validation fields are incomplete.
+* Revision happens somewhere in the pipeline, but it is unclear whether a second validation pass occurs after revision.
+* Confidence badge, sources, and evidence summary are already shown in the UI.
+* Validation summary and missing information are not consistently surfaced for partial-evidence answers.
+* Question-type selector, technical-area selector, answer-style selector, and admin controls are missing.
+* Automated acceptance tests are missing or incomplete.
+
+Your task is to implement only the high-priority P1 trust-gate features first.
+
+Do not implement scratchpads, schema discovery, admin diagnostics, graph traversal, advanced retrieval modes, or full Stage 0–8 coverage yet. Those are later-stage tasks.
+
+## P1 scope to implement now
+
+### P1-1 — Formal answerability status on every response
+
+Add a required field to every user-facing answer response:
+
+```ts
+answerability_status: "answerable" | "partially_answerable" | "not_answerable"
+```
+
+Rules:
+
+* `answerable`: the answer is fully supported by retrieved evidence.
+* `partially_answerable`: some requested parts are supported, but at least one part is missing, weak, ambiguous, conflicting, or uncertain.
+* `not_answerable`: retrieved evidence does not support a meaningful answer.
+* Never return a confident-sounding answer when evidence is weak.
+* Every API response that answers a user question must include this field.
+* Preserve any existing confidence field or badge, but do not treat confidence as a replacement for answerability.
+
+---
+
+### P1-2 — Structured `missing_or_weak_evidence` array on every response
+
+Add this required response field:
+
+```ts
+missing_or_weak_evidence: Array<{
+  claim_or_question_part: string;
+  issue: "missing" | "weak" | "ambiguous" | "conflicting";
+  explanation: string;
+  related_citation_ids?: string[];
+}>
+```
+
+Rules:
+
+* If `answerability_status` is `answerable`, this array may be empty.
+* If `answerability_status` is `partially_answerable` or `not_answerable`, this array must contain at least one item.
+* Do not bury evidence gaps only in prose.
+* For partial answers, show exactly which part of the user’s question could not be fully supported.
+* If a citation is weak, missing, or only loosely relevant, add a corresponding item here.
+
+---
+
+### P1-3 — `citation_quality` field per citation
+
+Extend each citation object with:
+
+```ts
+citation_quality: "strong" | "partial" | "weak" | "missing"
+```
+
+Suggested citation object shape:
+
+```ts
+{
+  citation_id: string;
+  evidence_id?: string;
+  manual?: string;
+  page?: number | string;
+  excerpt?: string;
+  supports_claim?: string;
+  citation_quality: "strong" | "partial" | "weak" | "missing";
+}
+```
+
+Rules:
+
+* `strong`: the citation directly supports the claim with specific matching evidence.
+* `partial`: the citation is relevant but does not fully prove the claim.
+* `weak`: the citation is only loosely related, keyword-based, generic, or indirect.
+* `missing`: no valid citation supports the claim.
+* No citation may silently default to `strong`.
+* If uncertain, classify as `partial` or `weak`, not `strong`.
+* Any answer claim relying on `weak` or `missing` citation support must be reflected in `missing_or_weak_evidence`.
+
+---
+
+### P1-4 — Revise-once loop with second validation pass
+
+Update the answer pipeline to enforce this flow:
+
+```txt
+retrieve evidence
+→ draft answer
+→ validate draft against evidence
+→ if unsupported or weak claims are found, revise once
+→ validate revised answer again
+→ return final response
+```
+
+Add this metadata to the final response:
+
+```ts
+validation_metadata: {
+  validation_pass_count: number;
+  revised_once: boolean;
+  final_validation_status: "passed" | "passed_with_warnings" | "failed";
+}
+```
+
+Rules:
+
+* If the first validation finds unsupported claims, revise the answer once.
+* After revising, always run validation again.
+* Do not create an infinite retry loop.
+* Maximum one revision.
+* If issues remain after the second validation pass, do not hide them.
+* Remaining issues must affect `answerability_status` and must be listed in `missing_or_weak_evidence`.
+* If the answer cannot be safely supported, return a guided no-answer or partial answer instead of overclaiming.
+
+---
+
+### P1-5 — Domain area user selector in UI
+
+Add a visible selector to the question UI:
+
+```ts
+domain_area:
+  | "auto"
+  | "electrical"
+  | "hydraulic"
+  | "pneumatic"
+  | "mechanical"
+  | "troubleshooting"
+```
+
+UI label:
+
+```txt
+Domain area
+```
+
+Options shown to the user:
+
+```txt
+Auto
+Electrical
+Hydraulic
+Pneumatic
+Mechanical
+Troubleshooting
+```
+
+Rules:
+
+* Default value should be `auto`.
+* Include the selected value in the request payload sent to the backend.
+* Backend must accept and preserve this value.
+* If the user selects anything other than `auto`, use that value to guide validation/routing instead of relying only on auto-detection.
+* If existing domain routing is simple, add a safe placeholder now and leave clear TODO comments for later specialist validators.
+* The frontend should display the selected or resolved domain somewhere in the result metadata if such a metadata area already exists.
+
+---
+
+## Frontend display requirements
+
+Update the result panel so users can see the new trust information clearly.
+
+Display:
+
+1. Answerability status
+   Show prominently near the answer header.
+
+2. Missing or weak evidence
+   If `missing_or_weak_evidence` is non-empty, show a warning section titled:
+
+```txt
+Missing or weak evidence
+```
+
+3. Citation quality
+   Show citation quality beside each citation, for example:
+
+```txt
+Citation quality: strong
+Citation quality: partial
+Citation quality: weak
+```
+
+4. Validation metadata
+   Show a compact validation summary if there is already a result metadata or evidence panel.
+
+Example:
+
+```txt
+Validation: passed with warnings
+Validation passes: 2
+Revised once: yes
+```
+
+Do not clutter the main answer. Prefer collapsible or secondary sections if the app already has that pattern.
+
+---
+
+## Backend implementation guidance
+
+Look for the existing pipeline around:
+
+* user question input
+* retrieval
+* answer drafting
+* domain specialist validation
+* answer revision
+* guided no-answer generation
+* citation construction
+* final response serialization
+
+Likely areas based on prior analysis:
+
+* `chat.ts`
+* `agentChat.ts`
+* domain specialist validation files
+* guided no-answer helper, likely `buildGuidedNoAnswer`
+* frontend chat/question component
+* frontend result/answer panel
+* shared response types or schemas, if present
+
+Implement this additively.
+
+Do not remove existing fields.
+
+Do not break existing confidence badge, sources, evidence summary, or guided no-answer behavior.
+
+Where the app already has similar concepts, map them into the new required fields rather than duplicating unnecessary logic.
+
+---
+
+## Self-testing requirements
+
+Add or update automated tests where the project structure supports them. If the app does not have a mature test setup, add lightweight tests or script-level checks that can be run from Replit.
+
+### Test 1 — Fully answerable response
+
+Input: a question with direct supporting evidence.
+
+Expected:
+
+```txt
+answerability_status = "answerable"
+missing_or_weak_evidence = []
+citations include citation_quality
+no citation silently defaults to strong
+validation_metadata exists
+```
+
+---
+
+### Test 2 — Partially answerable response
+
+Input: a question where only part of the requested answer is supported.
+
+Expected:
+
+```txt
+answerability_status = "partially_answerable"
+missing_or_weak_evidence.length > 0
+unsupported or weak parts are listed structurally
+answer prose does not overclaim
+```
+
+---
+
+### Test 3 — Not answerable response
+
+Input: a question with no relevant evidence.
+
+Expected:
+
+```txt
+answerability_status = "not_answerable"
+missing_or_weak_evidence.length > 0
+citations are empty or marked missing/weak
+answer clearly says the evidence is insufficient
+```
+
+---
+
+### Test 4 — Citation quality classification
+
+Input: evidence set containing:
+
+```txt
+one direct evidence match
+one indirect but relevant match
+one loose keyword-only match
+```
+
+Expected:
+
+```txt
+direct match → citation_quality = "strong"
+indirect match → citation_quality = "partial"
+loose keyword match → citation_quality = "weak"
+```
+
+---
+
+### Test 5 — Revise-once loop
+
+Input: a draft answer that initially contains an unsupported claim.
+
+Expected:
+
+```txt
+first validation catches the unsupported claim
+system revises once
+second validation runs
+validation_metadata.validation_pass_count = 2
+validation_metadata.revised_once = true
+final answer removes, weakens, or flags the unsupported claim
+```
+
+---
+
+### Test 6 — Domain selector UI and backend payload
+
+Input: user selects `Electrical` and submits a question.
+
+Expected:
+
+```txt
+frontend sends domain_area = "electrical"
+backend receives domain_area = "electrical"
+explicit selection is not overridden by auto-detection
+final response records selected or resolved domain
+```
+
+---
+
+### Test 7 — Required fields always present
+
+Run through successful, partial, failed, and guided no-answer responses.
+
+Expected every response includes:
+
+```txt
+answerability_status
+missing_or_weak_evidence
+validation_metadata
+citations[].citation_quality where citations exist
+```
+
+---
+
+## Acceptance criteria
+
+The implementation is complete when:
+
+```txt
+Every answer response includes answerability_status.
+Every answer response includes missing_or_weak_evidence.
+Every citation includes citation_quality.
+Unsupported claims trigger one revision and then a second validation pass.
+Remaining weak or missing evidence is surfaced structurally.
+The UI includes a Domain area selector.
+The backend accepts and uses domain_area.
+The result panel displays answerability, missing/weak evidence, citation quality, and validation metadata.
+Tests or script checks exist for answerable, partial, not-answerable, citation quality, revise-once, and domain selector behavior.
+Existing app functionality remains intact.
+```
+
+---
+
+## Final report required from Replit
+
+After implementing, provide a concise summary with:
+
+```txt
+Files changed
+Backend schema/type changes
+Frontend UI changes
+Validation/revision logic changes
+Tests added or updated
+Commands run
+Any remaining TODOs or limitations
+```
+
+Focus only on these P1 items. Do not start Stage 0, Stage 2, Stage 4, or full admin UI work yet.

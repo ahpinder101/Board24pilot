@@ -527,6 +527,10 @@ components:
           type: array
           items:
             type: string
+        citationQuality:
+          type: string
+          enum: [strong, partial, weak, unverified]
+          description: How strongly this citation supports the answer — strong=phrase/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback
 
     ChatRequest:
       type: object
@@ -637,6 +641,44 @@ components:
           type: string
           enum: [normal, engineering_strict, safety_critical]
           description: Validation strictness level
+        retrievalMode:
+          type: string
+          enum: [fact_lookup, process_trace, troubleshooting_flow, relationship_trace]
+          description: Controls retrieval strategy — fact_lookup=tight phrase, process_trace=wider window+paths, troubleshooting_flow=symptom-first+graph, relationship_trace=graph-first
+        fromPage:
+          type: integer
+          description: Filter retrieved chunks to pages >= this value
+        toPage:
+          type: integer
+          description: Filter retrieved chunks to pages <= this value
+        minConfidence:
+          type: string
+          enum: [any, medium, high]
+          description: Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15
+
+    MissingOrWeakEvidenceItem:
+      type: object
+      required: [claimOrQuestionPart, issue]
+      properties:
+        claimOrQuestionPart:
+          type: string
+        issue:
+          type: string
+          enum: [missing, weak, conflicting]
+        explanation:
+          type: string
+
+    ValidationMetadata:
+      type: object
+      required: [validationPassCount, revisedOnce, finalValidationStatus]
+      properties:
+        validationPassCount:
+          type: integer
+        revisedOnce:
+          type: boolean
+        finalValidationStatus:
+          type: string
+          enum: [passed, passed_with_warnings, failed]
 
     AgentChatResponse:
       type: object
@@ -668,6 +710,13 @@ components:
           $ref: "#/components/schemas/EvidenceSummary"
         validationSummary:
           $ref: "#/components/schemas/ValidationSummary"
+        missingOrWeakEvidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/MissingOrWeakEvidenceItem"
+          description: Flat list of missing or weak evidence items derived from validation
+        validationMetadata:
+          $ref: "#/components/schemas/ValidationMetadata"
 
     EvidenceSummary:
       type: object
@@ -688,7 +737,7 @@ components:
 
     ValidationSummary:
       type: object
-      required: [status, presentItems, missingItems, weakItems, unsupportedClaims, suggestedGuidance]
+      required: [status, presentItems, missingItems, weakItems, unsupportedClaims, suggestedGuidance, citationIssues, sequenceIssues]
       properties:
         status:
           type: string
@@ -713,3 +762,13 @@ components:
           type: array
           items:
             type: string
+        citationIssues:
+          type: array
+          items:
+            type: string
+          description: Citations that do not actually support the claims they are attached to
+        sequenceIssues:
+          type: array
+          items:
+            type: string
+          description: Steps or events presented out of order compared to the evidence
