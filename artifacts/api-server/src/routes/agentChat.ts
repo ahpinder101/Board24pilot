@@ -1439,22 +1439,57 @@ Please answer based on the above information.`;
     );
 
     // ── 7. Domain Specialist validation ──────────────────────────────────────
-    const specialistResult = await runDomainSpecialist({
-      question: trimmedQuestion,
-      draftAnswer,
-      ragContext: specialistContext,
-      graphContext,
-      domain: technicalDomain,
-      strictness,
-      evidence: evidenceSummary,
-      quote: quoteRaw,
-    });
+    // Gate: when the scratchpad assessed strong evidence with no uncovered aspects
+    // AND strictness is normal, the answer is well-grounded. The specialist would
+    // be checking against the same evidence and finding nothing new — skip it and
+    // emit a synthetic pass. For engineering_strict or safety_critical, always run.
+    const skipSpecialist =
+      scratchpad.evidenceQuality === "strong" &&
+      scratchpad.uncoveredAspects.length === 0 &&
+      strictness === "normal";
+
+    let specialistResult: Awaited<ReturnType<typeof runDomainSpecialist>>;
+
+    if (skipSpecialist) {
+      req.log.info(
+        { evidenceQuality: scratchpad.evidenceQuality, strictness },
+        "agent-chat: specialist skipped — strong evidence, no gaps, normal strictness"
+      );
+      specialistResult = {
+        validationStatus: "pass",
+        confidence: "high",
+        answerability: "answerable",
+        validationSummary: {
+          status: "pass",
+          presentItems: scratchpad.coveredAspects,
+          missingItems: [],
+          weakItems: [],
+          unsupportedClaims: [],
+          conflictingClaims: [],
+          suggestedGuidance: [],
+          citationIssues: [],
+          sequenceIssues: [],
+        },
+      };
+    } else {
+      specialistResult = await runDomainSpecialist({
+        question: trimmedQuestion,
+        draftAnswer,
+        ragContext: specialistContext,
+        graphContext,
+        domain: technicalDomain,
+        strictness,
+        evidence: evidenceSummary,
+        quote: quoteRaw,
+      });
+    }
 
     req.log.info(
       {
         validationStatus: specialistResult.validationStatus,
         confidence: specialistResult.confidence,
         answerability: specialistResult.answerability,
+        specialistSkipped: skipSpecialist,
       },
       "agent-chat: specialist result"
     );
@@ -1471,26 +1506,40 @@ Please answer based on the above information.`;
       finalAnswer = specialistResult.revisedAnswer
         .replace(/\*\*([^*]+)\*\*/g, "$1")
         .trim();
-      req.log.info("agent-chat: using specialist-revised answer — running second validation pass");
 
-      const secondPassResult = await runDomainSpecialist({
-        question: trimmedQuestion,
-        draftAnswer: finalAnswer,
-        ragContext,
-        graphContext,
-        domain: technicalDomain,
-        strictness,
-        evidence: evidenceSummary,
-        quote: quoteRaw,
-      });
-      validationPassCount = 2;
-      finalSpecialistResult = secondPassResult;
-      req.log.info({ secondPassStatus: secondPassResult.validationStatus }, "agent-chat: second validation pass complete");
+      // Gate: skip second validation pass when scratchpad assessed strong evidence.
+      // A "revise" on strong-evidence answers is almost always a wording improvement,
+      // not a factual correction — no need to pay for another specialist call to confirm.
+      const skipSecondPass =
+        scratchpad.evidenceQuality === "strong" && strictness === "normal";
 
-      if (secondPassResult.validationStatus === "fail" || secondPassResult.answerability === "not_answerable") {
-        finalAnswer = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, secondPassResult.validationSummary);
-        isGuided = true;
-        req.log.info("agent-chat: second pass failed — using guided no-answer");
+      if (skipSecondPass) {
+        req.log.info(
+          { evidenceQuality: scratchpad.evidenceQuality },
+          "agent-chat: second validation pass skipped — strong evidence"
+        );
+        validationPassCount = 1;
+      } else {
+        req.log.info("agent-chat: using specialist-revised answer — running second validation pass");
+        const secondPassResult = await runDomainSpecialist({
+          question: trimmedQuestion,
+          draftAnswer: finalAnswer,
+          ragContext: specialistContext,
+          graphContext,
+          domain: technicalDomain,
+          strictness,
+          evidence: evidenceSummary,
+          quote: quoteRaw,
+        });
+        validationPassCount = 2;
+        finalSpecialistResult = secondPassResult;
+        req.log.info({ secondPassStatus: secondPassResult.validationStatus }, "agent-chat: second validation pass complete");
+
+        if (secondPassResult.validationStatus === "fail" || secondPassResult.answerability === "not_answerable") {
+          finalAnswer = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, secondPassResult.validationSummary);
+          isGuided = true;
+          req.log.info("agent-chat: second pass failed — using guided no-answer");
+        }
       }
     } else if (
       specialistResult.validationStatus === "fail" ||

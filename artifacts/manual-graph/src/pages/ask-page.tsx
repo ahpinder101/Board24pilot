@@ -617,9 +617,8 @@ export default function AskPage() {
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
   const [isLoading, setIsLoading] = useState(false);
   const [agentMode, setAgentMode] = useState(true);
-  const [domain, setDomain] = useState("auto");
   const [strictness, setStrictness] = useState<"normal" | "engineering_strict" | "safety_critical">("normal");
-  const [retrievalMode, setRetrievalMode] = useState<"fact_lookup" | "process_trace" | "troubleshooting_flow" | "relationship_trace">("fact_lookup");
+  const [retrievalMode, setRetrievalMode] = useState<"fact_lookup" | "process_trace">("fact_lookup");
   const [expandedPanels, setExpandedPanels] = useState<Record<string, { evidence?: boolean; validation?: boolean }>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -756,7 +755,6 @@ export default function AskPage() {
       const body: Record<string, unknown> = { question, sessionId };
       if (imageSnapshot) body.imageDataUrl = imageSnapshot;
       if (agentMode) {
-        body.domain = domain;
         body.strictness = strictness;
         body.retrievalMode = retrievalMode;
       }
@@ -870,31 +868,14 @@ export default function AskPage() {
               <span className="text-[11px] font-medium text-violet-600 shrink-0">Enhanced Analysis</span>
 
               <div className="flex items-center gap-1.5 ml-auto">
-                <label className="text-[11px] text-gray-500">Domain:</label>
-                <select
-                  value={domain}
-                  onChange={(e) => setDomain(e.target.value)}
-                  className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700"
-                >
-                  <option value="auto">Auto-detect</option>
-                  <option value="electrical_control">Electrical</option>
-                  <option value="hydraulic_schematic">Hydraulic</option>
-                  <option value="pneumatic_schematic">Pneumatic</option>
-                  <option value="mechanical_assembly">Mechanical</option>
-                  <option value="troubleshooting">Troubleshooting</option>
-                  <option value="generic_process">General</option>
-                </select>
-              </div>
-
-              <div className="flex items-center gap-1.5">
-                <label className="text-[11px] text-gray-500">Strictness:</label>
+                <label className="text-[11px] text-gray-500">Validation:</label>
                 <select
                   value={strictness}
                   onChange={(e) => setStrictness(e.target.value as typeof strictness)}
                   className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700"
                 >
-                  <option value="normal">Normal</option>
-                  <option value="engineering_strict">Engineering Strict</option>
+                  <option value="normal">Standard</option>
+                  <option value="engineering_strict">Thorough</option>
                   <option value="safety_critical">Safety Critical</option>
                 </select>
               </div>
@@ -906,10 +887,8 @@ export default function AskPage() {
                   onChange={(e) => setRetrievalMode(e.target.value as typeof retrievalMode)}
                   className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700"
                 >
-                  <option value="fact_lookup">Fact lookup</option>
-                  <option value="process_trace">Process trace</option>
-                  <option value="troubleshooting_flow">Troubleshooting</option>
-                  <option value="relationship_trace">Relationship trace</option>
+                  <option value="fact_lookup">Quick Answer</option>
+                  <option value="process_trace">Procedure / Step-by-Step</option>
                 </select>
               </div>
 
@@ -1109,12 +1088,12 @@ export default function AskPage() {
                         onToggle={() => togglePanel(msg.id, "evidence")}
                       />
                     )}
-                    {!msg.pending && msg.role === "assistant" && msg.missingOrWeakEvidence && msg.missingOrWeakEvidence.filter(i => i.issue !== "gap").length > 0 && (
+                    {!msg.pending && msg.role === "assistant" && msg.missingOrWeakEvidence && msg.missingOrWeakEvidence.length > 0 && (
                       <div className="rounded-lg border border-yellow-200 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 flex items-start gap-1.5">
                         <AlertTriangle className="w-3.5 h-3.5 text-yellow-500 mt-0.5 shrink-0" />
                         <div>
                           <span className="font-medium">Partial evidence: </span>
-                          {msg.missingOrWeakEvidence.filter(i => i.issue !== "gap").slice(0, 2).map((item, i) => (
+                          {msg.missingOrWeakEvidence.slice(0, 2).map((item, i) => (
                             <span key={i}>
                               {i > 0 && " · "}
                               <span className="italic">{item.claimOrQuestionPart}</span>
@@ -1122,8 +1101,8 @@ export default function AskPage() {
                               <span className="text-yellow-600">({item.issue})</span>
                             </span>
                           ))}
-                          {msg.missingOrWeakEvidence.filter(i => i.issue !== "gap").length > 2 && (
-                            <span className="text-yellow-600"> +{msg.missingOrWeakEvidence.filter(i => i.issue !== "gap").length - 2} more</span>
+                          {msg.missingOrWeakEvidence.length > 2 && (
+                            <span className="text-yellow-600"> +{msg.missingOrWeakEvidence.length - 2} more</span>
                           )}
                         </div>
                       </div>
