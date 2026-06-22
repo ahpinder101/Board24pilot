@@ -2,3 +2,7 @@ docling>=2.0.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
+# Force headless OpenCV — the GUI variant (opencv-python) needs libxcb which
+# is absent in the Replit/NixOS container. Pinning headless here overrides the
+# transitive dependency that docling-ibm-models would otherwise pull in.
+opencv-python-headless>=4.0.0

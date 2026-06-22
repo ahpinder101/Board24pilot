@@ -3,6 +3,13 @@ name: Docling FastAPI sidecar
 description: Architecture decisions and gotchas for the Docling PDF extraction sidecar service.
 ---
 
+## opencv-python: must use headless variant
+The Replit/NixOS container lacks `libxcb.so.1`. Docling's image-processing chain pulls in `opencv-python` (the GUI build) which fails at conversion time with `libxcb.so.1: cannot open shared object file`.
+
+**Fix:** Pin `opencv-python-headless>=4.0.0` in `requirements.txt` — this overrides the transitive dep. After adding the pin, install with `python3 -m pip install --force-reinstall --no-deps opencv-python-headless` (use `python3 -m pip`, NOT `pip3` or `.pythonlibs/bin/pip` — those paths may not exist). The headless build requires no X11 libs and works correctly.
+
+Note: `installLanguagePackages()` in code_execution only writes dist-info metadata, not the actual `.so` files — always verify with `python3 -c "import cv2"` after using it.
+
 ## Service location
 - `artifacts/docling-service/main.py` — FastAPI app, port 8000
 - Workflow: `artifacts/docling-service: Docling PDF Service` (created via configureWorkflow, persisted)
