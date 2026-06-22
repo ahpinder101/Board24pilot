@@ -42,6 +42,10 @@ export const manualPagesTable = pgTable("manual_pages", {
   // page 16 of a manual whose first 9 pages are cover/TOC). Populated by Docling extraction;
   // NULL for manuals processed before Docling was integrated.
   printedPageNumber: text("printed_page_number"),
+  /** Number of picture/diagram elements on this page (from Docling). Null for pdf-parse fallback. */
+  pictureCount: integer("picture_count").default(0),
+  /** Pipe-separated captions of picture elements on this page (from Docling), if any. */
+  pictureCaptions: text("picture_captions"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

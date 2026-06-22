@@ -407,6 +407,103 @@ export async function extractPdfText(pdfBuffer: Buffer): Promise<PdfContent> {
   };
 }
 
+// ─── Element-aware section-boundary chunker ──────────────────────────────────
+
+/**
+ * A text chunk produced from Docling elements, carrying element-type metadata
+ * and the section breadcrumb path that identifies where it sits in the document.
+ */
+export interface TypedChunk {
+  /** Flattened text content. */
+  content: string;
+  /** Dominant Docling element type: "text" | "list_item" | "table" | "section_header" | "mixed". */
+  elementType: string;
+  /** Breadcrumb of section headers containing this chunk, e.g. "2. INSTALLATION > 2-3. Lubrication". Empty string if not inside any section. */
+  sectionPath: string;
+}
+
+/**
+ * Converts Docling element metadata into typed, section-boundary chunks.
+ *
+ * Strategy:
+ *   - section_header  → flush buffer, update section breadcrumb, seed next chunk
+ *                        with the header text so context is always present.
+ *                        CAUTION / WARNING / NOTE / IMPORTANT are treated as
+ *                        level-2 to nest under the current section rather than
+ *                        replacing it.
+ *   - table           → standalone chunk using markdown (exact column layout).
+ *   - picture / page_header / page_footer → skipped (no RAG text value).
+ *   - list_item / text / other → accumulated; dominant type decides chunk type.
+ *
+ * Chunks are capped at 1 500 chars, same as chunkPageSemantically.
+ */
+export function chunkFromElements(elements: DoclingElement[]): TypedChunk[] {
+  const MAX = 1500;
+  const MODAL_RE = /^(caution|warning|note|important|notice|danger)$/i;
+  const results: TypedChunk[] = [];
+
+  const sectionStack: string[] = [];
+  let bufLines: string[] = [];
+  let bufType = "text";
+  let listItems = 0;
+  let bufPath = "";
+
+  const getSectionPath = () => sectionStack.join(" > ");
+
+  function flushBuffer(): void {
+    if (bufLines.length === 0) return;
+    const text = bufLines.join("\n").trim();
+    const dominant = listItems > 0 && listItems * 2 >= bufLines.length ? "list_item" : bufType;
+    const path = bufPath;
+    bufLines = []; listItems = 0; bufType = "text";
+    if (text.length < 15) return;
+    if (text.length <= MAX) { results.push({ content: text, elementType: dominant, sectionPath: path }); return; }
+    let cur = "";
+    for (const line of text.split("\n")) {
+      const next = cur ? `${cur}\n${line}` : line;
+      if (next.length > MAX && cur) {
+        if (cur.trim().length >= 15) results.push({ content: cur.trim(), elementType: dominant, sectionPath: path });
+        cur = line;
+      } else { cur = next; }
+    }
+    if (cur.trim().length >= 15) results.push({ content: cur.trim(), elementType: dominant, sectionPath: path });
+  }
+
+  for (const el of elements) {
+    const type = el.type ?? "text";
+    const text = (el.text ?? "").trim();
+
+    if (type === "page_header" || type === "page_footer" || type === "picture") continue;
+
+    if (type === "section_header") {
+      flushBuffer();
+      const level = MODAL_RE.test(text) ? 2 : (el.level ?? 1);
+      while (sectionStack.length >= level) sectionStack.pop();
+      if (text) sectionStack.push(text);
+      bufPath = getSectionPath();
+      if (text) { bufLines = [text]; bufType = "section_header"; }
+      continue;
+    }
+
+    if (type === "table") {
+      flushBuffer();
+      const tableContent = el.markdown?.trim() || text;
+      if (tableContent.length >= 15) results.push({ content: tableContent, elementType: "table", sectionPath: getSectionPath() });
+      continue;
+    }
+
+    if (!text) continue;
+    if (type === "list_item") listItems++;
+    if (bufType === "section_header") bufType = type;
+    bufLines.push(text);
+
+    if (bufLines.join("\n").length > MAX * 0.85 && bufLines.length > 1) flushBuffer();
+  }
+
+  flushBuffer();
+  return results;
+}
+
 // ─── Semantic page chunker ────────────────────────────────────────────────────
 //
 // WHY NOT character-count or paragraph-break splitting:

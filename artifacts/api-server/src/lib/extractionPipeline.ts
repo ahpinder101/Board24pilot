@@ -26,7 +26,7 @@ import {
   type InsertRelationship,
 } from "@workspace/db";
 import { eq, and, count, sql, isNotNull, gte, lte } from "drizzle-orm";
-import { extractPdfText, extractWithDocling, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, type PdfContent, type DoclingElement } from "./pdfExtractor.js";
+import { extractPdfText, extractWithDocling, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, chunkFromElements, type PdfContent, type DoclingElement, type TypedChunk } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
 
@@ -856,6 +856,9 @@ async function pass7EmbedChunks(
       ? buildTextFromElements(page.elements)
       : (page.text ?? "");
     let enriched = false;
+    // useElementChunker is cleared by any path that overrides textToChunk with
+    // post-processed text (vision, tabular restructure, stored description).
+    let useElementChunker = page.elements != null && page.elements.length > 0;
 
     // Diagram gate: runs on pages that have embedded images (Pass 2 flag) OR
     // pages where Docling found picture elements.
@@ -873,6 +876,7 @@ async function pass7EmbedChunks(
           ? `${visionText}\n\n${rawOcr}`
           : visionText;
         enriched = true;
+        useElementChunker = false; // vision text has no element structure
         diagramPages++;
         logger.info(
           { manualId, pageNumber: page.pageNumber },
@@ -900,6 +904,7 @@ async function pass7EmbedChunks(
       const storedDescription = storedRows[0]?.description?.trim() ?? "";
       if (storedDescription.length >= 20) {
         textToChunk = storedDescription;
+        useElementChunker = false; // using stored description text, not live elements
         logger.info(
           { manualId, pageNumber: page.pageNumber },
           "Pass 7: using stored description as fallback for short-text page"
@@ -913,6 +918,7 @@ async function pass7EmbedChunks(
       // unchanged (isTabularOcrPage returns false for them).
       textToChunk = await restructureTabularContent(page.text);
       enriched = true;
+      useElementChunker = false; // restructured text has no element structure
       restructuredPages++;
       logger.info(
         { manualId, pageNumber: page.pageNumber },
@@ -942,25 +948,73 @@ async function pass7EmbedChunks(
       }
     }
 
-    const semanticChunks = chunkPageSemantically(textToChunk);
-
-    for (let ci = 0; ci < semanticChunks.length; ci++) {
-      const content = sanitizeText(semanticChunks[ci]!.trim());
-      if (content.length < 15) continue;
-
+    // ── Picture metadata ───────────────────────────────────────────────────
+    // Persist picture count and any captions from Docling elements onto the
+    // manual_pages row.  Done in Pass 7 (not Pass 2) so re-extractions update it.
+    const pictureEls = (page.elements ?? []).filter((e) => e.type === "picture");
+    if (pictureEls.length > 0) {
+      const captions = pictureEls.map((e) => e.caption).filter((c): c is string => !!c);
       try {
-        await db.insert(chunksTable).values({
-          manualId,
-          pageNumber: page.pageNumber,
-          chunkIndex: ci,
-          content,
-        });
-        totalChunks++;
+        await db.update(manualPagesTable).set({
+          pictureCount: pictureEls.length,
+          ...(captions.length > 0 ? { pictureCaptions: captions.join(" | ") } : {}),
+        }).where(and(
+          eq(manualPagesTable.manualId, manualId),
+          eq(manualPagesTable.pageNumber, page.pageNumber)
+        ));
       } catch (err) {
-        logger.warn(
-          { err, manualId, pageNumber: page.pageNumber, chunkIndex: ci },
-          "Chunk insert failed"
-        );
+        logger.warn({ err, manualId, pageNumber: page.pageNumber }, "Pass 7: picture metadata update failed");
+      }
+    }
+
+    // ── Chunk generation ───────────────────────────────────────────────────
+    // useElementChunker → Docling elements available + no text-override applied.
+    // Produces section-boundary typed chunks (element_type + section_path stored).
+    // Otherwise: semantic text chunker (element_type="text", section_path=null).
+    if (useElementChunker) {
+      const typedChunks = chunkFromElements(page.elements!);
+      for (let ci = 0; ci < typedChunks.length; ci++) {
+        const tc = typedChunks[ci]!;
+        const content = sanitizeText(tc.content.trim());
+        if (content.length < 15) continue;
+        try {
+          await db.insert(chunksTable).values({
+            manualId,
+            pageNumber: page.pageNumber,
+            chunkIndex: ci,
+            content,
+            elementType: tc.elementType,
+            sectionPath: tc.sectionPath || null,
+          });
+          totalChunks++;
+        } catch (err) {
+          logger.warn(
+            { err, manualId, pageNumber: page.pageNumber, chunkIndex: ci },
+            "Chunk insert (typed) failed"
+          );
+        }
+      }
+    } else {
+      const semanticChunks = chunkPageSemantically(textToChunk);
+      for (let ci = 0; ci < semanticChunks.length; ci++) {
+        const content = sanitizeText(semanticChunks[ci]!.trim());
+        if (content.length < 15) continue;
+        try {
+          await db.insert(chunksTable).values({
+            manualId,
+            pageNumber: page.pageNumber,
+            chunkIndex: ci,
+            content,
+            elementType: "text",
+            sectionPath: null,
+          });
+          totalChunks++;
+        } catch (err) {
+          logger.warn(
+            { err, manualId, pageNumber: page.pageNumber, chunkIndex: ci },
+            "Chunk insert failed"
+          );
+        }
       }
     }
   }

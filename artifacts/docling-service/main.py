@@ -103,6 +103,17 @@ def _extract_printed_page_number(hf_texts: list[str]) -> Optional[str]:
     return None
 
 
+def _has_multiple_page_candidates(text: str) -> bool:
+    """
+    Returns True when a text string contains ≥ 2 standalone numbers — a
+    signal that the line is a combined page-header (model code + section
+    number + printed page number) rather than a plain section title like
+    "2. INSTALLATION" which has only one number.
+    """
+    nums = re.findall(r"(?<![A-Za-z0-9\-])(\d{1,4})(?![A-Za-z0-9\-])", text)
+    return len(nums) >= 2
+
+
 # ── Routes ──────────────────────────────────────────────────────────────────
 
 @app.get(f"{BASE_PATH}/healthz")
@@ -186,7 +197,24 @@ async def extract_pdf(file: UploadFile = File(...)):
                 pd["text"] = (pd["text"] + "\n" + txt) if pd["text"] else txt
 
         for pd in pages_map.values():
-            pd["printedPageNumber"] = _extract_printed_page_number(pd.pop("_hf", []))
+            hf_texts = pd.pop("_hf", [])
+            printed = _extract_printed_page_number(hf_texts)
+
+            # Secondary scan: Docling sometimes classifies combined page-header lines
+            # (e.g. "S-7220C 2. INSTALLATION 7 2-3. Lubrication") as section_header
+            # elements instead of page_header/page_footer. Detect them by requiring
+            # ≥ 2 standalone numbers in the text (plain section titles like
+            # "2. INSTALLATION" have only one number and are skipped).
+            if printed is None:
+                for el in pd.get("elements", [])[:3]:
+                    if el.get("type") == "section_header" and el.get("text"):
+                        if _has_multiple_page_candidates(el["text"]):
+                            candidate = _extract_printed_page_number([el["text"]])
+                            if candidate:
+                                printed = candidate
+                                break
+
+            pd["printedPageNumber"] = printed
 
         pages = sorted(pages_map.values(), key=lambda p: p["pageNumber"])
 
