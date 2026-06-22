@@ -5,7 +5,7 @@ import {
   manualsTable,
   type ChatCitation,
 } from "@workspace/db";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai } from "../lib/openai.js";
 import { sql } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import {

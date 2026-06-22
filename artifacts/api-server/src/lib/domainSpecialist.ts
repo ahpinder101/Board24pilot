@@ -1,4 +1,4 @@
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai } from "./openai.js";
 
 export type TechnicalDomain =
   | "electrical_control"

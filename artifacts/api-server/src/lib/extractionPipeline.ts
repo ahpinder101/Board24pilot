@@ -10,7 +10,7 @@
  * Pass 7: Embedding generation for RAG (chunks → pgvector)
  */
 
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai } from "./openai.js";
 import { db } from "@workspace/db";
 import {
   manualsTable,

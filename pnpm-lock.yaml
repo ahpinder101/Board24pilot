@@ -208,6 +208,9 @@ importers:
       multer:
         specifier: ^2.0.1
         version: 2.2.0
+      openai:
+        specifier: ^6.44.0
+        version: 6.44.0(zod@3.25.76)
       pdf-parse:
         specifier: ^1.1.1
         version: 1.1.4
@@ -3256,6 +3259,17 @@ packages:
 
   openai@6.42.0:
     resolution: {integrity: sha512-1WFEt/uXMXOLhYRNkgJWo08Y2YNvNwpVU72K7ibrWgWpNOXd4VojXLbe6SQ4bLiUQ3Y8jz4IiyVkylJCL1DtZg==}
+    peerDependencies:
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      ws:
+        optional: true
+      zod:
+        optional: true
+
+  openai@6.44.0:
+    resolution: {integrity: sha512-09/gH+8jH0RgUwsgWHAaxsKGRT5zVZ95IaJUnqAWj6XejIBmnFRwq2WUIF37VtDEsmGrtPmvCs5+yBSeZGWvkA==}
     peerDependencies:
       ws: ^8.18.0
       zod: ^3.25 || ^4.0
@@ -6580,6 +6594,10 @@ snapshots:
       wrappy: 1.0.2
 
   openai@6.42.0(zod@3.25.76):
+    optionalDependencies:
+      zod: 3.25.76
+
+  openai@6.44.0(zod@3.25.76):
     optionalDependencies:
       zod: 3.25.76
 
