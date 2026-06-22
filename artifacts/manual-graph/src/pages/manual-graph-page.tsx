@@ -3,12 +3,9 @@ import {
   useGetManual,
   useGetManualGraph,
   useGetManualStats,
-  useGetExtractionPlan,
   getGetManualQueryKey,
   getGetManualGraphQueryKey,
   getGetManualStatsQueryKey,
-  getGetExtractionPlanQueryKey,
-  type ExtractionTier,
 } from "@workspace/api-client-react";
 import { GraphView } from "@/components/graph-view";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,78 +14,68 @@ import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
 import {
   Clock, CheckCircle2, AlertTriangle, FileText, Database, Network,
-  Layers, Play, ChevronDown, ChevronUp, Info, RefreshCw, WifiOff,
-  Activity,
+  Layers, Play, RefreshCw, WifiOff, Activity, BookOpen, AlignJustify,
 } from "lucide-react";
 import { useEffect, useState, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@clerk/react";
 
-// ─── Cost model ────────────────────────────────────────────────────────────────
-// Dollar amounts use gpt-4o public rates as a reference baseline.
-// gpt-5.4 is Replit's internal model alias — token counts from the API are exact,
-// the dollar rate is the only uncertain part.
-const INPUT_PRICE  = 2.50  / 1_000_000;   // $ per input token  (gpt-4o reference)
-const OUTPUT_PRICE = 10.00 / 1_000_000;   // $ per output token (gpt-4o reference)
+// ─── Scope selector — user picks which pages to ingest ─────────────────────
 
-function tierCost(tier: ExtractionTier) {
-  const low     = tier.totalInputTokens * INPUT_PRICE + tier.outputTokensLow      * OUTPUT_PRICE;
-  const typical = tier.totalInputTokens * INPUT_PRICE + tier.outputTokensTypical  * OUTPUT_PRICE;
-  const high    = tier.totalInputTokens * INPUT_PRICE + tier.outputTokensHigh     * OUTPUT_PRICE;
-  return { low, typical, high };
-}
+type ScopeMode = "whole" | "range" | "single";
 
-type TierId = "quick" | "recommended" | "full";
-
-interface TierMeta { id: TierId; label: string; emoji: string; tagline: string; outcomes: string[]; warnLarge?: boolean }
-
-const TIER_META: TierMeta[] = [
-  {
-    id: "quick",
-    label: "Quick Scan",
-    emoji: "⚡",
-    tagline: "First section only",
-    outcomes: ["Top-level machines and main systems", "Primary connections between systems", "Fast — good for a first look"],
-  },
-  {
-    id: "recommended",
-    label: "Recommended",
-    emoji: "★",
-    tagline: "Balanced coverage",
-    outcomes: ["All major components and subsystems", "Most processes and their sequences", "Best balance of cost and completeness"],
-  },
-  {
-    id: "full",
-    label: "Full Analysis",
-    emoji: "🔬",
-    tagline: "Every page, every entity",
-    outcomes: ["Complete part and sensor inventory", "All procedures and their dependencies", "Maximum detail"],
-    warnLarge: true,
-  },
-];
-
-// ─── Pending card — manual uploaded but not yet processed ───────────────────
-
-function PendingCard({ manualId, onStarted }: { manualId: number; onStarted: () => void }) {
+function ScopeSelector({
+  manualId,
+  totalPages,
+  onStarted,
+}: {
+  manualId: number;
+  totalPages: number;
+  onStarted: () => void;
+}) {
   const { getToken } = useAuth();
+  const [mode, setMode] = useState<ScopeMode>("whole");
+  const [singlePage, setSinglePage] = useState(1);
+  const [rangeStart, setRangeStart] = useState(1);
+  const [rangeEnd, setRangeEnd] = useState(totalPages || 1);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState("");
+
+  // Keep rangeEnd in sync if totalPages resolves after mount
+  useEffect(() => {
+    if (totalPages > 0 && rangeEnd === 1) setRangeEnd(totalPages);
+  }, [totalPages, rangeEnd]);
+
+  function pageCount(): number {
+    if (mode === "whole") return totalPages;
+    if (mode === "single") return 1;
+    return Math.max(1, rangeEnd - rangeStart + 1);
+  }
 
   async function handleStart() {
     setIsStarting(true);
     setError("");
     try {
       const token = await getToken();
+      const body: Record<string, number> = {};
+      if (mode === "single") {
+        body.startPage = singlePage;
+        body.endPage = singlePage;
+      } else if (mode === "range") {
+        body.startPage = rangeStart;
+        body.endPage = rangeEnd;
+      }
       const res = await fetch(`/api/manuals/${manualId}/process`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+        const data = await res.json().catch(() => ({}));
+        throw new Error((data as { error?: string }).error ?? `HTTP ${res.status}`);
       }
       onStarted();
     } catch (err) {
@@ -97,28 +84,123 @@ function PendingCard({ manualId, onStarted }: { manualId: number; onStarted: () 
     }
   }
 
+  const scopeOptions: { id: ScopeMode; label: string; icon: React.ReactNode; tagline: string }[] = [
+    { id: "whole",  label: "Whole document", icon: <BookOpen className="w-4 h-4" />,       tagline: "All pages" },
+    { id: "range",  label: "Page range",     icon: <AlignJustify className="w-4 h-4" />,   tagline: "From … to …" },
+    { id: "single", label: "Single page",    icon: <FileText className="w-4 h-4" />,        tagline: "One page" },
+  ];
+
   return (
     <Card className="h-full flex items-center justify-center bg-card/50 border-dashed">
-      <CardContent className="flex flex-col items-center justify-center p-10 max-w-md w-full text-center space-y-5">
+      <CardContent className="flex flex-col items-center p-10 max-w-md w-full text-center space-y-6">
+
         <div className="w-14 h-14 rounded-full bg-primary/10 flex items-center justify-center">
           <Play className="w-7 h-7 text-primary" />
         </div>
+
         <div>
-          <h3 className="text-lg font-semibold text-foreground">Ready to process</h3>
+          <h3 className="text-lg font-semibold text-foreground">Choose what to process</h3>
           <p className="text-sm text-muted-foreground mt-1">
-            The PDF is uploaded. Start processing to extract text, images, and build the knowledge graph.
+            All 7 extraction passes will run automatically on the pages you select.
           </p>
         </div>
+
+        {/* Scope selector pills */}
+        <div className="flex gap-2 w-full">
+          {scopeOptions.map((opt) => (
+            <button
+              key={opt.id}
+              onClick={() => setMode(opt.id)}
+              className={[
+                "flex-1 flex flex-col items-center gap-1.5 rounded-xl border-2 py-3 px-2 text-xs font-medium transition-all",
+                mode === opt.id
+                  ? "border-slate-800 bg-slate-800 text-white shadow-md"
+                  : "border-border bg-card text-muted-foreground hover:border-slate-400 hover:text-foreground",
+              ].join(" ")}
+            >
+              {opt.icon}
+              <span className="font-semibold">{opt.label}</span>
+              <span className={mode === opt.id ? "text-white/60" : "text-muted-foreground/70"}>{opt.tagline}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Page inputs */}
+        {mode === "single" && (
+          <div className="w-full space-y-1.5">
+            <label className="text-xs font-medium text-muted-foreground text-left block">Page number</label>
+            <input
+              type="number"
+              min={1}
+              max={totalPages || undefined}
+              value={singlePage}
+              onChange={(e) => setSinglePage(Math.max(1, parseInt(e.target.value) || 1))}
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center focus:outline-none focus:ring-2 focus:ring-slate-400"
+            />
+            {totalPages > 0 && (
+              <p className="text-xs text-muted-foreground">Document has {totalPages} pages</p>
+            )}
+          </div>
+        )}
+
+        {mode === "range" && (
+          <div className="w-full space-y-3">
+            <div className="flex gap-3 items-end">
+              <div className="flex-1 space-y-1">
+                <label className="text-xs font-medium text-muted-foreground block text-left">From page</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={totalPages || undefined}
+                  value={rangeStart}
+                  onChange={(e) => setRangeStart(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center focus:outline-none focus:ring-2 focus:ring-slate-400"
+                />
+              </div>
+              <span className="text-muted-foreground pb-2">–</span>
+              <div className="flex-1 space-y-1">
+                <label className="text-xs font-medium text-muted-foreground block text-left">To page</label>
+                <input
+                  type="number"
+                  min={rangeStart}
+                  max={totalPages || undefined}
+                  value={rangeEnd}
+                  onChange={(e) => setRangeEnd(Math.max(rangeStart, parseInt(e.target.value) || rangeStart))}
+                  className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center focus:outline-none focus:ring-2 focus:ring-slate-400"
+                />
+              </div>
+            </div>
+            <div className="flex justify-between items-center">
+              <span className="text-xs text-muted-foreground">{pageCount()} pages selected</span>
+              {totalPages > 0 && (
+                <button
+                  onClick={() => { setRangeStart(1); setRangeEnd(totalPages); }}
+                  className="text-xs text-blue-600 hover:text-blue-800 underline underline-offset-2"
+                >
+                  Select all {totalPages}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {mode === "whole" && totalPages > 0 && (
+          <p className="text-sm text-muted-foreground">
+            Processing all <span className="font-semibold text-foreground">{totalPages}</span> pages.
+          </p>
+        )}
+
         {error && (
           <div className="flex items-center gap-2 text-red-600 text-xs bg-red-50 border border-red-200 rounded-lg px-3 py-2 w-full text-left">
             <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
             {error}
           </div>
         )}
+
         <button
           onClick={handleStart}
           disabled={isStarting}
-          className="flex items-center gap-2 px-6 py-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm transition-all shadow disabled:opacity-50"
+          className="w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-white font-semibold text-sm transition-all shadow disabled:opacity-50"
         >
           {isStarting
             ? <><RefreshCw className="w-4 h-4 animate-spin" />Starting…</>
@@ -179,13 +261,11 @@ function ProcessingTicker({
   const [isResetting, setIsResetting] = useState(false);
   const lastUpdatedRef = useRef(new Date(manual.updatedAt).getTime());
 
-  // Update lastUpdatedRef when server sends a fresh updatedAt
   useEffect(() => {
     lastUpdatedRef.current = new Date(manual.updatedAt).getTime();
     setSecondsAgo(0);
   }, [manual.updatedAt]);
 
-  // Real-time counter — increments every second independently of polling
   useEffect(() => {
     const timer = setInterval(() => {
       const elapsed = Math.floor((Date.now() - lastUpdatedRef.current) / 1000);
@@ -214,11 +294,16 @@ function ProcessingTicker({
   const pass = manual.processingPass ?? 0;
   const activity = manual.currentActivity ?? "Initialising...";
 
+  // Progress maps pass numbers to a 0-100 value across all 9 logical steps:
+  // 1 (structure), 2 (pages), 3 (vision desc), chunking, 4 (entities),
+  // 5 (relationships), 5b (paths), 6 (hierarchy), done.
+  const PASS_PROGRESS: Record<number, number> = { 0: 5, 1: 15, 2: 28, 3: 40, 4: 58, 5: 72, 6: 86 };
+  const progressPct = PASS_PROGRESS[pass] ?? (pass >= 7 ? 100 : 5);
+
   return (
     <Card className="h-full flex items-center justify-center bg-card/50 border-dashed">
       <CardContent className="flex flex-col items-center justify-center p-10 max-w-lg w-full text-center space-y-5">
 
-        {/* Live pulse indicator */}
         <div className="relative flex items-center justify-center">
           {isStalled ? (
             <div className="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center">
@@ -240,23 +325,20 @@ function ProcessingTicker({
           )}
         </div>
 
-        {/* Title + pass */}
         <div>
           <h3 className="text-lg font-semibold text-foreground">
             {isStalled ? "Processing appears stalled" : "Processing Manual"}
           </h3>
           <p className="text-sm text-muted-foreground font-mono mt-0.5">
-            Pass {pass} of 7
+            Pass {pass} · all passes run automatically
           </p>
         </div>
 
-        {/* Progress bar */}
         <Progress
-          value={(pass / 7) * 100}
+          value={progressPct}
           className={["h-1.5 w-full", isStalled ? "[&>div]:bg-red-400" : ""].join(" ")}
         />
 
-        {/* Live activity text — this is the real ticker */}
         <div className={[
           "w-full rounded-lg border px-4 py-3 font-mono text-xs text-left leading-relaxed",
           isStalled
@@ -271,7 +353,6 @@ function ProcessingTicker({
           </div>
         </div>
 
-        {/* Heartbeat counter */}
         <div className={[
           "flex items-center gap-2 text-xs font-mono",
           isStalled ? "text-red-500 font-semibold" : isSlow ? "text-amber-600" : "text-muted-foreground",
@@ -284,7 +365,6 @@ function ProcessingTicker({
               : `Last update ${secondsAgo}s ago`}
         </div>
 
-        {/* Reset button — always available when processing, prominent when stalled */}
         <button
           onClick={handleReset}
           disabled={isResetting}
@@ -315,12 +395,6 @@ export default function ManualGraphPage() {
   const manualId = parseInt(id, 10);
   const queryClient = useQueryClient();
 
-  const [selectedTier, setSelectedTier] = useState<TierId>("recommended");
-  const [customPages, setCustomPages] = useState<number>(0);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const [isTriggering, setIsTriggering] = useState(false);
-  const [extractError, setExtractError] = useState("");
-
   const { data: manual, isLoading: isLoadingManual } = useGetManual(manualId, {
     query: {
       enabled: !!manualId,
@@ -329,20 +403,6 @@ export default function ManualGraphPage() {
         query.state.data?.status === "processing" ? 3000 : false,
     }
   });
-
-  const { data: plan, isLoading: isPlanLoading } = useGetExtractionPlan(manualId, {
-    query: {
-      queryKey: getGetExtractionPlanQueryKey(manualId),
-      enabled: !!manualId && manual?.status === "structure_complete",
-    }
-  });
-
-  // Initialise custom page slider from plan data
-  useEffect(() => {
-    if (plan && customPages === 0) {
-      setCustomPages(plan.tiers.recommended.pages);
-    }
-  }, [plan, customPages]);
 
   const { data: graphData, isLoading: isLoadingGraph } = useGetManualGraph(manualId, {
     query: {
@@ -358,52 +418,6 @@ export default function ManualGraphPage() {
     }
   });
 
-  // Active tier data — either from plan or a fallback custom page count
-  const activeTierData: ExtractionTier | null = plan
-    ? showAdvanced
-      ? (() => {
-          // Linearly interpolate between tiers based on custom page count
-          const cp = Math.min(customPages || plan.tiers.recommended.pages, manual?.totalPages ?? customPages);
-          const ratio = cp / (manual?.totalPages || 1);
-          const full = plan.tiers.full;
-          return {
-            pages: cp,
-            entityChunks: Math.max(1, Math.ceil(ratio * full.entityChunks)),
-            relChunks: Math.max(1, Math.ceil(ratio * full.relChunks)),
-            totalInputTokens: Math.round(ratio * full.totalInputTokens),
-            outputTokensLow: Math.round(ratio * full.outputTokensLow),
-            outputTokensTypical: Math.round(ratio * full.outputTokensTypical),
-            outputTokensHigh: Math.round(ratio * full.outputTokensHigh),
-            rationale: `Custom: ${cp.toLocaleString()} pages`,
-          };
-        })()
-      : plan.tiers[selectedTier]
-    : null;
-
-  const activeCost = activeTierData ? tierCost(activeTierData) : null;
-
-  async function handleExtractEntities() {
-    if (!activeTierData) return;
-    setIsTriggering(true);
-    setExtractError("");
-    try {
-      const res = await fetch(`/api/manuals/${manualId}/extract-graph`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ entityChunks: activeTierData.entityChunks, relChunks: activeTierData.relChunks }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-      }
-      queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) });
-    } catch (err) {
-      setExtractError(err instanceof Error ? err.message : "Failed to start extraction");
-    } finally {
-      setIsTriggering(false);
-    }
-  }
-
   if (isLoadingManual) {
     return (
       <div className="h-full flex flex-col space-y-4">
@@ -416,7 +430,13 @@ export default function ManualGraphPage() {
   if (!manual) return <div>Manual not found</div>;
 
   const totalPages = manual.totalPages ?? 0;
-  const customPageCount = Math.min(customPages !== 0 ? customPages : (plan?.tiers.recommended.pages ?? 0), totalPages);
+
+  // Both "pending" and legacy "structure_complete" manuals show the scope selector.
+  const showScopeSelector = manual.status === "pending" || manual.status === "structure_complete";
+
+  function invalidateManual() {
+    queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) });
+  }
 
   return (
     <div className="h-full flex flex-col space-y-4 relative">
@@ -434,8 +454,8 @@ export default function ManualGraphPage() {
               {manual.status === "processing"         && <Clock className="w-3 h-3 mr-1 animate-spin" />}
               {manual.status === "failed"             && <AlertTriangle className="w-3 h-3 mr-1" />}
               {manual.status === "completed"          && <CheckCircle2 className="w-3 h-3 mr-1" />}
-              {manual.status === "structure_complete" && <Layers className="w-3 h-3 mr-1" />}
-              {manual.status === "structure_complete" ? "Ready for extraction" : manual.status}
+              {showScopeSelector                      && <Layers className="w-3 h-3 mr-1" />}
+              {manual.status === "structure_complete" ? "Ready" : manual.status}
             </Badge>
           </div>
           <p className="text-sm text-muted-foreground font-mono flex items-center gap-2 flex-wrap">
@@ -468,9 +488,13 @@ export default function ManualGraphPage() {
 
       <div className="flex-1 min-h-[400px]">
 
-        {/* ── Pending — needs processing triggered ── */}
-        {manual.status === "pending" && (
-          <PendingCard manualId={manualId} onStarted={() => queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) })} />
+        {/* ── Scope selector — pending (new upload) or legacy structure_complete ── */}
+        {showScopeSelector && (
+          <ScopeSelector
+            manualId={manualId}
+            totalPages={totalPages}
+            onStarted={invalidateManual}
+          />
         )}
 
         {/* ── Processing — live ticker ── */}
@@ -478,7 +502,7 @@ export default function ManualGraphPage() {
           <ProcessingTicker
             manual={manual}
             manualId={manualId}
-            onReset={() => queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) })}
+            onReset={invalidateManual}
           />
         )}
 
@@ -497,239 +521,9 @@ export default function ManualGraphPage() {
                   </p>
                 )}
               </div>
-              <FailedResetButton manualId={manualId} onReset={() => queryClient.invalidateQueries({ queryKey: getGetManualQueryKey(manualId) })} />
+              <FailedResetButton manualId={manualId} onReset={invalidateManual} />
             </CardContent>
           </Card>
-        )}
-
-        {/* ── Structure complete — plan picker ── */}
-        {manual.status === "structure_complete" && (
-          <div className="h-full overflow-y-auto">
-            <div className="max-w-2xl mx-auto py-6 px-2 space-y-5">
-
-              {/* Intro */}
-              <div>
-                <h2 className="text-base font-semibold text-foreground mb-1">
-                  Document indexed — now extract the knowledge graph
-                </h2>
-                <p className="text-sm text-muted-foreground">
-                  Search and chat are already working. Choose how deeply to analyse this document for the interactive graph.
-                </p>
-              </div>
-
-              {/* Document stats summary (from real analysis) */}
-              {plan && (
-                <div className="flex items-start gap-2 text-xs bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-blue-800">
-                  <Info className="w-3.5 h-3.5 mt-0.5 shrink-0 text-blue-400" />
-                  <span>
-                    Analysed your manual: <strong>{plan.contentPages.toLocaleString()} content pages</strong>{" "}
-                    · <strong>{plan.totalTextChars.toLocaleString()} chars</strong> of text
-                    · avg <strong>{plan.avgCharsPerPage.toLocaleString()} chars/page</strong> ({plan.densityLabel} content).
-                    Costs below are computed from your actual document.
-                  </span>
-                </div>
-              )}
-
-              {/* Tier cards */}
-              {isPlanLoading && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {[0, 1, 2].map(i => <Skeleton key={i} className="h-52 rounded-xl" />)}
-                </div>
-              )}
-
-              {plan && !showAdvanced && (
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {TIER_META.map((meta) => {
-                    const tier = plan.tiers[meta.id];
-                    const cost = tierCost(tier);
-                    const isSelected = selectedTier === meta.id;
-                    const isRec = meta.id === "recommended";
-                    const isExpensive = meta.id === "full" && tier.pages > 400;
-
-                    return (
-                      <button
-                        key={meta.id}
-                        onClick={() => setSelectedTier(meta.id)}
-                        className={[
-                          "relative text-left rounded-xl border-2 p-4 transition-all",
-                          isSelected
-                            ? "border-slate-800 bg-slate-800 text-white shadow-lg"
-                            : "border-border bg-card hover:border-slate-400 text-foreground",
-                        ].join(" ")}
-                      >
-                        {isRec && (
-                          <span className={[
-                            "absolute -top-2.5 left-3 text-xs font-bold px-2 py-0.5 rounded-full",
-                            isSelected ? "bg-amber-400 text-amber-900" : "bg-amber-100 text-amber-700 border border-amber-200",
-                          ].join(" ")}>
-                            ★ Recommended
-                          </span>
-                        )}
-
-                        <div className="text-2xl mb-2">{meta.emoji}</div>
-                        <div className="font-semibold text-sm mb-0.5">{meta.label}</div>
-                        <div className={["text-xs mb-3", isSelected ? "text-white/70" : "text-muted-foreground"].join(" ")}>
-                          {tier.pages.toLocaleString()} pages · {tier.entityChunks + tier.relChunks + 2} AI calls
-                        </div>
-
-                        <ul className="space-y-1 mb-4">
-                          {meta.outcomes.map((o, i) => (
-                            <li key={i} className={["text-xs flex items-start gap-1.5", isSelected ? "text-white/80" : "text-muted-foreground"].join(" ")}>
-                              <span className="mt-0.5 shrink-0">·</span><span>{o}</span>
-                            </li>
-                          ))}
-                        </ul>
-
-                        {isExpensive && !isSelected && (
-                          <div className="text-xs text-orange-600 mb-2">⚠ High cost for large doc</div>
-                        )}
-
-                        <div className={["border-t pt-2 text-xs font-mono", isSelected ? "border-white/20" : "border-border"].join(" ")}>
-                          <div className={["font-bold text-sm", isSelected ? "text-white" : "text-foreground"].join(" ")}>
-                            ~${cost.typical.toFixed(2)}
-                          </div>
-                          <div className={["text-xs", isSelected ? "text-white/50" : "text-muted-foreground"].join(" ")}>
-                            ${cost.low.toFixed(2)} – ${cost.high.toFixed(2)} range
-                          </div>
-                          <div className={["text-xs mt-1", isSelected ? "text-white/40" : "text-muted-foreground/60"].join(" ")}>
-                            {tier.totalInputTokens.toLocaleString()} input tok
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* Rationale from server */}
-              {plan && !showAdvanced && activeTierData && (
-                <div className="rounded-lg bg-muted/40 border border-border px-4 py-3 text-xs text-muted-foreground leading-relaxed">
-                  {activeTierData.rationale}
-                </div>
-              )}
-
-              {/* Advanced / custom pages */}
-              <div>
-                <button
-                  onClick={() => setShowAdvanced(!showAdvanced)}
-                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showAdvanced ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-                  {showAdvanced ? "Hide advanced settings" : "Advanced: set exact page count"}
-                </button>
-
-                {showAdvanced && plan && (
-                  <div className="mt-3 rounded-xl border border-border bg-card p-5 space-y-4">
-                    <div className="flex justify-between items-center">
-                      <label className="text-sm font-medium text-foreground">Pages to cover</label>
-                      <span className="font-mono text-sm font-bold text-primary">
-                        {Math.min(customPages || plan.tiers.recommended.pages, totalPages).toLocaleString()} / {totalPages.toLocaleString()}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min={Math.min(30, totalPages)}
-                      max={totalPages || 1}
-                      step={10}
-                      value={Math.min(customPages || plan.tiers.recommended.pages, totalPages)}
-                      onChange={(e) => setCustomPages(Number(e.target.value))}
-                      className="w-full accent-slate-700"
-                    />
-                    <div className="flex justify-between text-xs text-muted-foreground">
-                      <span>{plan.tiers.quick.pages} pages (quick)</span>
-                      <button
-                        onClick={() => setCustomPages(plan.tiers.recommended.pages)}
-                        className="text-amber-600 underline underline-offset-2 hover:text-amber-800"
-                      >
-                        ★ recommended: {plan.tiers.recommended.pages}
-                      </button>
-                      <span>{totalPages.toLocaleString()} (full)</span>
-                    </div>
-
-                    {/* Token breakdown — from real numbers */}
-                    {activeTierData && (
-                      <div className="rounded-lg border border-border overflow-hidden text-xs font-mono mt-2">
-                        <div className="grid grid-cols-3 bg-muted/60 px-3 py-1.5 text-muted-foreground font-semibold">
-                          <span>Call type</span>
-                          <span className="text-right">AI calls</span>
-                          <span className="text-right">Input tokens</span>
-                        </div>
-                        <div className="divide-y divide-border">
-                          <div className="grid grid-cols-3 px-3 py-2 bg-background">
-                            <span className="text-muted-foreground">Entity extraction</span>
-                            <span className="text-right">{activeTierData.entityChunks}</span>
-                            <span className="text-right">{(activeTierData.entityChunks * 1826).toLocaleString()}</span>
-                          </div>
-                          <div className="grid grid-cols-3 px-3 py-2 bg-background">
-                            <span className="text-muted-foreground">Rel. extraction</span>
-                            <span className="text-right">{activeTierData.relChunks}</span>
-                            <span className="text-right">{(activeTierData.totalInputTokens - activeTierData.entityChunks * 1826 - 3928).toLocaleString()}</span>
-                          </div>
-                          <div className="grid grid-cols-3 px-3 py-2 bg-background">
-                            <span className="text-muted-foreground">Fixed (Pass 1+6)</span>
-                            <span className="text-right">2</span>
-                            <span className="text-right">3,928</span>
-                          </div>
-                          <div className="grid grid-cols-3 px-3 py-2 bg-muted/30 font-semibold">
-                            <span>Total</span>
-                            <span className="text-right">{activeTierData.entityChunks + activeTierData.relChunks + 2}</span>
-                            <span className="text-right">{activeTierData.totalInputTokens.toLocaleString()}</span>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    <p className="text-xs text-muted-foreground">
-                      Input tokens are exact. Output tokens vary by content density — estimated{" "}
-                      {activeTierData?.outputTokensLow.toLocaleString()}–{activeTierData?.outputTokensHigh.toLocaleString()} total.
-                      Prices use gpt-4o as a reference rate; <code className="bg-muted px-1 rounded">gpt-5.4</code> (Replit's model) may differ.
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* Cost summary + CTA */}
-              {activeTierData && activeCost && (
-                <div className="rounded-xl border-2 border-slate-200 bg-slate-50 p-5 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm font-semibold text-foreground">
-                        {showAdvanced
-                          ? `Custom · ${customPageCount.toLocaleString()} pages`
-                          : `${TIER_META.find(t => t.id === selectedTier)?.label} · ${activeTierData.pages.toLocaleString()} pages`}
-                      </div>
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        {activeTierData.entityChunks + activeTierData.relChunks + 2} AI calls
-                        · {activeTierData.totalInputTokens.toLocaleString()} input tokens
-                        · ~{activeTierData.entityChunks * 20} entities expected
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-xs text-muted-foreground">Estimated cost (gpt-4o rates)</div>
-                      <div className="text-xl font-bold font-mono text-foreground">~${activeCost.typical.toFixed(2)}</div>
-                      <div className="text-xs text-muted-foreground font-mono">${activeCost.low.toFixed(2)} – ${activeCost.high.toFixed(2)}</div>
-                    </div>
-                  </div>
-
-                  {extractError && (
-                    <div className="flex items-center gap-2 text-red-600 text-sm bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                      <AlertTriangle className="w-4 h-4 shrink-0" />
-                      {extractError}
-                    </div>
-                  )}
-
-                  <button
-                    onClick={handleExtractEntities}
-                    disabled={isTriggering || isPlanLoading}
-                    className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-white font-semibold text-sm transition-all active:scale-[0.98] shadow"
-                  >
-                    <Play className="w-4 h-4" />
-                    {isTriggering ? "Starting…" : "Extract Knowledge Graph"}
-                  </button>
-                </div>
-              )}
-
-            </div>
-          </div>
         )}
 
         {/* ── Graph loading ── */}

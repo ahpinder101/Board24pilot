@@ -1611,7 +1611,8 @@ export async function rechunkManual(manualId: number): Promise<{ chunks: number 
 
 export async function runExtractionPipeline(
   manualId: number,
-  pdfBuffer: Buffer
+  pdfBuffer: Buffer,
+  opts?: { startPage?: number; endPage?: number }
 ): Promise<void> {
   try {
     // ── Load existing DB state before changing anything ──────────────────────
@@ -1634,6 +1635,8 @@ export async function runExtractionPipeline(
     const pdfContent = await extractPdfText(pdfBuffer);
 
     // ── Pass 1: Document structure ───────────────────────────────────────────
+    // Pass 1 always analyses the full document for structural context, regardless
+    // of any page-range the user selected.
     let structure: { documentType: string; overview: string; machines: string[]; sections: string[] };
     if (hasStructure && existingManual.structure) {
       // Already done in a previous run — reuse saved structure, skip LLM call.
@@ -1661,6 +1664,21 @@ export async function runExtractionPipeline(
           updatedAt: new Date(),
         })
         .where(eq(manualsTable.id, manualId));
+    }
+
+    // ── Page range filter (applied AFTER Pass 1) ─────────────────────────────
+    // If the user chose a single page or range, narrow pdfContent.pages so that
+    // all subsequent passes (2, 3, Vision OCR, 7, 4, 5, 6) only process those pages.
+    // Pass 1 already ran on the full document so structural context is preserved.
+    if (opts?.startPage !== undefined || opts?.endPage !== undefined) {
+      const rangeStart = opts.startPage ?? 1;
+      const rangeEnd   = opts.endPage ?? pdfContent.totalPages;
+      pdfContent.pages = pdfContent.pages.filter(
+        (p) => p.pageNumber >= rangeStart && p.pageNumber <= rangeEnd
+      );
+      pdfContent.fullText = pdfContent.pages.map((p) => p.text).join("\n\n");
+      logger.info({ manualId, rangeStart, rangeEnd, filteredPages: pdfContent.pages.length }, "Page range filter applied");
+      await setActivity(manualId, `Page range p${rangeStart}–p${rangeEnd} selected — processing ${pdfContent.pages.length} pages...`);
     }
 
     // ── Pass 2: Page content ─────────────────────────────────────────────────
@@ -1727,13 +1745,17 @@ export async function runExtractionPipeline(
     // ── Pass 7: RAG chunking ─────────────────────────────────────────────────
     // pass7EmbedChunks now skips pages that already have chunks in the DB, so
     // a stall mid-pass resumes from the first un-indexed page.
+    // updatePass=false so the progress bar doesn't jump to 100% mid-pipeline.
     await pass7EmbedChunks(manualId, pdfContent.pages, pdfBuffer, { updatePass: false });
 
-    // Stop here — entity/relationship extraction is triggered manually by the user
-    // so they can choose how much of the document to cover before incurring cost.
-    await setActivity(manualId, "Done — document indexed. Ready for entity extraction.");
-    await setManualStatus(manualId, "structure_complete", { processingPass: 3 });
-    logger.info({ manualId }, "Structure passes complete — awaiting entity extraction");
+    // ── Passes 4 / 5 / 5b / 6: entity, relationship, path, hierarchy ─────────
+    // All extraction passes now run automatically in the same pipeline.
+    // extractGraphFromExistingText reads from manual_pages (already filtered to
+    // the selected page range by passes 2 & 3 above) and runs to completion,
+    // setting status → "completed" when done.
+    await setActivity(manualId, "Text and chunks complete — starting entity & relationship extraction...");
+    await extractGraphFromExistingText(manualId);
+    logger.info({ manualId }, "Full pipeline complete");
   } catch (err) {
     logger.error({ err, manualId }, "Extraction pipeline failed");
     await setManualStatus(manualId, "failed", {

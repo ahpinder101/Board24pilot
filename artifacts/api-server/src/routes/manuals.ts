@@ -114,11 +114,7 @@ router.post("/manuals/upload", expensiveOpLimiter, upload.single("file"), async 
     return;
   }
 
-  // Start pipeline in background
-  runExtractionPipeline(manual.id, buffer).catch((err) => {
-    req.log.error({ err, manualId: manual.id }, "Background extraction pipeline error");
-  });
-
+  // PDF stored — leave as "pending" so the user can choose a page scope before processing starts.
   const { pdfData: _, ...safeManual } = manual;
   res.status(201).json(safeManual);
 });
@@ -179,7 +175,10 @@ router.delete("/manuals/:id", async (req, res) => {
   res.status(204).end();
 });
 
-// POST /manuals/:id/process — trigger multi-pass AI extraction
+// POST /manuals/:id/process — trigger full AI extraction pipeline (all passes)
+// Optional body: { startPage?: number, endPage?: number }
+// When startPage/endPage are provided, only the selected pages are processed
+// (Pass 1 still sees the full document for structural context).
 router.post("/manuals/:id/process", expensiveOpLimiter, async (req, res) => {
   const parsed = ProcessManualParams.safeParse({ id: Number(req.params.id) });
   if (!parsed.success) {
@@ -207,6 +206,10 @@ router.post("/manuals/:id/process", expensiveOpLimiter, async (req, res) => {
     return;
   }
 
+  // Parse optional page range from request body
+  const startPage = typeof req.body?.startPage === "number" ? Math.max(1, req.body.startPage) : undefined;
+  const endPage   = typeof req.body?.endPage   === "number" ? Math.max(1, req.body.endPage)   : undefined;
+
   // Atomically claim the job — rejects if one is already running (prevents
   // duplicate full-document extraction jobs on the same manual).
   if (!(await claimForProcessing(parsed.data.id))) {
@@ -229,8 +232,8 @@ router.post("/manuals/:id/process", expensiveOpLimiter, async (req, res) => {
     return;
   }
 
-  // Start pipeline in background (don't await)
-  runExtractionPipeline(manualId, pdfBuffer).catch((err) => {
+  // Start full pipeline in background (don't await)
+  runExtractionPipeline(manualId, pdfBuffer, { startPage, endPage }).catch((err) => {
     req.log.error({ err, manualId }, "Background extraction pipeline error");
   });
 
@@ -597,11 +600,10 @@ router.post("/manuals/:id/reset-processing", async (req: Request, res: Response)
     return;
   }
 
-  // processingPass >= 2 means text extraction (Pass 1+2) is complete; the pipeline
-  // can resume from Pass 3 which now skips already-described pages from the DB.
-  // processingPass >= 4 means Pass 3 is done; jump straight to entity extraction.
   const pass = manual.processingPass ?? 0;
-  const resumeStatus = pass >= 4 ? "structure_complete" : pass >= 2 ? "pending" : "pending";
+  // Always reset to "pending" so the user sees the scope selector and can choose
+  // whether to resume with the same page range or pick a different one.
+  const resumeStatus = pass > 0 ? "pending" : "pending";
 
   const [updated] = await db
     .update(manualsTable)
