@@ -5,7 +5,8 @@ import { toast } from "sonner";
 import {
   AlertTriangle, CheckCircle2, Clock, ExternalLink,
   FileText, Network, Database, RefreshCw, Trash2,
-  Activity, WifiOff, Network as GraphIcon,
+  Activity, WifiOff, Network as GraphIcon, RotateCcw,
+  ChevronDown, ChevronUp,
 } from "lucide-react";
 import { useGetManualStats, getGetManualStatsQueryKey, type Manual } from "@workspace/api-client-react";
 import { ScopeSelector } from "@/components/scope-selector";
@@ -117,15 +118,25 @@ function ProcessingSection({
 
 function CompletedSection({
   manualId,
+  totalPages,
   getToken,
+  onStarted,
 }: {
   manualId: number;
+  totalPages: number;
   getToken: () => Promise<string | null>;
+  onStarted: () => void;
 }) {
   const [pdfLoading, setPdfLoading] = useState(false);
+  const [reExtractOpen, setReExtractOpen] = useState(false);
   const { data: stats } = useGetManualStats(manualId, {
     query: { queryKey: getGetManualStatsQueryKey(manualId) },
   });
+
+  const density =
+    stats && totalPages > 0
+      ? (stats.totalEntities / totalPages).toFixed(1)
+      : null;
 
   async function openPdf() {
     setPdfLoading(true);
@@ -144,8 +155,25 @@ function CompletedSection({
     }
   }
 
+  function handleStarted() {
+    setReExtractOpen(false);
+    onStarted();
+  }
+
   return (
     <div className="mt-3 space-y-2.5">
+      {/* Confidence badge + stats row */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="inline-flex items-center gap-1 rounded-full bg-green-50 border border-green-200 px-2 py-0.5 text-[11px] font-medium text-green-700">
+          <CheckCircle2 className="w-3 h-3" />
+          All 7 passes complete
+        </span>
+        {density !== null && (
+          <span className="text-[11px] text-gray-400 font-mono">~{density} entities/page</span>
+        )}
+      </div>
+
+      {/* Entity / relationship counts */}
       {stats && (
         <div className="flex items-center gap-3 text-xs font-mono text-gray-500">
           <span className="flex items-center gap-1">
@@ -159,7 +187,9 @@ function CompletedSection({
           </span>
         </div>
       )}
-      <div className="flex items-center gap-2">
+
+      {/* Action buttons */}
+      <div className="flex items-center gap-2 flex-wrap">
         <Link href={`/manuals/${manualId}`}>
           <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition-all shadow-sm">
             <GraphIcon className="w-3.5 h-3.5" />
@@ -174,7 +204,30 @@ function CompletedSection({
           <ExternalLink className="w-3.5 h-3.5" />
           {pdfLoading ? "Opening…" : "Open PDF"}
         </button>
+        <button
+          onClick={() => setReExtractOpen((v) => !v)}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-gray-500 hover:text-gray-800 hover:border-gray-400 text-xs font-medium transition-all ml-auto"
+        >
+          <RotateCcw className="w-3.5 h-3.5" />
+          Re-extract pages
+          {reExtractOpen
+            ? <ChevronUp className="w-3 h-3" />
+            : <ChevronDown className="w-3 h-3" />}
+        </button>
       </div>
+
+      {/* Collapsible re-extract scope selector */}
+      {reExtractOpen && (
+        <div className="pt-2 border-t border-gray-100">
+          <ScopeSelector
+            manualId={manualId}
+            totalPages={totalPages}
+            getToken={getToken}
+            onStarted={handleStarted}
+            compact
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -315,7 +368,14 @@ export function FileCard({ manual, onDelete, onStarted, getToken, highlight = fa
         />
       )}
 
-      {isCompleted && <CompletedSection manualId={manual.id} getToken={getToken} />}
+      {isCompleted && (
+        <CompletedSection
+          manualId={manual.id}
+          totalPages={manual.totalPages ?? 0}
+          getToken={getToken}
+          onStarted={onStarted}
+        />
+      )}
 
       {isFailed && (
         <FailedSection

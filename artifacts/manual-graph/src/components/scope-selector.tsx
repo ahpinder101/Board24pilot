@@ -67,6 +67,8 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
     { id: "single", label: "Single page",    icon: <FileText className={compact ? "w-3.5 h-3.5" : "w-4 h-4"} />,     tagline: "One page" },
   ];
 
+  const inputCls = "w-20 rounded border border-gray-200 bg-white px-2 py-1 text-xs font-mono text-center text-gray-900 focus:outline-none focus:ring-1 focus:ring-slate-400";
+
   if (compact) {
     return (
       <div className="space-y-3 pt-1">
@@ -101,7 +103,7 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
               max={totalPages || undefined}
               value={singlePage}
               onChange={(e) => setSinglePage(Math.max(1, parseInt(e.target.value) || 1))}
-              className="w-20 rounded border border-gray-200 bg-white px-2 py-1 text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-slate-400"
+              className={inputCls}
             />
             {totalPages > 0 && <span className="text-xs text-gray-400">of {totalPages}</span>}
           </div>
@@ -117,7 +119,7 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
                 max={totalPages || undefined}
                 value={rangeStart}
                 onChange={(e) => setRangeStart(Math.max(1, parseInt(e.target.value) || 1))}
-                className="w-20 rounded border border-gray-200 bg-white px-2 py-1 text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-slate-400"
+                className={inputCls}
               />
               <label className="text-xs text-gray-500 w-4 shrink-0 text-center">–</label>
               <input
@@ -126,7 +128,7 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
                 max={totalPages || undefined}
                 value={rangeEnd}
                 onChange={(e) => setRangeEnd(Math.max(rangeStart, parseInt(e.target.value) || rangeStart))}
-                className="w-20 rounded border border-gray-200 bg-white px-2 py-1 text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-slate-400"
+                className={inputCls}
               />
               <span className="text-xs text-gray-400">{pageCount()} pages</span>
             </div>
@@ -204,7 +206,7 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
             max={totalPages || undefined}
             value={singlePage}
             onChange={(e) => setSinglePage(Math.max(1, parseInt(e.target.value) || 1))}
-            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center focus:outline-none focus:ring-2 focus:ring-slate-400"
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-400"
           />
           {totalPages > 0 && (
             <p className="text-xs text-muted-foreground">Document has {totalPages} pages</p>
@@ -223,7 +225,7 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
                 max={totalPages || undefined}
                 value={rangeStart}
                 onChange={(e) => setRangeStart(Math.max(1, parseInt(e.target.value) || 1))}
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center focus:outline-none focus:ring-2 focus:ring-slate-400"
+                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-400"
               />
             </div>
             <span className="text-muted-foreground pb-2">–</span>
@@ -235,7 +237,7 @@ export function ScopeSelector({ manualId, totalPages, getToken, onStarted, compa
                 max={totalPages || undefined}
                 value={rangeEnd}
                 onChange={(e) => setRangeEnd(Math.max(rangeStart, parseInt(e.target.value) || rangeStart))}
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center focus:outline-none focus:ring-2 focus:ring-slate-400"
+                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm font-mono text-center text-gray-900 focus:outline-none focus:ring-2 focus:ring-slate-400"
               />
             </div>
           </div>
