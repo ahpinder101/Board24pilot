@@ -1294,9 +1294,24 @@ Please answer based on the above information.`;
       specialistResult.validationStatus === "fail" ||
       specialistResult.answerability === "not_answerable"
     ) {
-      finalAnswer = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, specialistResult.validationSummary);
-      isGuided = true;
-      req.log.info("agent-chat: using guided no-answer");
+      // Guard: if the scratchpad assessed strong/partial evidence and the specialist
+      // found no actual contradictions (only retrieval gaps in unsupported_claims),
+      // keep the draft answer — the specialist may have seen a truncated evidence
+      // window that missed the relevant chunks.
+      const hasConflicts = specialistResult.validationSummary.conflictingClaims.length > 0;
+      const scratchpadConfident =
+        scratchpad.evidenceQuality === "strong" || scratchpad.evidenceQuality === "partial";
+      if (scratchpadConfident && !hasConflicts) {
+        req.log.info(
+          { scratchpadEvidence: scratchpad.evidenceQuality, specialistStatus: specialistResult.validationStatus },
+          "agent-chat: specialist fail overridden — scratchpad strong/partial evidence with no contradictions"
+        );
+        // finalAnswer stays as draftAnswer
+      } else {
+        finalAnswer = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, specialistResult.validationSummary);
+        isGuided = true;
+        req.log.info("agent-chat: using guided no-answer");
+      }
     }
 
     // ── 9. Citation logic (same 4-priority system as chat.ts) ─────────────────
