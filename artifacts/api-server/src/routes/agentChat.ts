@@ -538,6 +538,31 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       }
     }
 
+    // ── 2d. Per-manual proportional allocation (procedural queries) ──────────
+    // For walk-through queries, cross-manual FTS noise can crowd the top-K
+    // window with chunks from unrelated manuals. Give the highest-ranked manual
+    // a guaranteed majority share (≥70 %) so the validator sees coherent evidence.
+    if (isProceduralQuery && ragChunks.length > 0) {
+      // Count total rank score per manual to identify the dominant one.
+      const manualRankSum = new Map<number, number>();
+      for (const c of ragChunks) {
+        manualRankSum.set(c.manual_id, (manualRankSum.get(c.manual_id) ?? 0) + (c.rank ?? 0));
+      }
+      const topManualId = [...manualRankSum.entries()].sort((a, b) => b[1] - a[1])[0]![0];
+
+      const budget = topKScoped;
+      const topManualBudget = Math.ceil(budget * 0.7);
+      const otherBudget = budget - topManualBudget;
+
+      const topManualChunks = ragChunks.filter((c) => c.manual_id === topManualId).slice(0, topManualBudget);
+      const otherChunks = ragChunks.filter((c) => c.manual_id !== topManualId).slice(0, otherBudget);
+
+      ragChunks = [...topManualChunks, ...otherChunks];
+      ragChunks.sort((a, b) =>
+        a.page_number - b.page_number || a.chunk_index - b.chunk_index
+      );
+    }
+
     // ── 3. Graph retrieval ────────────────────────────────────────────────────
     let graphEntities: Array<{
       id: number; name: string; type: string; description: string;
@@ -962,6 +987,10 @@ Please answer based on the above information.`;
       })),
       ...finalSpecialistResult.validationSummary.unsupportedClaims.map((u) => ({
         claimOrQuestionPart: u,
+        issue: "missing" as const,
+      })),
+      ...(finalSpecialistResult.validationSummary.conflictingClaims ?? []).map((c) => ({
+        claimOrQuestionPart: c,
         issue: "conflicting" as const,
       })),
     ];
