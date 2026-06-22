@@ -1355,10 +1355,20 @@ Please answer based on the above information.`;
       }
     }
 
-    // Priority 1: phrase matches
+    // Priority 1: phrase matches — prefer the subset the LLM also cited (most relevant page).
+    // Stemming can cause a phrase like "oil supply" to match a different page ("oil supplied
+    // to the rotary hook") that scores higher on specificity but isn't what the answer used.
+    // Intersecting with the LLM's own cited sources gives the right page first.
     if (indicesToCite.size === 0 && phraseChunkIds.size > 0) {
+      const modelCitedIds = new Set(
+        citedSourceNumbers
+          .map((n) => ragChunks[n - 1]?.id)
+          .filter((id): id is number => id !== undefined)
+      );
+      const preferred = [...phraseChunkIds].filter((id) => modelCitedIds.has(id));
+      const toUse = preferred.length > 0 ? new Set(preferred) : phraseChunkIds;
       for (let i = 0; i < ragChunks.length; i++) {
-        if (phraseChunkIds.has(ragChunks[i].id)) indicesToCite.add(i);
+        if (toUse.has(ragChunks[i].id)) indicesToCite.add(i);
       }
     }
 
@@ -1378,24 +1388,6 @@ Please answer based on the above information.`;
 
     // Final fallback: top chunk
     if (indicesToCite.size === 0 && ragChunks.length > 0) indicesToCite.add(0);
-
-    // Rank-preference override: if every cited chunk has rank == 0 (added by phrase
-    // or window expansion, not FTS), replace with the highest-FTS-ranked chunk so
-    // the citation points at the most relevant page rather than the most phrase-specific.
-    if (indicesToCite.size > 0) {
-      const allUnranked = [...indicesToCite].every((i) => (ragChunks[i]?.rank ?? 0) === 0);
-      if (allUnranked) {
-        let bestRankIdx = -1;
-        let bestRank = 0;
-        ragChunks.forEach((c, i) => {
-          if ((c.rank ?? 0) > bestRank) { bestRank = c.rank ?? 0; bestRankIdx = i; }
-        });
-        if (bestRankIdx >= 0 && bestRank > 0.01) {
-          indicesToCite.clear();
-          indicesToCite.add(bestRankIdx);
-        }
-      }
-    }
 
     const seenManualPages = new Set<string>();
     const citations: ChatCitation[] = [];
