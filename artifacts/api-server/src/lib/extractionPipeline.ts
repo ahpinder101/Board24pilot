@@ -982,19 +982,20 @@ If the page is blank or contains only unlabelled artwork with no text, output ex
 async function passVisionOcr(
   manualId: number,
   pdfBuffer: Buffer,
-  totalPages: number
+  pageNumbers: number[]
 ): Promise<Array<{ pageNumber: number; text: string }>> {
   const results: Array<{ pageNumber: number; text: string }> = [];
   const CONCURRENCY = 5;
+  const totalPages = pageNumbers.length;
 
-  // Load already-OCR'd pages from DB so we can skip them on resume.
+  // Load already-OCR'd pages from DB (only for the requested pages) so we can skip them on resume.
   const existingRows = await db
     .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
     .from(manualPagesTable)
     .where(eq(manualPagesTable.manualId, manualId));
   const alreadyOcrd = new Map<number, string>();
   for (const row of existingRows) {
-    if (row.rawText && row.rawText.trim().length > 0) {
+    if (row.rawText && row.rawText.trim().length > 0 && pageNumbers.includes(row.pageNumber)) {
       alreadyOcrd.set(row.pageNumber, row.rawText);
     }
   }
@@ -1010,11 +1011,8 @@ async function passVisionOcr(
   // Write the PDF buffer to disk once; all page renders reuse the same path.
   const { pdfPath, cleanup: cleanupPdf } = await writePdfToTempFile(pdfBuffer);
 
-  for (let start = 1; start <= totalPages; start += CONCURRENCY) {
-    const batch: number[] = [];
-    for (let p = start; p < start + CONCURRENCY && p <= totalPages; p++) {
-      if (!alreadyOcrd.has(p)) batch.push(p);
-    }
+  for (let start = 0; start < pageNumbers.length; start += CONCURRENCY) {
+    const batch = pageNumbers.slice(start, start + CONCURRENCY).filter((p) => !alreadyOcrd.has(p));
     if (batch.length === 0) continue;
 
     const batchResults = await Promise.all(
@@ -1112,7 +1110,8 @@ export async function reprocessManualWithVision(
 
     // Vision OCR — populate rawText for every page
     await updateManualPass(manualId, 2);
-    const ocrPages = await passVisionOcr(manualId, pdfBuffer, totalPages);
+    const allPageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
+    const ocrPages = await passVisionOcr(manualId, pdfBuffer, allPageNumbers);
     const fullText = ocrPages.map((p) => p.text).join("\n\n");
 
     // Pass 1: Document structure (from OCR text)
@@ -1756,12 +1755,15 @@ export async function runExtractionPipeline(
         .where(and(eq(manualPagesTable.manualId, manualId), isNotNull(manualPagesTable.rawText)));
       // rawText rows with < 20 chars are not real OCR content (pdf-parse fills
       // these even on blank pages).  Only count rows with substantial text.
+      const requestedPageNums = pdfContent.pages.map((p) => p.pageNumber);
       const ocrSavedPages = new Map(
-        ocrRows.filter((r) => (r.rawText ?? "").trim().length >= 20).map((r) => [r.pageNumber, r.rawText!])
+        ocrRows
+          .filter((r) => (r.rawText ?? "").trim().length >= 20 && requestedPageNums.includes(r.pageNumber))
+          .map((r) => [r.pageNumber, r.rawText!])
       );
 
       if (ocrSavedPages.size >= pdfContent.pages.length * 0.8) {
-        // OCR already done — patch in-memory from DB
+        // OCR already done for the requested pages — patch in-memory from DB
         logger.info({ manualId, saved: ocrSavedPages.size }, "Vision OCR: skipping — rawText already in DB");
         await setActivity(manualId, `Vision OCR ✓ — ${ocrSavedPages.size} pages already OCR'd, loading from database`);
         for (const page of pdfContent.pages) {
@@ -1769,10 +1771,10 @@ export async function runExtractionPipeline(
           if (saved) page.text = saved;
         }
       } else {
-        // Run/resume vision OCR (passVisionOcr saves rawText per-page so
-        // a resume skips pages already written).
+        // Run/resume vision OCR only for the requested pages (passVisionOcr saves
+        // rawText per-page so a resume skips pages already written).
         logger.info({ manualId, rawEmptyCount }, "Image-based PDF — running vision OCR before Pass 3");
-        const ocrPages = await passVisionOcr(manualId, pdfBuffer, pdfContent.totalPages);
+        const ocrPages = await passVisionOcr(manualId, pdfBuffer, requestedPageNums);
         for (const ocrPage of ocrPages) {
           const page = pdfContent.pages.find((p) => p.pageNumber === ocrPage.pageNumber);
           if (page) page.text = ocrPage.text;
