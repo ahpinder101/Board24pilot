@@ -1295,7 +1295,13 @@ CRITICAL RULES:
 5. Multi-step procedures: synthesise steps from ALL provided excerpts in sequence. No single sentence needs to cover the whole procedure — build it across multiple sources. Never say "the manual does not specify" for a procedure when the excerpts contain relevant steps.
 6. PROCEDURE STEPS section: when "PROCEDURE STEPS (verified from knowledge graph)" appears above the excerpts, list every step in full as the primary answer — do not summarise, skip, reorder, or paraphrase any step. Number them exactly as given.
 
-FORMATTING: Write in plain prose. You may use numbered lists (1. 2. 3.) and plain dashes (-). Do NOT use markdown bold (**text**) or headers (##).${
+FORMATTING — answers are rendered as Markdown in the UI:
+- Prose answers: flowing paragraphs.
+- Numbered steps: EACH step must be on its own line — do NOT write steps as a run-on sentence. Start a new line for every number.
+- Bullet lists: one item per line using a dash-space prefix (- item).
+- Safety callouts: bold label, e.g. **Warning:** or **Note:** or **Caution:**.
+- Phase headings: if a procedure has clearly distinct phases (e.g. Preparation, Procedure, Cleanup), use a ## Phase Name heading. Otherwise omit headings entirely.
+- Never use HTML tags.${
   hasImage
     ? `\n\nIMAGE ANALYSIS: The user attached a photo. Identify visible components, labels, damage, or anomalies and cross-reference with the manual excerpts.`
     : ""
@@ -1315,7 +1321,7 @@ FAULT DIAGNOSIS REASONING — apply when the question describes a fault with con
 OUTPUT FORMAT — respond with valid JSON only:
 {
   "quote": "The most relevant sentence from the excerpts — character-for-character. Write NOT IN EXCERPTS if no single sentence directly answers. This field is for citation anchoring only and does NOT constrain your answer.",
-  "answer": "your full plain-text answer synthesised from all relevant excerpts",
+  "answer": "your full markdown-formatted answer synthesised from all relevant excerpts",
   "sources": [1, 2]
 }`;
 
