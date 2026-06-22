@@ -713,19 +713,22 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
 
     // ── 3b. Track B — page-references overlap (procedural queries) ────────────
     // Fetch paths whose page_references overlap with the pages already retrieved
-    // by FTS.  This catches procedures not matched by name/plain_language FTS but
-    // whose step text lives on the same pages as the retrieved chunks.
+    // by FTS.  page_references is stored as JSONB so we use EXISTS +
+    // jsonb_array_elements_text to compare against a PG integer array.
     if (isProceduralQuery && ragChunks.length > 0) {
       const retrievedPages = [...new Set(ragChunks.map((c) => c.page_number))];
       if (retrievedPages.length > 0) {
         const pgArrayLit = `{${retrievedPages.join(",")}}`;
         try {
           const overlapResult = await db.execute<PathRow>(sql`
-            SELECT id, name, path_type, condition, step_sequence, plain_language, page_references
-            FROM paths
-            WHERE manual_id = ANY(${scopedManualArray}::integer[])
-              AND page_references::integer[] && ${pgArrayLit}::integer[]
-            ORDER BY id
+            SELECT p.id, p.name, p.path_type, p.condition, p.step_sequence, p.plain_language, p.page_references
+            FROM paths p
+            WHERE p.manual_id = ANY(${scopedManualArray}::integer[])
+              AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(p.page_references) AS elem
+                WHERE elem::integer = ANY(${pgArrayLit}::integer[])
+              )
+            ORDER BY p.id
             LIMIT 15
           `);
           if (overlapResult.rows.length > 0) {
@@ -792,37 +795,52 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       }
 
       if (graphPaths.length > 0) {
-        // Paths WITH step_sequence → dedicated "PROCEDURE STEPS" section (authoritative)
-        const pathsWithSteps = graphPaths.filter(
-          (p) => Array.isArray(p.step_sequence) && p.step_sequence.length > 0
-        );
-        const pathsWithoutSteps = graphPaths.filter(
-          (p) => !Array.isArray(p.step_sequence) || p.step_sequence.length === 0
-        );
+        if (isProceduralQuery) {
+          // Procedural queries: paths WITH step_sequence go to the dedicated
+          // "PROCEDURE STEPS" section (authoritative, numbered list).
+          // Paths without steps stay in graphContext as a summary line.
+          const pathsWithSteps = graphPaths.filter(
+            (p) => Array.isArray(p.step_sequence) && p.step_sequence.length > 0
+          );
+          const pathsWithoutSteps = graphPaths.filter(
+            (p) => !Array.isArray(p.step_sequence) || p.step_sequence.length === 0
+          );
 
-        if (pathsWithSteps.length > 0) {
-          procedureStepsSection = pathsWithSteps
-            .map((p) => {
-              const scope = p.condition ? ` [${p.condition}]` : "";
-              const pageRef =
-                Array.isArray(p.page_references) && p.page_references.length > 0
-                  ? ` [page ${p.page_references.join(", ")}]`
-                  : "";
-              const steps = p.step_sequence
-                .map((s, i) => `${i + 1}. ${s}`)
-                .join("\n");
-              return `${p.name}${scope}${pageRef}:\n${steps}`;
-            })
-            .join("\n\n");
-        }
+          if (pathsWithSteps.length > 0) {
+            procedureStepsSection = pathsWithSteps
+              .map((p) => {
+                const scope = p.condition ? ` [${p.condition}]` : "";
+                const pageRef =
+                  Array.isArray(p.page_references) && p.page_references.length > 0
+                    ? ` [page ${p.page_references.join(", ")}]`
+                    : "";
+                const steps = p.step_sequence
+                  .map((s, i) => `${i + 1}. ${s}`)
+                  .join("\n");
+                return `${p.name}${scope}${pageRef}:\n${steps}`;
+              })
+              .join("\n\n");
+          }
 
-        if (pathsWithoutSteps.length > 0) {
-          const pathSummary = pathsWithoutSteps
-            .map((p) => {
-              const scope = p.condition ? ` [${p.condition}]` : " [all machines]";
-              return `• ${p.name}${scope}: ${p.plain_language}`;
-            })
-            .join("\n");
+          if (pathsWithoutSteps.length > 0) {
+            const pathSummary = pathsWithoutSteps
+              .map((p) => {
+                const scope = p.condition ? ` [${p.condition}]` : " [all machines]";
+                return `• ${p.name}${scope}: ${p.plain_language}`;
+              })
+              .join("\n");
+            parts.push(`PROCEDURE PATHS:\n${pathSummary}`);
+          }
+        } else {
+          // Non-procedural queries: all paths go to graphContext as summary lines
+          // (no numbered steps injected, non-procedure answer behavior unchanged).
+          const pathSummary = graphPaths.map((p) => {
+            const scope = p.condition ? ` [${p.condition}]` : " [all machines]";
+            const steps = Array.isArray(p.step_sequence) && p.step_sequence.length > 0
+              ? "\n  Steps: " + p.step_sequence.join(" → ")
+              : "";
+            return `• ${p.name}${scope}: ${p.plain_language}${steps}`;
+          }).join("\n");
           parts.push(`PROCEDURE PATHS:\n${pathSummary}`);
         }
       }

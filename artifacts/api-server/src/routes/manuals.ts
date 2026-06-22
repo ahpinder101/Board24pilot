@@ -700,6 +700,16 @@ router.post("/manuals/:id/repair-graph", expensiveOpLimiter, async (req, res) =>
     return;
   }
 
+  const pass = manual.processingPass ?? 0;
+  if (pass < 4) {
+    res.status(400).json({ error: "Manual has not completed entity extraction (pass 4) — run full extraction first" });
+    return;
+  }
+  if (pass >= 7 && manual.status === "completed") {
+    res.status(400).json({ error: "Manual graph is already complete (pass 7) — use Re-extract pages for a full re-run" });
+    return;
+  }
+
   if (!(await claimForProcessing(manualId))) {
     res.status(409).json({ error: "Manual is already processing" });
     return;

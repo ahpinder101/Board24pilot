@@ -401,7 +401,7 @@ export function FileCard({ manual, onDelete, onStarted, getToken, highlight = fa
             onStarted={onStarted}
             compact
           />
-          {(manual.processingPass ?? 0) >= 4 && (
+          {(manual.processingPass ?? 0) >= 4 && (manual.processingPass ?? 0) < 7 && (
             <RepairGraphButton
               manualId={manual.id}
               getToken={getToken}
