@@ -1314,6 +1314,7 @@ Please answer based on the above information.`;
           validationStatus: "revise" as const,
           validationSummary: {
             ...specialistResult.validationSummary,
+            missingItems: [],
             unsupportedClaims: [],
           },
         };
