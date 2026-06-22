@@ -8,6 +8,7 @@
 - [RAG chat grounding](rag-chat-grounding.md) — chain-of-thought quote field + verbatim rule + temperature 0 in chat.ts; OCR can corrupt ° and letter-K to look like hallucinations when they aren't.
 - [RAG retrieval phrase vs OR rank](rag-retrieval-phrase-vs-orrank.md) — OR ts_rank buries the precise-fact page under topically-dense sections; fix with phraseto_tsquery adjacency retrieval + quote-grounded citation.
 - [Never restart API server during extraction](api-restart-during-extraction.md) — background extraction jobs die on server restart; relationships lost if pass 5 bulk-inserts at end.
+- [Scratchpad answer agent](scratchpad-answer-agent.md) — two-pass flow: scratchpad picks strategy/domain/planNotes; answer pass uses them. Quote gate removed. Confidence guard when isGuided.
 - [drizzle-kit push blocks on schema drift](drizzle-push-schema-drift.md) — db push in non-TTY shells asks about data-loss columns (embedding, fts_vector drift); use executeSql code_execution tool to CREATE TABLE IF NOT EXISTS directly instead.
 - [Vision OCR and Pass 7 page scoping](vision-ocr-page-scoping.md) — passVisionOcr takes page numbers array not totalPages; sparse-page detection is per-page not 80% ratio; Pass 7 must delete stale chunks before re-indexing.
 - [Agent chat second validation pass](agent-chat-second-pass.md) — agentChat.ts runs up to 2 specialist passes; first pass may revise, second pass validates the revised answer; fail on pass 2 → guided no-answer

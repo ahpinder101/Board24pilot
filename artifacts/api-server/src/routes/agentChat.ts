@@ -30,6 +30,47 @@ const FTS_RANK_THRESHOLD = 0.01;
 const PROCEDURAL_QUERY_RE =
   /\b(walk\s+me\s+through|step[-\s]by[-\s]step|steps?\s+to\s+\w|how\s+(do\s+I|to)\s+(replace|remove|install|disassemble|assemble|adjust|clean|set\s+up|change|perform|fix)|procedure\s+for|guide\s+me|show\s+me\s+(how|the\s+steps?)|all\s+steps?|sequence\s+for|process\s+of)\b/i;
 
+// ── Scratchpad system prompt (Pass 1) ────────────────────────────────────────
+const SCRATCHPAD_SYSTEM = `You are the reasoning pass of a two-pass engineering Q\&A system. Before any answer is written, you review all available evidence and decide the best path forward.
+
+STEP 1 — Understand the question in context
+Is there prior conversation? If so, how does the current question relate to it? For example, "What is possible cause of this" after a discussion about thread tension refers to that topic.
+
+STEP 2 — Assess the evidence
+Scan the retrieved excerpts. What aspects of the question do they cover? What is missing?
+
+STEP 3 — Identify the technical domain from the CONTENT of the excerpts (not from keyword counting)
+• "electrical_control" — circuits, relays, voltage, contactors, coils, wiring, schematic
+• "hydraulic_schematic" — hydraulic fluid, pumps, cylinders, pressure lines, oil
+• "pneumatic_schematic" — compressed air, pneumatic actuators, solenoid valves, compressor
+• "mechanical_assembly" — parts, install/remove/replace steps, torque, fasteners, knives, needles, assembly
+• "troubleshooting" — fault codes, symptoms, diagnostic checks, error messages, alarms
+• "generic_process" — settings, adjustments, calibrations, or procedures that don't fit the above
+
+STEP 4 — Choose a strategy
+• "answer" — Excerpts cover ANY relevant aspect, even partially. PREFER THIS ALWAYS. A partial answer with caveats is almost always better than asking a clarifying question. Use this even when evidence quality is "weak".
+• "clarify" — Use ONLY when the question has two or more genuinely distinct valid interpretations that would each lead to a meaningfully different answer AND you have evidence for at least one interpretation. Write one focused clarifying question.
+• "cannot_answer" — LAST RESORT. Use only when excerpts are completely off-topic (evidenceQuality is "none") AND the question is clear enough that clarification won\\'t help retrieve better evidence.
+
+BIAS HEAVILY toward "answer". A partial answer is acceptable and useful. Reserve "cannot_answer" for truly empty, irrelevant evidence.
+
+STEP 5
+If strategy is "answer": write brief planNotes for the answer agent — which sources cover which steps, how to order a procedure, what to synthesise.
+If strategy is "clarify": write one focused clarifying question in clarifyingQuestion.
+If strategy is "cannot_answer": leave planNotes empty.
+
+Respond with valid JSON only, no other text:
+{
+  "questionType": "procedure" | "fact" | "troubleshooting" | "follow_up" | "ambiguous",
+  "domain": "electrical_control" | "hydraulic_schematic" | "pneumatic_schematic" | "mechanical_assembly" | "troubleshooting" | "generic_process",
+  "evidenceQuality": "strong" | "partial" | "weak" | "none",
+  "coveredAspects": ["what the evidence covers"],
+  "uncoveredAspects": ["what is missing"],
+  "strategy": "answer" | "clarify" | "cannot_answer",
+  "clarifyingQuestion": "single focused question or null",
+  "planNotes": "brief synthesis plan for the answer agent"
+}`;
+
 const GENERIC_NAME_WORDS = new Set([
   "manual", "unit", "machine", "system", "maintenance",
   "document", "guide", "handbook", "instruction", "vacuum",
@@ -217,12 +258,19 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
 
   try {
     // ── 0. Load manuals + machine entities ───────────────────────────────────
-    const [allManuals, machineEntityRows] = await Promise.all([
+    type HistoryRow = { role: string; content: string };
+    const [allManuals, machineEntityRows, historyResult] = await Promise.all([
       db.select({ id: manualsTable.id, name: manualsTable.name }).from(manualsTable),
       db.execute<{ manual_id: number; name: string }>(sql`
         SELECT manual_id, name FROM entities
         WHERE type IN ('machine', 'system')
         ORDER BY manual_id, order_index
+      `),
+      db.execute<HistoryRow>(sql`
+        SELECT role, content FROM chat_messages
+        WHERE session_id = ${sessionId}
+        ORDER BY created_at ASC
+        LIMIT 12
       `),
     ]);
 
@@ -230,6 +278,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       manualId: r.manual_id,
       name: r.name,
     }));
+    const conversationHistory = historyResult.rows;
 
     // ── 0.5. Vision pre-pass ─────────────────────────────────────────────────
     let visionKeywords = "";
@@ -708,8 +757,189 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       }
     }
 
+    // ── 4.5. Evidence summary (needed for early returns) ─────────────────────
+    const manualsSearched = [...new Set(ragChunks.map((c) => c.manual_name))];
+    const evidenceSummary: EvidenceSummary = {
+      chunksFound: ragChunks.length,
+      entitiesFound: graphEntities.length,
+      pathsFound: graphPaths.length,
+      hasGraphContext: graphContext.length > 0,
+      manualsSearched,
+    };
+
+    // ── 4.6. Scratchpad pass — reason before answering ────────────────────────
+    type ScratchpadResult = {
+      questionType: "procedure" | "fact" | "troubleshooting" | "follow_up" | "ambiguous";
+      domain: TechnicalDomain;
+      evidenceQuality: "strong" | "partial" | "weak" | "none";
+      coveredAspects: string[];
+      uncoveredAspects: string[];
+      strategy: "answer" | "clarify" | "cannot_answer";
+      clarifyingQuestion: string | null;
+      planNotes: string;
+    };
+
+    const historySnippet = conversationHistory.length > 0
+      ? `CONVERSATION HISTORY:\n${conversationHistory.map((m) => `[${m.role.toUpperCase()}]: ${m.content.slice(0, 400)}`).join("\n")}\n\n`
+      : "";
+
+    const scratchpadUserPrompt = `${historySnippet}CURRENT QUESTION: ${trimmedQuestion}
+
+RETRIEVED EXCERPTS:
+${ragContext.slice(0, 6000)}
+
+${graphContext ? `KNOWLEDGE GRAPH CONTEXT:\n${graphContext.slice(0, 800)}` : ""}
+
+Analyse the evidence and output your scratchpad JSON.`;
+
+    const spCompletion = await openai.chat.completions.create({
+      model: CHAT_MODEL,
+      messages: [
+        { role: "system", content: SCRATCHPAD_SYSTEM },
+        { role: "user", content: scratchpadUserPrompt },
+      ],
+      response_format: { type: "json_object" },
+      max_tokens: 600,
+      temperature: 0,
+    });
+
+    let scratchpad: ScratchpadResult;
+    const validDomainsList = [
+      "electrical_control", "hydraulic_schematic", "pneumatic_schematic",
+      "mechanical_assembly", "troubleshooting", "generic_process",
+    ];
+    try {
+      const spRaw = spCompletion.choices[0]?.message?.content ?? "{}";
+      const sp = JSON.parse(spRaw) as Record<string, unknown>;
+      scratchpad = {
+        questionType: (["procedure", "fact", "troubleshooting", "follow_up", "ambiguous"] as const).find(
+          (v) => v === sp.questionType
+        ) ?? "fact",
+        domain: validDomainsList.includes(String(sp.domain ?? ""))
+          ? (sp.domain as TechnicalDomain)
+          : detectDomain(trimmedQuestion, ragContext),
+        evidenceQuality: (["strong", "partial", "weak", "none"] as const).find(
+          (v) => v === sp.evidenceQuality
+        ) ?? "partial",
+        coveredAspects: Array.isArray(sp.coveredAspects)
+          ? (sp.coveredAspects as unknown[]).filter((x): x is string => typeof x === "string")
+          : [],
+        uncoveredAspects: Array.isArray(sp.uncoveredAspects)
+          ? (sp.uncoveredAspects as unknown[]).filter((x): x is string => typeof x === "string")
+          : [],
+        strategy: (["answer", "clarify", "cannot_answer"] as const).find(
+          (v) => v === sp.strategy
+        ) ?? "answer",
+        clarifyingQuestion: typeof sp.clarifyingQuestion === "string" ? sp.clarifyingQuestion : null,
+        planNotes: typeof sp.planNotes === "string" ? sp.planNotes : "",
+      };
+      req.log.info(
+        {
+          questionType: scratchpad.questionType,
+          domain: scratchpad.domain,
+          strategy: scratchpad.strategy,
+          evidenceQuality: scratchpad.evidenceQuality,
+        },
+        "agent-chat: scratchpad"
+      );
+    } catch {
+      req.log.warn("agent-chat: scratchpad parse failed — defaulting to answer");
+      scratchpad = {
+        questionType: "fact",
+        domain: detectDomain(trimmedQuestion, ragContext),
+        evidenceQuality: ragChunks.length > 0 ? "partial" : "none",
+        coveredAspects: [],
+        uncoveredAspects: [],
+        strategy: ragChunks.length > 0 ? "answer" : "cannot_answer",
+        clarifyingQuestion: null,
+        planNotes: "",
+      };
+    }
+
+    // ── 4.7. Strategy branching ───────────────────────────────────────────────
+    if (scratchpad.strategy === "clarify" && scratchpad.clarifyingQuestion) {
+      const clarifyText = scratchpad.clarifyingQuestion;
+      req.log.info("agent-chat: returning clarifying question");
+      await db.insert(chatMessagesTable).values({
+        sessionId, role: "user", content: trimmedQuestion, citations: null,
+      });
+      await db.insert(chatMessagesTable).values({
+        sessionId, role: "assistant", content: clarifyText, citations: null,
+      });
+      res.json({
+        answer: clarifyText,
+        citations: [],
+        sessionId,
+        graphEntities: [],
+        confidence: undefined,
+        answerability: "partially_answerable" as const,
+        domain: scratchpad.domain,
+        isClarifying: true,
+        isGuided: false,
+        evidenceSummary,
+        validationSummary: null,
+        missingOrWeakEvidence: [],
+        validationMetadata: {
+          validationPassCount: 0,
+          revisedOnce: false,
+          finalValidationStatus: "passed" as const,
+        },
+      });
+      return;
+    }
+
+    if (scratchpad.strategy === "cannot_answer") {
+      req.log.info("agent-chat: scratchpad cannot_answer — guided response");
+      const guidedText = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, {
+        status: "fail" as const,
+        presentItems: scratchpad.coveredAspects,
+        missingItems: scratchpad.uncoveredAspects,
+        weakItems: [],
+        unsupportedClaims: [],
+        conflictingClaims: [],
+        suggestedGuidance: [],
+        citationIssues: [],
+        sequenceIssues: [],
+      });
+      await db.insert(chatMessagesTable).values({
+        sessionId, role: "user", content: trimmedQuestion, citations: null,
+      });
+      await db.insert(chatMessagesTable).values({
+        sessionId, role: "assistant", content: guidedText, citations: null,
+      });
+      res.json({
+        answer: guidedText,
+        citations: [],
+        sessionId,
+        graphEntities: [],
+        confidence: "unverified" as const,
+        answerability: "not_answerable" as const,
+        domain: scratchpad.domain,
+        isClarifying: false,
+        isGuided: true,
+        evidenceSummary,
+        validationSummary: null,
+        missingOrWeakEvidence: scratchpad.uncoveredAspects.map((u) => ({
+          claimOrQuestionPart: u,
+          issue: "missing" as const,
+        })),
+        validationMetadata: {
+          validationPassCount: 0,
+          revisedOnce: false,
+          finalValidationStatus: "failed" as const,
+        },
+      });
+      return;
+    }
+
     // ── 5. Synthesise with GPT-4o ────────────────────────────────────────────
     const systemPrompt = `You are an expert engineering assistant. Engineers ask you questions about industrial machines, components, systems, and procedures described in their uploaded manuals.
+
+SCRATCHPAD ANALYSIS (from reasoning pass):
+- Question type: ${scratchpad.questionType}
+- Evidence quality: ${scratchpad.evidenceQuality}
+- Evidence covers: ${scratchpad.coveredAspects.length > 0 ? scratchpad.coveredAspects.join("; ") : "general context"}
+- Synthesis plan: ${scratchpad.planNotes || "Answer the question from the provided excerpts as completely as possible."}
 
 Answer the question clearly and precisely using ONLY the information from the provided manual excerpts.
 
@@ -718,6 +948,7 @@ CRITICAL RULES:
 2. Numeric tables: read values directly from tables present in the excerpts.
 3. Verbatim values — ABSOLUTE: for any specific value (number, measurement, part number, model code) copy it character-for-character from the excerpt. If the exact value does not appear literally, write "The manual does not specify this."
 4. Never fabricate technical details.
+5. Multi-step procedures: synthesise steps from ALL provided excerpts in sequence. No single sentence needs to cover the whole procedure — build it across multiple sources. Never say "the manual does not specify" for a procedure when the excerpts contain relevant steps.
 
 FORMATTING: Write in plain prose. You may use numbered lists (1. 2. 3.) and plain dashes (-). Do NOT use markdown bold (**text**) or headers (##).${
   hasImage
@@ -738,12 +969,10 @@ FAULT DIAGNOSIS REASONING — apply when the question describes a fault with con
 
 OUTPUT FORMAT — respond with valid JSON only:
 {
-  "quote": "Copy the single sentence from the excerpts that most directly answers the question — character-for-character. If none answers it, write: NOT IN EXCERPTS",
-  "answer": "your plain-text answer here",
+  "quote": "The most relevant sentence from the excerpts — character-for-character. Write NOT IN EXCERPTS if no single sentence directly answers. This field is for citation anchoring only and does NOT constrain your answer.",
+  "answer": "your full plain-text answer synthesised from all relevant excerpts",
   "sources": [1, 2]
-}
-
-CHAIN-OF-THOUGHT: Complete "quote" first. Your "answer" must be consistent with "quote". If quote is "NOT IN EXCERPTS", answer must say the manual does not specify this.`;
+}`;
 
     const userPrompt = `QUESTION: ${trimmedQuestion}
 
@@ -762,10 +991,18 @@ Please answer based on the above information.`;
           ]
         : userPrompt;
 
+    const historyMessages = conversationHistory
+      .slice(-6)
+      .map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content.slice(0, 1200),
+      }));
+
     const completion = await openai.chat.completions.create({
       model: CHAT_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
+        ...historyMessages,
         { role: "user", content: userContent },
       ],
       response_format: { type: "json_object" },
@@ -792,21 +1029,9 @@ Please answer based on the above information.`;
       requestedDomain && requestedDomain !== "auto" &&
       ["electrical_control", "hydraulic_schematic", "pneumatic_schematic", "mechanical_assembly", "troubleshooting", "generic_process"].includes(requestedDomain)
         ? (requestedDomain as TechnicalDomain)
-        : detectDomain(trimmedQuestion, ragContext);
+        : scratchpad.domain;
 
     req.log.info({ technicalDomain, strictness }, "agent-chat: domain + strictness");
-
-    // Build evidence summary
-    const manualsSearched = [
-      ...new Set(ragChunks.map((c) => c.manual_name)),
-    ];
-    const evidenceSummary: EvidenceSummary = {
-      chunksFound: ragChunks.length,
-      entitiesFound: graphEntities.length,
-      pathsFound: graphPaths.length,
-      hasGraphContext: graphContext.length > 0,
-      manualsSearched,
-    };
 
     // ── 7. Domain Specialist validation ──────────────────────────────────────
     const specialistResult = await runDomainSpecialist({
@@ -995,15 +1220,20 @@ Please answer based on the above information.`;
       })),
     ];
 
+    const finalConfidence = isGuided
+      ? ("unverified" as const)
+      : finalSpecialistResult.confidence;
+
     res.json({
       answer: finalAnswer,
       citations,
       sessionId,
       graphEntities: graphEntities.map((e) => e.name),
-      confidence: finalSpecialistResult.confidence,
+      confidence: finalConfidence,
       answerability: finalSpecialistResult.answerability,
       domain: technicalDomain,
       isGuided,
+      isClarifying: false,
       evidenceSummary,
       validationSummary: finalSpecialistResult.validationSummary,
       missingOrWeakEvidence,

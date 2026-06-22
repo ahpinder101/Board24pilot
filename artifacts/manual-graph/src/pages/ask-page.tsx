@@ -5,7 +5,7 @@ import {
   Bot, User, Send, BookOpen, Loader2, MessageSquare, ExternalLink,
   FileText, Paperclip, X, Image, Globe, ThumbsUp, ThumbsDown,
   ChevronDown, ChevronRight, Zap, Shield, FlaskConical, CheckCircle2,
-  AlertTriangle, XCircle, Database, GitBranch,
+  AlertTriangle, XCircle, Database, GitBranch, HelpCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -90,6 +90,7 @@ interface Message {
   answerability?: AnswerabilityStatus;
   domain?: string;
   isGuided?: boolean;
+  isClarifying?: boolean;
   evidenceSummary?: EvidenceSummary;
   validationSummary?: ValidationSummary;
   missingOrWeakEvidence?: MissingOrWeakEvidenceItem[];
@@ -775,6 +776,7 @@ export default function AskPage() {
         answerability?: AnswerabilityStatus;
         domain?: string;
         isGuided?: boolean;
+        isClarifying?: boolean;
         evidenceSummary?: EvidenceSummary;
         validationSummary?: ValidationSummary;
         missingOrWeakEvidence?: MissingOrWeakEvidenceItem[];
@@ -794,6 +796,7 @@ export default function AskPage() {
                 answerability: data.answerability,
                 domain: data.domain,
                 isGuided: data.isGuided,
+                isClarifying: data.isClarifying,
                 evidenceSummary: data.evidenceSummary,
                 validationSummary: data.validationSummary,
                 missingOrWeakEvidence: data.missingOrWeakEvidence,
@@ -961,8 +964,14 @@ export default function AskPage() {
                   )}
                 >
                   {msg.role === "assistant" && (
-                    <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0 mt-0.5">
-                      <Bot className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-600" />
+                    <div className={cn(
+                      "w-7 h-7 sm:w-8 sm:h-8 rounded-full flex items-center justify-center shrink-0 mt-0.5",
+                      msg.isClarifying ? "bg-blue-100" : "bg-blue-100"
+                    )}>
+                      {msg.isClarifying
+                        ? <HelpCircle className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-500" />
+                        : <Bot className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-600" />
+                      }
                     </div>
                   )}
 
@@ -985,6 +994,14 @@ export default function AskPage() {
                       </div>
                     )}
 
+                    {/* Clarifying question label */}
+                    {msg.role === "assistant" && msg.isClarifying && !msg.pending && (
+                      <div className="flex items-center gap-1 text-[10px] font-medium text-blue-500 mb-0.5">
+                        <HelpCircle className="w-3 h-3" />
+                        Needs clarification
+                      </div>
+                    )}
+
                     {/* Bubble */}
                     {(msg.content || msg.pending) && (
                       <div
@@ -992,6 +1009,8 @@ export default function AskPage() {
                           "rounded-xl px-3 sm:px-4 py-2.5 sm:py-3 text-sm leading-relaxed",
                           msg.role === "user"
                             ? "bg-blue-600 text-white"
+                            : msg.isClarifying
+                            ? "bg-blue-50 border border-blue-200 text-blue-900"
                             : "bg-gray-50 border border-gray-200 text-gray-800"
                         )}
                       >
