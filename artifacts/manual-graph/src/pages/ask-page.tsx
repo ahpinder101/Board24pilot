@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Bot, User, Send, BookOpen, Loader2, MessageSquare, ExternalLink,
   FileText, Paperclip, X, Image, Globe, ThumbsUp, ThumbsDown,
@@ -989,8 +991,26 @@ export default function AskPage() {
                             <Loader2 className="w-3 h-3 animate-spin" />
                             Translating…
                           </span>
-                        ) : (
+                        ) : msg.role === "user" ? (
                           <span className="whitespace-pre-wrap">{displayText}</span>
+                        ) : (
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            className={cn(
+                              "prose prose-sm max-w-none",
+                              "prose-p:my-1 prose-p:leading-relaxed",
+                              "prose-ol:my-1.5 prose-ol:pl-5 prose-ol:space-y-1",
+                              "prose-ul:my-1.5 prose-ul:pl-5 prose-ul:space-y-1",
+                              "prose-li:my-0 prose-li:leading-relaxed",
+                              "prose-strong:font-semibold prose-strong:text-gray-900",
+                              "prose-code:bg-gray-100 prose-code:text-gray-800 prose-code:rounded prose-code:px-1 prose-code:py-0.5 prose-code:text-[0.8em] prose-code:before:content-none prose-code:after:content-none",
+                              "prose-headings:font-semibold prose-headings:text-gray-900 prose-h3:text-sm prose-h4:text-sm",
+                              "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0",
+                              "text-gray-800 text-sm",
+                            )}
+                          >
+                            {displayText}
+                          </ReactMarkdown>
                         )}
                       </div>
                     )}
