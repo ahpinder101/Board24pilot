@@ -19,7 +19,7 @@ import {
   GetManualGraphParams,
 } from "@workspace/api-zod";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText, reprocessCompoundPages } from "../lib/extractionPipeline.js";
+import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText, reprocessCompoundPages, repairGraphPasses } from "../lib/extractionPipeline.js";
 import { logger } from "../lib/logger.js";
 import { expensiveOpLimiter } from "../middlewares/rateLimit.js";
 
@@ -680,6 +680,39 @@ router.post("/manuals/:id/extract-graph", expensiveOpLimiter, async (req, res) =
       logger.info({ manualId, ...result }, "Graph extraction completed");
     } catch (err) {
       logger.error({ err, manualId }, "Graph extraction failed");
+    }
+  });
+});
+
+// POST /manuals/:id/repair-graph — re-run only Passes 5, 5b, and 6 from existing entities
+// Use when a manual has entities (pass >= 4) but paths/relationships are empty.
+// Does NOT re-run OCR, entity extraction, or chunking — those are preserved.
+router.post("/manuals/:id/repair-graph", expensiveOpLimiter, async (req, res) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
+  if (isNaN(manualId)) {
+    res.status(400).json({ error: "Invalid manual id" });
+    return;
+  }
+
+  const [manual] = await db.select(manualCols).from(manualsTable).where(eq(manualsTable.id, manualId));
+  if (!manual) {
+    res.status(404).json({ error: "Manual not found" });
+    return;
+  }
+
+  if (!(await claimForProcessing(manualId))) {
+    res.status(409).json({ error: "Manual is already processing" });
+    return;
+  }
+
+  res.status(202).json({ ok: true, manualId, message: "Graph repair started — poll GET /api/manuals/:id for progress" });
+
+  setImmediate(async () => {
+    try {
+      const result = await repairGraphPasses(manualId);
+      logger.info({ manualId, ...result }, "Graph repair completed");
+    } catch (err) {
+      logger.error({ err, manualId }, "Graph repair failed");
     }
   });
 });

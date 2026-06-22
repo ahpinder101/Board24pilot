@@ -711,8 +711,38 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       graphPaths = allPaths.rows;
     }
 
-    // Build graph context
+    // ── 3b. Track B — page-references overlap (procedural queries) ────────────
+    // Fetch paths whose page_references overlap with the pages already retrieved
+    // by FTS.  This catches procedures not matched by name/plain_language FTS but
+    // whose step text lives on the same pages as the retrieved chunks.
+    if (isProceduralQuery && ragChunks.length > 0) {
+      const retrievedPages = [...new Set(ragChunks.map((c) => c.page_number))];
+      if (retrievedPages.length > 0) {
+        const pgArrayLit = `{${retrievedPages.join(",")}}`;
+        try {
+          const overlapResult = await db.execute<PathRow>(sql`
+            SELECT id, name, path_type, condition, step_sequence, plain_language, page_references
+            FROM paths
+            WHERE manual_id = ANY(${scopedManualArray}::integer[])
+              AND page_references::integer[] && ${pgArrayLit}::integer[]
+            ORDER BY id
+            LIMIT 15
+          `);
+          if (overlapResult.rows.length > 0) {
+            const existingPathIds = new Set(graphPaths.map((p) => p.id));
+            for (const row of overlapResult.rows) {
+              if (!existingPathIds.has(row.id)) graphPaths.push(row);
+            }
+          }
+        } catch (overlapErr) {
+          req.log.warn({ err: overlapErr }, "agent-chat: Track B overlap query failed — continuing");
+        }
+      }
+    }
+
+    // Build graph context + separate procedure steps section
     let graphContext = "";
+    let procedureStepsSection = "";
     {
       const parts: string[] = [];
 
@@ -762,14 +792,39 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       }
 
       if (graphPaths.length > 0) {
-        const pathSummary = graphPaths.map((p) => {
-          const scope = p.condition ? ` [${p.condition}]` : " [all machines]";
-          const steps = Array.isArray(p.step_sequence) && p.step_sequence.length > 0
-            ? "\n  Steps: " + p.step_sequence.join(" → ")
-            : "";
-          return `• ${p.name}${scope}: ${p.plain_language}${steps}`;
-        }).join("\n");
-        parts.push(`PROCEDURE PATHS:\n${pathSummary}`);
+        // Paths WITH step_sequence → dedicated "PROCEDURE STEPS" section (authoritative)
+        const pathsWithSteps = graphPaths.filter(
+          (p) => Array.isArray(p.step_sequence) && p.step_sequence.length > 0
+        );
+        const pathsWithoutSteps = graphPaths.filter(
+          (p) => !Array.isArray(p.step_sequence) || p.step_sequence.length === 0
+        );
+
+        if (pathsWithSteps.length > 0) {
+          procedureStepsSection = pathsWithSteps
+            .map((p) => {
+              const scope = p.condition ? ` [${p.condition}]` : "";
+              const pageRef =
+                Array.isArray(p.page_references) && p.page_references.length > 0
+                  ? ` [page ${p.page_references.join(", ")}]`
+                  : "";
+              const steps = p.step_sequence
+                .map((s, i) => `${i + 1}. ${s}`)
+                .join("\n");
+              return `${p.name}${scope}${pageRef}:\n${steps}`;
+            })
+            .join("\n\n");
+        }
+
+        if (pathsWithoutSteps.length > 0) {
+          const pathSummary = pathsWithoutSteps
+            .map((p) => {
+              const scope = p.condition ? ` [${p.condition}]` : " [all machines]";
+              return `• ${p.name}${scope}: ${p.plain_language}`;
+            })
+            .join("\n");
+          parts.push(`PROCEDURE PATHS:\n${pathSummary}`);
+        }
       }
 
       graphContext = parts.join("\n\n");
@@ -829,8 +884,8 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
 
     const scratchpadUserPrompt = `${historySnippet}CURRENT QUESTION: ${trimmedQuestion}
 
-RETRIEVED EXCERPTS:
-${ragContext.slice(0, 6000)}
+${procedureStepsSection ? `PROCEDURE STEPS (from knowledge graph — authoritative):\n${procedureStepsSection.slice(0, 2000)}\n\n` : ""}RETRIEVED EXCERPTS:
+${ragContext.slice(0, 12000)}
 
 ${graphContext ? `KNOWLEDGE GRAPH CONTEXT:\n${graphContext.slice(0, 800)}` : ""}
 
@@ -1080,6 +1135,7 @@ CRITICAL RULES:
 3. Verbatim values — ABSOLUTE: for any specific value (number, measurement, part number, model code) copy it character-for-character from the excerpt. If the exact value does not appear literally, write "The manual does not specify this."
 4. Never fabricate technical details.
 5. Multi-step procedures: synthesise steps from ALL provided excerpts in sequence. No single sentence needs to cover the whole procedure — build it across multiple sources. Never say "the manual does not specify" for a procedure when the excerpts contain relevant steps.
+6. PROCEDURE STEPS section: when "PROCEDURE STEPS (verified from knowledge graph)" appears above the excerpts, list every step in full as the primary answer — do not summarise, skip, reorder, or paraphrase any step. Number them exactly as given.
 
 FORMATTING: Write in plain prose. You may use numbered lists (1. 2. 3.) and plain dashes (-). Do NOT use markdown bold (**text**) or headers (##).${
   hasImage
@@ -1107,7 +1163,7 @@ OUTPUT FORMAT — respond with valid JSON only:
 
     const userPrompt = `QUESTION: ${trimmedQuestion}
 
-${feedbackContext ? feedbackContext + "\n\n" : ""}MANUAL EXCERPTS:
+${feedbackContext ? feedbackContext + "\n\n" : ""}${procedureStepsSection ? `PROCEDURE STEPS (verified from knowledge graph):\n${procedureStepsSection}\n\n` : ""}MANUAL EXCERPTS:
 ${ragContext}
 
 ${graphContext}

@@ -6,7 +6,7 @@ import {
   AlertTriangle, CheckCircle2, Clock, ExternalLink,
   FileText, Network, Database, RefreshCw, Trash2,
   Activity, WifiOff, Network as GraphIcon, RotateCcw,
-  ChevronDown, ChevronUp,
+  ChevronDown, ChevronUp, Wrench,
 } from "lucide-react";
 import { useGetManualStats, getGetManualStatsQueryKey, type Manual } from "@workspace/api-client-react";
 import { ScopeSelector } from "@/components/scope-selector";
@@ -278,6 +278,51 @@ function FailedSection({
   );
 }
 
+function RepairGraphButton({
+  manualId,
+  getToken,
+  onStarted,
+}: {
+  manualId: number;
+  getToken: () => Promise<string | null>;
+  onStarted: () => void;
+}) {
+  const [isRepairing, setIsRepairing] = useState(false);
+
+  async function handleRepair() {
+    setIsRepairing(true);
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/manuals/${manualId}/repair-graph`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.ok) {
+        toast.success("Graph repair started — relationship and path extraction running");
+        onStarted();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast.error((data as { error?: string }).error ?? "Failed to start repair");
+      }
+    } catch {
+      toast.error("Network error — please try again");
+    } finally {
+      setIsRepairing(false);
+    }
+  }
+
+  return (
+    <button
+      onClick={handleRepair}
+      disabled={isRepairing}
+      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100 text-xs font-medium transition-all disabled:opacity-50 mt-2"
+    >
+      <Wrench className={cn("w-3.5 h-3.5", isRepairing && "animate-spin")} />
+      {isRepairing ? "Repairing graph…" : "Repair graph (re-run relationships & paths)"}
+    </button>
+  );
+}
+
 export function FileCard({ manual, onDelete, onStarted, getToken, highlight = false }: FileCardProps) {
   const showScopeSelector = manual.status === "pending" || manual.status === "structure_complete";
   const isProcessing = manual.status === "processing";
@@ -356,6 +401,13 @@ export function FileCard({ manual, onDelete, onStarted, getToken, highlight = fa
             onStarted={onStarted}
             compact
           />
+          {(manual.processingPass ?? 0) >= 4 && (
+            <RepairGraphButton
+              manualId={manual.id}
+              getToken={getToken}
+              onStarted={onStarted}
+            />
+          )}
         </div>
       )}
 

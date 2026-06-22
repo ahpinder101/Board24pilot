@@ -1641,6 +1641,117 @@ export async function extractGraphFromExistingText(
   }
 }
 
+// ─── REPAIR GRAPH: re-run Passes 5, 5b, and 6 from existing entities/text ────
+//
+// Use when a manual already has OCR text and entities (processing_pass >= 4)
+// but the relationships and paths tables are empty because extraction stalled
+// before Pass 5.  Unlike extractGraphFromExistingText this function NEVER
+// re-runs Pass 4 — it assumes the entity table is populated and authoritative.
+
+export async function repairGraphPasses(manualId: number): Promise<{ relationships: number; paths: number }> {
+  // Validate: manual must have pages and entities already
+  const [priorState] = await db
+    .select({ processingPass: manualsTable.processingPass, status: manualsTable.status, documentType: manualsTable.documentType, structure: manualsTable.structure })
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId));
+
+  if (!priorState) throw new Error(`Manual ${manualId} not found`);
+
+  const [entityCountRow] = await db
+    .select({ cnt: count() })
+    .from(entitiesTable)
+    .where(eq(entitiesTable.manualId, manualId));
+  const entityCount = entityCountRow?.cnt ?? 0;
+
+  const pages = await db
+    .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText, description: manualPagesTable.description })
+    .from(manualPagesTable)
+    .where(eq(manualPagesTable.manualId, manualId))
+    .orderBy(manualPagesTable.pageNumber);
+
+  if (pages.length === 0) throw new Error(`Manual ${manualId} has no OCR text — run vision OCR first`);
+  if (entityCount === 0) throw new Error(`Manual ${manualId} has no extracted entities — run full extraction first`);
+
+  await setManualStatus(manualId, "processing", { processingPass: 4 });
+  await setActivity(manualId, `Repair — loading ${entityCount} existing entities for relationship + path extraction`);
+
+  try {
+    const fullText = pages
+      .map((p) => {
+        const raw = (p.rawText ?? "").trim();
+        const desc = (p.description ?? "").trim();
+        if (raw.length < 100 && desc.length > 0) return `[Page ${p.pageNumber} — diagram/image content]\n${desc}`;
+        return raw;
+      })
+      .filter((t) => t.trim().length > 0)
+      .join("\n\n");
+
+    // Load existing entities for name anchoring in Pass 5
+    const dbEntities = await db
+      .select({ id: entitiesTable.id, name: entitiesTable.name, type: entitiesTable.type, description: entitiesTable.description, pageReferences: entitiesTable.pageReferences, properties: entitiesTable.properties })
+      .from(entitiesTable)
+      .where(eq(entitiesTable.manualId, manualId));
+
+    const extractedEntitiesForContext: ExtractedEntity[] = dbEntities.map((e) => ({
+      name: e.name,
+      type: e.type,
+      description: e.description,
+      pageReferences: (e.pageReferences as number[]) ?? [],
+      properties: (e.properties as EntityProperties | undefined) ?? undefined,
+    }));
+
+    const nameToId = new Map<string, number>();
+    for (const e of dbEntities) nameToId.set(e.name.toLowerCase().trim(), e.id);
+
+    // Clear existing relationships and paths (fresh extraction)
+    await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+    await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
+
+    // Pass 5: relationship extraction
+    const relCount = await pass5RelationshipExtraction(manualId, fullText, extractedEntitiesForContext, nameToId);
+
+    // Pass 5b: path extraction
+    const extractedPaths = await pass5ExtractPaths(manualId, fullText, Infinity, extractedEntitiesForContext);
+    let pathCount = 0;
+    for (const path of extractedPaths) {
+      if (!path.name || !path.plainLanguage) continue;
+      try {
+        await db.insert(pathsTable).values({
+          manualId,
+          name: path.name,
+          pathType: path.pathType ?? "procedure_step",
+          condition: path.condition ?? null,
+          stepSequence: path.stepSequence ?? [],
+          plainLanguage: path.plainLanguage,
+          pageReferences: path.pageReferences ?? [],
+        });
+        pathCount++;
+      } catch (err) {
+        logger.warn({ err, path: path.name }, "Repair: path insert failed");
+      }
+    }
+    logger.info({ manualId, paths: pathCount }, "Repair: Pass 5b complete");
+
+    // Pass 6: ordering & hierarchy
+    const structure = {
+      documentType: priorState.documentType ?? "other",
+      overview: (priorState.structure as { overview?: string } | null)?.overview ?? "",
+      machines: (priorState.structure as { machines?: string[] } | null)?.machines ?? [],
+      sections: (priorState.structure as { sections?: string[] } | null)?.sections ?? [],
+    };
+    const hierarchy = await pass6OrderingHierarchy(manualId, fullText, extractedEntitiesForContext, structure.machines);
+    await applyTopLevelOrdering(manualId, hierarchy.topLevelMachines);
+
+    await setManualStatus(manualId, "completed", { processingPass: 7 });
+    logger.info({ manualId, relationships: relCount, paths: pathCount }, "Repair graph passes complete");
+    return { relationships: relCount, paths: pathCount };
+  } catch (err) {
+    logger.error({ err, manualId }, "Repair graph passes failed");
+    await setManualStatus(manualId, "failed", { errorMessage: err instanceof Error ? err.message : "Unknown error" });
+    throw err;
+  }
+}
+
 // ─── RECHUNK: re-run Pass 7 from stored page text ────────────────────────────
 
 /**
