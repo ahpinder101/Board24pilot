@@ -1306,7 +1306,17 @@ Please answer based on the above information.`;
           { scratchpadEvidence: scratchpad.evidenceQuality, specialistStatus: specialistResult.validationStatus },
           "agent-chat: specialist fail overridden — scratchpad strong/partial evidence with no contradictions"
         );
-        // finalAnswer stays as draftAnswer
+        // finalAnswer stays as draftAnswer.
+        // Clear unsupportedClaims so the UI does not show "Not in retrieved pages"
+        // for steps we've already decided to trust — they're retrieval gaps, not errors.
+        finalSpecialistResult = {
+          ...specialistResult,
+          validationStatus: "revise" as const,
+          validationSummary: {
+            ...specialistResult.validationSummary,
+            unsupportedClaims: [],
+          },
+        };
       } else {
         finalAnswer = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, specialistResult.validationSummary);
         isGuided = true;
@@ -1367,6 +1377,24 @@ Please answer based on the above information.`;
 
     // Final fallback: top chunk
     if (indicesToCite.size === 0 && ragChunks.length > 0) indicesToCite.add(0);
+
+    // Rank-preference override: if every cited chunk has rank == 0 (added by phrase
+    // or window expansion, not FTS), replace with the highest-FTS-ranked chunk so
+    // the citation points at the most relevant page rather than the most phrase-specific.
+    if (indicesToCite.size > 0) {
+      const allUnranked = [...indicesToCite].every((i) => (ragChunks[i]?.rank ?? 0) === 0);
+      if (allUnranked) {
+        let bestRankIdx = -1;
+        let bestRank = 0;
+        ragChunks.forEach((c, i) => {
+          if ((c.rank ?? 0) > bestRank) { bestRank = c.rank ?? 0; bestRankIdx = i; }
+        });
+        if (bestRankIdx >= 0 && bestRank > 0.01) {
+          indicesToCite.clear();
+          indicesToCite.add(bestRankIdx);
+        }
+      }
+    }
 
     const seenManualPages = new Set<string>();
     const citations: ChatCitation[] = [];

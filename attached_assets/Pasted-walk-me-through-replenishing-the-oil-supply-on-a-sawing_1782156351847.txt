@@ -1,0 +1,39 @@
+walk me through replenishing the oil supply on a sawing machine on first setup
+
+To replenish the oil supply on a sawing machine during the first setup, follow these steps:
+
+    Prepare the Accessory Oil Tank: Hold the base of the nozzle of the accessory oil tank and use scissors to cut about halfway along the straight section of the nozzle. Loosen and remove the nozzle, then remove the seal. Tighten the nozzle back onto the tank.
+
+    Tilt the Machine Head: Carefully tilt back the machine head to access the oil filling point. Ensure the table is secure to prevent movement, which could cause injury.
+
+    Fill the Oil Tank: Remove the rubber cap from the oil tank. Pour 120 ml of lubricating oil into the oil tank, using the upper reference line as a guide. Replace the rubber cap securely.
+
+    Return the Machine Head: Return the machine head to its original position.
+
+    Check the Oil Level: Verify that the oil gauge reaches the upper reference line in the oil gauge window. If the oil level is below the lower reference line, additional oil must be added.
+
+Safety Precautions: Wear protective goggles and gloves when handling lubricating oil to prevent it from contacting your eyes or skin, as it can cause inflammation. Do not ingest the oil, and keep it out of reach of children.
+UnverifiedMechanical
+Translate:
+Helpful?
+1 source — tap to open PDF
+50 text chunksfrom Mini Jug Kettle Instruction Manual GB J 2649356b faa4 47ea 8102 3b761239faca, s7220c in
+10 entity/relationship records
+19 procedural paths
+Partial evidence: parts involved (missing) · sequence of steps (missing) +6 more
+
+Missing:
+parts involved
+sequence of steps
+
+Not in retrieved pages:
+Prepare the Accessory Oil Tank: Hold the base of the nozzle of the accessory oil tank and use scissors to cut about halfway along the straight section of the nozzle. Loosen and remove the nozzle, then remove the seal. Tighten the nozzle back onto the tank.
+Tilt the Machine Head: Carefully tilt back the machine head to access the oil filling point. Ensure the table is secure to prevent movement, which could cause injury.
+Fill the Oil Tank: Remove the rubber cap from the oil tank. Pour 120 ml of lubricating oil into the oil tank, using the upper reference line as a guide. Replace the rubber cap securely.
+Return the Machine Head: Return the machine head to its original position.
+Check the Oil Level: Verify that the oil gauge reaches the upper reference line in the oil gauge window. If the oil level is below the lower reference line, additional oil must be added.
+Safety Precautions: Wear protective goggles and gloves when handling lubricating oil to prevent it from contacting your eyes or skin, as it can cause inflammation. Do not ingest the oil, and keep it out of reach of children.
+
+Suggestions:
+The current evidence does not provide specific steps for replenishing the oil supply on a sawing machine. Consider consulting the machine's specific manual or contacting the manufacturer for detailed instructions.
+Passes: 1⚠ With warnings
