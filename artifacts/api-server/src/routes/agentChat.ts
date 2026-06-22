@@ -22,7 +22,7 @@ const router = Router();
 const CHAT_MODEL = "gpt-4o";
 const TOP_K_CHUNKS = 8;
 const TOP_K_SCOPED = 14;
-const TOP_K_PROCEDURAL = 24;
+const TOP_K_PROCEDURAL = 32;
 const TOP_K_ENTITIES = 10;
 const FTS_RANK_THRESHOLD = 0.01;
 
@@ -586,6 +586,49 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       for (const row of specResult.rows) {
         if (!existingIds2.has(row.id)) { ragChunks.push(row); existingIds2.add(row.id); }
       }
+
+      // ── Cross-page window expansion (procedural queries only) ────────────
+      // Numbered procedure steps may be on a different page from the
+      // introductory text that scores highest for the user's query terms.
+      // Fetch all chunks from directly adjacent pages (page_number ± 1)
+      // so inter-page procedure sequences are never truncated.
+      if (isProceduralQuery) {
+        const seenPageKeys = new Set(ragChunks.map((c) => `${c.manual_id}:${c.page_number}`));
+        const crossPageEntries: Array<{ mid: number; pg: number }> = [];
+        const addedPageKeys = new Set(seenPageKeys);
+        for (const key of seenPageKeys) {
+          const [midStr, pgStr] = key.split(":");
+          const mid = Number(midStr);
+          const pg = Number(pgStr);
+          if (!scopedManualIds.includes(mid)) continue;
+          for (const delta of [-1, 1]) {
+            const nPg = pg + delta;
+            const nKey = `${mid}:${nPg}`;
+            if (nPg > 0 && !addedPageKeys.has(nKey)) {
+              addedPageKeys.add(nKey);
+              crossPageEntries.push({ mid, pg: nPg });
+            }
+          }
+        }
+        if (crossPageEntries.length > 0) {
+          const cappedEntries = crossPageEntries.slice(0, 12);
+          const crossPageConds = cappedEntries.map(({ mid, pg }) =>
+            sql`(c.manual_id = ${mid} AND c.page_number = ${pg})`
+          );
+          const crossPageResult = await db.execute<ChunkRow>(sql`
+            SELECT c.id, c.manual_id, m.name AS manual_name,
+                   c.page_number, c.chunk_index, c.content, 0::float AS rank
+            FROM chunks c JOIN manuals m ON m.id = c.manual_id
+            WHERE ${sql.join(crossPageConds, sql` OR `)}
+            ORDER BY c.page_number, c.chunk_index
+            LIMIT 20
+          `);
+          const existingIds3 = new Set(ragChunks.map((c) => c.id));
+          for (const row of crossPageResult.rows) {
+            if (!existingIds3.has(row.id)) { ragChunks.push(row); existingIds3.add(row.id); }
+          }
+        }
+      }
     }
 
     // ── 2d. Per-manual proportional allocation (procedural queries) ──────────
@@ -733,7 +776,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     }
 
     // ── 4. RAG context + feedback corrections ─────────────────────────────────
-    const ragContext = ragChunks.length > 0
+    let ragContext = ragChunks.length > 0
       ? ragChunks.map((c, i) => `[Source ${i + 1}: "${c.manual_name}", page ${c.page_number}]\n${c.content}`).join("\n\n---\n\n")
       : "No relevant manual excerpts found.";
 
@@ -887,6 +930,93 @@ Analyse the evidence and output your scratchpad JSON.`;
         },
       });
       return;
+    }
+
+    // ── 4.65. Scratchpad gap re-retrieval ─────────────────────────────────────
+    // The scratchpad may report uncoveredAspects even when strategy === "answer"
+    // because the original FTS query used abstract vocabulary ("replenish",
+    // "supply") while the actual procedure text uses mechanical terms ("nozzle",
+    // "rubber cap", "oil tank"). Re-run FTS using the uncoveredAspects as search
+    // terms so vocabulary-mismatched pages are fetched before the answer pass.
+    if (
+      scratchpad.strategy === "answer" &&
+      scratchpad.uncoveredAspects.length > 0 &&
+      scopedManualIds.length > 0
+    ) {
+      const gapTerms = scratchpad.uncoveredAspects
+        .join(" ")
+        .replace(/[^a-zA-Z0-9 ]/g, " ")
+        .trim()
+        .split(/\s+/)
+        .filter((w) => w.length >= 3)
+        .slice(0, 16);
+      const gapTsQuery = gapTerms.join(" | ");
+
+      if (gapTsQuery.length > 0) {
+        try {
+          const gapFts = await db.execute<ChunkRow>(sql`
+            SELECT c.id, c.manual_id, m.name AS manual_name,
+                   c.page_number, c.chunk_index, c.content,
+                   ts_rank(c.fts_vector, to_tsquery('english', ${gapTsQuery})) AS rank
+            FROM chunks c JOIN manuals m ON m.id = c.manual_id
+            WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+              AND c.fts_vector @@ to_tsquery('english', ${gapTsQuery})
+            ORDER BY rank DESC
+            LIMIT 12
+          `);
+
+          if (gapFts.rows.length > 0) {
+            const existingGapIds = new Set(ragChunks.map((c) => c.id));
+            const newGapChunks: ChunkRow[] = [];
+            for (const row of gapFts.rows) {
+              if (!existingGapIds.has(row.id)) {
+                newGapChunks.push(row);
+                existingGapIds.add(row.id);
+              }
+            }
+
+            if (newGapChunks.length > 0) {
+              // Same-page window expansion on the newly found chunks
+              const gapAdjEntries: Array<{ mid: number; pg: number; ci: number }> = [];
+              for (const c of newGapChunks) {
+                for (const delta of [-2, -1, 1, 2]) {
+                  const adj = c.chunk_index + delta;
+                  if (adj >= 0) gapAdjEntries.push({ mid: c.manual_id, pg: c.page_number, ci: adj });
+                }
+              }
+              if (gapAdjEntries.length > 0) {
+                const gapAdjConds = gapAdjEntries.map(({ mid, pg, ci }) =>
+                  sql`(c.manual_id = ${mid} AND c.page_number = ${pg} AND c.chunk_index = ${ci})`
+                );
+                const gapAdjResult = await db.execute<ChunkRow>(sql`
+                  SELECT c.id, c.manual_id, m.name AS manual_name,
+                         c.page_number, c.chunk_index, c.content, 0::float AS rank
+                  FROM chunks c JOIN manuals m ON m.id = c.manual_id
+                  WHERE ${sql.join(gapAdjConds, sql` OR `)}
+                `);
+                for (const row of gapAdjResult.rows) {
+                  if (!existingGapIds.has(row.id)) {
+                    newGapChunks.push(row);
+                    existingGapIds.add(row.id);
+                  }
+                }
+              }
+
+              ragChunks.push(...newGapChunks);
+              ragChunks.sort((a, b) => a.page_number - b.page_number || a.chunk_index - b.chunk_index);
+              ragContext = ragChunks
+                .map((c, i) => `[Source ${i + 1}: "${c.manual_name}", page ${c.page_number}]\n${c.content}`)
+                .join("\n\n---\n\n");
+              req.log.info(
+                { gapChunksAdded: newGapChunks.length, uncoveredAspects: scratchpad.uncoveredAspects },
+                "agent-chat: gap re-retrieval added chunks"
+              );
+            }
+          }
+        } catch (gapErr) {
+          req.log.warn({ err: gapErr }, "agent-chat: gap re-retrieval failed — continuing with existing context");
+        }
+      }
     }
 
     if (scratchpad.strategy === "cannot_answer") {
