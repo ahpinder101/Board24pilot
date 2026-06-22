@@ -7,6 +7,7 @@ import {
 } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { GetEntityParams } from "@workspace/api-zod";
+import { buildSectionMap } from "../lib/graphHelpers";
 
 const router = Router();
 
@@ -22,14 +23,24 @@ router.get("/graph", async (req, res) => {
       properties: entitiesTable.properties,
       pageReferences: entitiesTable.pageReferences,
       orderIndex: entitiesTable.orderIndex,
+      extractionStartPage: entitiesTable.extractionStartPage,
+      extractionEndPage: entitiesTable.extractionEndPage,
       manualName: manualsTable.name,
     })
     .from(entitiesTable)
     .leftJoin(manualsTable, eq(entitiesTable.manualId, manualsTable.id));
 
-  const edges = await db.select().from(relationshipsTable);
+  const [edges, sectionMap] = await Promise.all([
+    db.select().from(relationshipsTable),
+    buildSectionMap(),
+  ]);
 
-  res.json({ nodes, edges });
+  const enrichedNodes = nodes.map((n) => ({
+    ...n,
+    sectionPath: sectionMap.get(n.id) ?? null,
+  }));
+
+  res.json({ nodes: enrichedNodes, edges });
 });
 
 // GET /stats — global stats
@@ -107,6 +118,8 @@ router.get("/entities/:id", async (req, res) => {
       properties: entitiesTable.properties,
       pageReferences: entitiesTable.pageReferences,
       orderIndex: entitiesTable.orderIndex,
+      extractionStartPage: entitiesTable.extractionStartPage,
+      extractionEndPage: entitiesTable.extractionEndPage,
       manualName: manualsTable.name,
     })
     .from(entitiesTable)
@@ -118,18 +131,20 @@ router.get("/entities/:id", async (req, res) => {
     return;
   }
 
-  const outgoing = await db
-    .select()
-    .from(relationshipsTable)
-    .where(eq(relationshipsTable.sourceEntityId, parsed.data.id));
-
-  const incoming = await db
-    .select()
-    .from(relationshipsTable)
-    .where(eq(relationshipsTable.targetEntityId, parsed.data.id));
+  const [outgoing, incoming, sectionMap] = await Promise.all([
+    db
+      .select()
+      .from(relationshipsTable)
+      .where(eq(relationshipsTable.sourceEntityId, parsed.data.id)),
+    db
+      .select()
+      .from(relationshipsTable)
+      .where(eq(relationshipsTable.targetEntityId, parsed.data.id)),
+    buildSectionMap(entity.manualId ?? undefined),
+  ]);
 
   res.json({
-    entity,
+    entity: { ...entity, sectionPath: sectionMap.get(entity.id) ?? null },
     incomingEdges: incoming,
     outgoingEdges: outgoing,
   });

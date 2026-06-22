@@ -173,6 +173,14 @@ export function GraphView({ data }: GraphViewProps) {
             </Badge>
           </CardHeader>
           <CardContent className="pt-4 text-xs space-y-4 text-muted-foreground">
+            {selectedNode.sectionPath && (
+              <div className="flex items-start gap-1.5">
+                <span className="mt-0.5 shrink-0 opacity-50">§</span>
+                <p className="text-[10px] leading-relaxed opacity-80 break-words">
+                  {selectedNode.sectionPath}
+                </p>
+              </div>
+            )}
             <div>
               <strong className="text-foreground mb-1 block">Description</strong>
               <p className="line-clamp-4">{selectedNode.description}</p>
@@ -185,10 +193,18 @@ export function GraphView({ data }: GraphViewProps) {
                 </pre>
               </div>
             )}
-            {selectedNode.pageReferences && selectedNode.pageReferences.length > 0 && (
+            {(selectedNode.extractionStartPage != null || (selectedNode.pageReferences && selectedNode.pageReferences.length > 0)) && (
               <div>
                 <strong className="text-foreground mb-1 block">Pages</strong>
-                <p>{selectedNode.pageReferences.join(", ")}</p>
+                {selectedNode.extractionStartPage != null ? (
+                  <p>
+                    {selectedNode.extractionStartPage === selectedNode.extractionEndPage || selectedNode.extractionEndPage == null
+                      ? `p. ${selectedNode.extractionStartPage}`
+                      : `pp. ${selectedNode.extractionStartPage}–${selectedNode.extractionEndPage}`}
+                  </p>
+                ) : (
+                  <p>{selectedNode.pageReferences!.join(", ")}</p>
+                )}
               </div>
             )}
             {selectedNode.manualName && (

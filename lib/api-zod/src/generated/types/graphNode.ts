@@ -21,4 +21,19 @@ export interface GraphNode {
   orderIndex?: number | null;
   /** @nullable */
   manualName?: string | null;
+  /**
+     * First page of the document section this entity was extracted from
+     * @nullable
+     */
+  extractionStartPage?: number | null;
+  /**
+     * Last page of the document section this entity was extracted from
+     * @nullable
+     */
+  extractionEndPage?: number | null;
+  /**
+     * Docling section breadcrumb (e.g. "2. INSTALLATION > 2-3. Lubrication") for the dominant source section
+     * @nullable
+     */
+  sectionPath?: string | null;
 }

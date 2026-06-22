@@ -296,7 +296,10 @@ export const GetManualGraphResponse = zod.object({
 }).passthrough().nullish(),
   "pageReferences": zod.array(zod.number()).optional(),
   "orderIndex": zod.number().nullish(),
-  "manualName": zod.string().nullish()
+  "manualName": zod.string().nullish(),
+  "extractionStartPage": zod.number().nullish().describe('First page of the document section this entity was extracted from'),
+  "extractionEndPage": zod.number().nullish().describe('Last page of the document section this entity was extracted from'),
+  "sectionPath": zod.string().nullish().describe('Docling section breadcrumb (e.g. \"2. INSTALLATION > 2-3. Lubrication\") for the dominant source section')
 })),
   "edges": zod.array(zod.object({
   "id": zod.number(),
@@ -428,7 +431,10 @@ export const GetGlobalGraphResponse = zod.object({
 }).passthrough().nullish(),
   "pageReferences": zod.array(zod.number()).optional(),
   "orderIndex": zod.number().nullish(),
-  "manualName": zod.string().nullish()
+  "manualName": zod.string().nullish(),
+  "extractionStartPage": zod.number().nullish().describe('First page of the document section this entity was extracted from'),
+  "extractionEndPage": zod.number().nullish().describe('Last page of the document section this entity was extracted from'),
+  "sectionPath": zod.string().nullish().describe('Docling section breadcrumb (e.g. \"2. INSTALLATION > 2-3. Lubrication\") for the dominant source section')
 })),
   "edges": zod.array(zod.object({
   "id": zod.number(),
@@ -482,7 +488,10 @@ export const GetEntityResponse = zod.object({
 }).passthrough().nullish(),
   "pageReferences": zod.array(zod.number()).optional(),
   "orderIndex": zod.number().nullish(),
-  "manualName": zod.string().nullish()
+  "manualName": zod.string().nullish(),
+  "extractionStartPage": zod.number().nullish().describe('First page of the document section this entity was extracted from'),
+  "extractionEndPage": zod.number().nullish().describe('Last page of the document section this entity was extracted from'),
+  "sectionPath": zod.string().nullish().describe('Docling section breadcrumb (e.g. \"2. INSTALLATION > 2-3. Lubrication\") for the dominant source section')
 }),
   "incomingEdges": zod.array(zod.object({
   "id": zod.number(),

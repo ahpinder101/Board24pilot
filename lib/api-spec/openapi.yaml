@@ -472,6 +472,15 @@ components:
           type: ["integer", "null"]
         manualName:
           type: ["string", "null"]
+        extractionStartPage:
+          type: ["integer", "null"]
+          description: First page of the document section this entity was extracted from
+        extractionEndPage:
+          type: ["integer", "null"]
+          description: Last page of the document section this entity was extracted from
+        sectionPath:
+          type: ["string", "null"]
+          description: Docling section breadcrumb (e.g. "2. INSTALLATION > 2-3. Lubrication") for the dominant source section
 
     GraphEdge:
       type: object

@@ -12,6 +12,7 @@ import {
 } from "@workspace/db";
 import { eq, sql, and, ne, gte, lte, count } from "drizzle-orm";
 import { estimateProcessingCost, calculateActualCost } from "../lib/costEstimator.js";
+import { buildSectionMap } from "../lib/graphHelpers.js";
 import {
   CreateManualBody,
   GetManualParams,
@@ -428,17 +429,20 @@ router.get("/manuals/:id/graph", async (req, res) => {
     return;
   }
 
-  const nodes = await db
-    .select()
-    .from(entitiesTable)
-    .where(eq(entitiesTable.manualId, parsed.data.id));
+  const manualId = parsed.data.id;
 
-  const edges = await db
-    .select()
-    .from(relationshipsTable)
-    .where(eq(relationshipsTable.manualId, parsed.data.id));
+  const [nodes, edges, sectionMap] = await Promise.all([
+    db.select().from(entitiesTable).where(eq(entitiesTable.manualId, manualId)),
+    db.select().from(relationshipsTable).where(eq(relationshipsTable.manualId, manualId)),
+    buildSectionMap(manualId),
+  ]);
 
-  res.json({ nodes, edges });
+  const enrichedNodes = nodes.map((n) => ({
+    ...n,
+    sectionPath: sectionMap.get(n.id) ?? null,
+  }));
+
+  res.json({ nodes: enrichedNodes, edges });
 });
 
 // GET /manuals/:id/stats
