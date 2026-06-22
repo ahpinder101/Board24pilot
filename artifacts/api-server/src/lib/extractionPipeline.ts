@@ -796,12 +796,20 @@ async function pass7EmbedChunks(
     if (sharedPdfPath && imagePageNumbers?.has(page.pageNumber) && await hasDiagramImageFromPath(sharedPdfPath, page.pageNumber)) {
       const visionText = await describePageWithVision(sharedPdfPath, page.pageNumber);
       if (visionText) {
-        textToChunk = visionText;
+        // Combine vision description (structured drawing metadata) with the
+        // original OCR text so FTS can match BOTH the diagram annotations AND
+        // the surrounding procedural sentences. Replacing OCR with vision alone
+        // strips searchable keywords that only appear in the prose (e.g.
+        // "spring stroke", "minimum clearance") and breaks RAG retrieval.
+        const rawOcr = page.text.trim();
+        textToChunk = rawOcr.length > 50
+          ? `${visionText}\n\n${rawOcr}`
+          : visionText;
         enriched = true;
         diagramPages++;
         logger.info(
           { manualId, pageNumber: page.pageNumber },
-          "Pass 7: diagram page replaced with vision description"
+          "Pass 7: diagram page enriched with vision description + OCR"
         );
       }
     } else if (isTabularOcrPage(page.text)) {
