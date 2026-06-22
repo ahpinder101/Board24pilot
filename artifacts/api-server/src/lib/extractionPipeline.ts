@@ -847,8 +847,30 @@ async function pass7EmbedChunks(
         continue;
       }
     } else if (isShortText) {
-      // No embedded images and text too short — skip
-      continue;
+      // Text too short from pdf-parse. Check whether a previous vision run
+      // stored a richer description in manual_pages that we can still chunk —
+      // this happens when the PDF buffer gives sparse text on a re-run but the
+      // description column already has the enriched content from the first run.
+      const storedRows = await db
+        .select({ description: manualPagesTable.description })
+        .from(manualPagesTable)
+        .where(
+          and(
+            eq(manualPagesTable.manualId, manualId),
+            eq(manualPagesTable.pageNumber, page.pageNumber)
+          )
+        )
+        .limit(1);
+      const storedDescription = storedRows[0]?.description?.trim() ?? "";
+      if (storedDescription.length >= 20) {
+        textToChunk = storedDescription;
+        logger.info(
+          { manualId, pageNumber: page.pageNumber },
+          "Pass 7: using stored description as fallback for short-text page"
+        );
+      } else {
+        continue;
+      }
     } else if (isTabularOcrPage(page.text)) {
       // Pre-process tabular/schematic pages: reconstruct the row-level
       // relationships that OCR linearisation destroyed.  Prose pages pass through

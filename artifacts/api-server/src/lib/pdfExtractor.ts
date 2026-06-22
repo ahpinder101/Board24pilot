@@ -370,11 +370,18 @@ const SCOPE_RE: RegExp[] = [
 /** Alphabetic step marker at line start: "e)   …", "f)Basic…", "g)…" */
 const STEP_RE = /^[a-z]\)\s*/;
 
-/** Numbered section header for longer manuals: "1.1 Title", "2.3.4 …" */
+/** Multi-level numbered section: "1.1 Title", "2.3.4 …" */
 const NUMBERED_SECTION_RE = /^\d+(\.\d+)+\s+\S/;
 
+/**
+ * Single-level numbered step used in many engineering manuals: "1. Text", "2. Text".
+ * Matches a digit (one or more), a literal dot, at least one space, then a non-space char.
+ * Distinct from NUMBERED_SECTION_RE which requires two or more dotted levels.
+ */
+const NUMBERED_STEP_RE = /^\d+\.\s+\S/;
+
 function isStepBoundary(line: string): boolean {
-  return STEP_RE.test(line) || NUMBERED_SECTION_RE.test(line);
+  return STEP_RE.test(line) || NUMBERED_SECTION_RE.test(line) || NUMBERED_STEP_RE.test(line);
 }
 
 /**
