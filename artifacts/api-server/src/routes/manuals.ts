@@ -142,6 +142,120 @@ router.post("/manuals", async (req, res) => {
   res.status(201).json(manual);
 });
 
+// GET /manuals/domain-coverage — scan all completed manuals for technical domain coverage
+router.get("/manuals/domain-coverage", async (req, res) => {
+  try {
+    const completedManuals = await db
+      .select({ id: manualsTable.id, name: manualsTable.name })
+      .from(manualsTable)
+      .where(eq(manualsTable.status, "completed"));
+
+    if (completedManuals.length === 0) {
+      res.json({ manuals: [], globalDomains: [], totalManuals: 0, scannedAt: new Date().toISOString() });
+      return;
+    }
+
+    const manualIds = completedManuals.map((m) => m.id);
+    const manualIdArray = `{${manualIds.join(",")}}`;
+
+    const [entityRows, chunkRows] = await Promise.all([
+      db.execute<{ manual_id: number; type: string; cnt: string }>(sql`
+        SELECT manual_id, type, COUNT(*)::text AS cnt
+        FROM entities
+        WHERE manual_id = ANY(${manualIdArray}::integer[])
+        GROUP BY manual_id, type
+      `),
+      db.execute<{
+        manual_id: number; total: string;
+        elec: string; hydro: string; pneu: string;
+        mech: string; trouble: string; proc: string;
+      }>(sql`
+        SELECT
+          manual_id,
+          COUNT(*)::text AS total,
+          COUNT(*) FILTER (WHERE content ~* 'relay|voltage|current|fuse|contactor|circuit breaker|wiring|PLC|ampere|ohm|coil|solenoid coil|electric')::text AS elec,
+          COUNT(*) FILTER (WHERE content ~* 'hydraulic|hydraulics|oil pump|cylinder|piston|actuator|manifold|hydraul|pressure relief|flow control')::text AS hydro,
+          COUNT(*) FILTER (WHERE content ~* 'pneumatic|compressed air|air valve|air cylinder|compressor|air pressure|air supply')::text AS pneu,
+          COUNT(*) FILTER (WHERE content ~* 'bearing|shaft|gear|coupling|bracket|bolt|torque|clearance|wear|bushing|lubrication|grease|mechanical')::text AS mech,
+          COUNT(*) FILTER (WHERE content ~* 'fault|alarm|error code|symptom|diagnosis|malfunction|defect|troubleshoot|cause|remedy|failure mode')::text AS trouble,
+          COUNT(*) FILTER (WHERE content ~* 'procedure|sequence|step \d|maintenance|installation|calibrat|adjustment|operation|commissioning|start-up')::text AS proc
+        FROM chunks
+        WHERE manual_id = ANY(${manualIdArray}::integer[])
+        GROUP BY manual_id
+      `),
+    ]);
+
+    const ENTITY_DOMAIN: Record<string, string> = {
+      sensor: "electrical_control", machine: "mechanical_assembly",
+      component: "mechanical_assembly", part: "mechanical_assembly",
+      assembly: "mechanical_assembly", system: "mechanical_assembly",
+      subsystem: "mechanical_assembly", process: "process_procedure",
+      document_section: "process_procedure", material: "mechanical_assembly",
+    };
+
+    const DOMAINS = [
+      { id: "electrical_control", label: "Electrical Control", field: "elec" },
+      { id: "hydraulic_schematic", label: "Hydraulic", field: "hydro" },
+      { id: "pneumatic_schematic", label: "Pneumatic", field: "pneu" },
+      { id: "mechanical_assembly", label: "Mechanical", field: "mech" },
+      { id: "troubleshooting", label: "Troubleshooting", field: "trouble" },
+      { id: "process_procedure", label: "Procedures", field: "proc" },
+    ] as const;
+
+    // Build entity count maps
+    const entityByDomain = new Map<string, number>(); // "manualId:domain" → count
+    const totalEntityByManual = new Map<number, number>();
+    for (const row of entityRows.rows) {
+      const domain = ENTITY_DOMAIN[row.type];
+      if (domain) {
+        const k = `${row.manual_id}:${domain}`;
+        entityByDomain.set(k, (entityByDomain.get(k) ?? 0) + Number(row.cnt));
+      }
+      totalEntityByManual.set(row.manual_id, (totalEntityByManual.get(row.manual_id) ?? 0) + Number(row.cnt));
+    }
+
+    const chunkByManual = new Map<number, typeof chunkRows.rows[0]>();
+    for (const row of chunkRows.rows) chunkByManual.set(row.manual_id, row);
+
+    // Global accumulators
+    const globalHits = new Map<string, { chunkHits: number; entityCount: number }>();
+    for (const d of DOMAINS) globalHits.set(d.id, { chunkHits: 0, entityCount: 0 });
+    let globalTotalChunks = 0;
+
+    const manuals = completedManuals.map((m) => {
+      const cr = chunkByManual.get(m.id);
+      const totalChunks = Number(cr?.total ?? 0);
+      globalTotalChunks += totalChunks;
+
+      const domains = DOMAINS.map((d) => {
+        const chunkHits = Number(cr?.[d.field as keyof typeof cr] ?? 0);
+        const entityCount = entityByDomain.get(`${m.id}:${d.id}`) ?? 0;
+        const chunkScore = totalChunks > 0 ? Math.min(75, Math.round((chunkHits / totalChunks) * 200)) : 0;
+        const entityScore = Math.min(25, entityCount > 0 ? Math.min(25, Math.round(Math.sqrt(entityCount) * 5)) : 0);
+        const g = globalHits.get(d.id)!;
+        g.chunkHits += chunkHits;
+        g.entityCount += entityCount;
+        return { domain: d.id, label: d.label, score: Math.min(100, chunkScore + entityScore), chunkHits, entityCount };
+      });
+
+      const primaryDomain = domains.reduce((a, b) => (a.score > b.score ? a : b)).domain;
+      return { manualId: m.id, manualName: m.name, domains, primaryDomain, totalChunks, totalEntities: totalEntityByManual.get(m.id) ?? 0 };
+    });
+
+    const globalDomains = DOMAINS.map((d) => {
+      const g = globalHits.get(d.id)!;
+      const chunkScore = globalTotalChunks > 0 ? Math.min(75, Math.round((g.chunkHits / globalTotalChunks) * 200)) : 0;
+      const entityScore = Math.min(25, g.entityCount > 0 ? Math.min(25, Math.round(Math.sqrt(g.entityCount) * 3)) : 0);
+      return { domain: d.id, label: d.label, score: Math.min(100, chunkScore + entityScore), chunkHits: g.chunkHits, entityCount: g.entityCount };
+    });
+
+    res.json({ manuals, globalDomains, totalManuals: completedManuals.length, scannedAt: new Date().toISOString() });
+  } catch (err) {
+    req.log.error({ err }, "domain-coverage error");
+    res.status(500).json({ error: "Failed to scan domain coverage" });
+  }
+});
+
 // GET /manuals/:id
 router.get("/manuals/:id", async (req, res) => {
   const parsed = GetManualParams.safeParse({ id: Number(req.params.id) });

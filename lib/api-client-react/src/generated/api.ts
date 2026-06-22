@@ -25,6 +25,7 @@ import type {
   ChatHistoryMessage,
   ChatRequest,
   ChatResponse,
+  DomainCoverageReport,
   EntityDetail,
   ExtractionPlan,
   GlobalStats,
@@ -564,6 +565,83 @@ export const useCreateManual = <TError = ErrorType<unknown>,
       > => {
       return useMutation(getCreateManualMutationOptions(options));
     }
+
+export const getGetDomainCoverageUrl = () => {
+
+
+
+
+  return `/api/manuals/domain-coverage`
+}
+
+/**
+ * @summary Scan all completed manuals and report technical domain coverage
+ */
+export const getDomainCoverage = async ( options?: RequestInit): Promise<DomainCoverageReport> => {
+
+  return customFetch<DomainCoverageReport>(getGetDomainCoverageUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetDomainCoverageQueryKey = () => {
+    return [
+    `/api/manuals/domain-coverage`
+    ] as const;
+    }
+
+
+export const getGetDomainCoverageQueryOptions = <TData = Awaited<ReturnType<typeof getDomainCoverage>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getDomainCoverage>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetDomainCoverageQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getDomainCoverage>>> = ({ signal }) => getDomainCoverage({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getDomainCoverage>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetDomainCoverageQueryResult = NonNullable<Awaited<ReturnType<typeof getDomainCoverage>>>
+export type GetDomainCoverageQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Scan all completed manuals and report technical domain coverage
+ */
+
+export function useGetDomainCoverage<TData = Awaited<ReturnType<typeof getDomainCoverage>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getDomainCoverage>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetDomainCoverageQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
 
 export const getGetManualUrl = (id: number,) => {
 

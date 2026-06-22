@@ -171,6 +171,36 @@ export const CreateManualBody = zod.object({
 
 
 /**
+ * @summary Scan all completed manuals and report technical domain coverage
+ */
+export const GetDomainCoverageResponse = zod.object({
+  "manuals": zod.array(zod.object({
+  "manualId": zod.number(),
+  "manualName": zod.string(),
+  "domains": zod.array(zod.object({
+  "domain": zod.string(),
+  "label": zod.string(),
+  "score": zod.number().describe('0–100 coverage score for this domain'),
+  "chunkHits": zod.number(),
+  "entityCount": zod.number()
+})),
+  "primaryDomain": zod.string(),
+  "totalChunks": zod.number(),
+  "totalEntities": zod.number()
+})),
+  "globalDomains": zod.array(zod.object({
+  "domain": zod.string(),
+  "label": zod.string(),
+  "score": zod.number().describe('0–100 coverage score for this domain'),
+  "chunkHits": zod.number(),
+  "entityCount": zod.number()
+})),
+  "totalManuals": zod.number(),
+  "scannedAt": zod.string()
+})
+
+
+/**
  * @summary Get a manual by ID
  */
 export const GetManualParams = zod.object({

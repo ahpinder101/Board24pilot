@@ -21,11 +21,126 @@ import {
   ChevronRight,
   Sparkles,
   UploadCloud,
+  ScanLine,
+  Loader2,
+  ChevronDown,
+  BarChart2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+
+// ── Domain Coverage types ─────────────────────────────────────────────────────
+
+interface DomainScore {
+  domain: string;
+  label: string;
+  score: number;
+  chunkHits: number;
+  entityCount: number;
+}
+
+interface ManualDomainCoverage {
+  manualId: number;
+  manualName: string;
+  domains: DomainScore[];
+  primaryDomain: string;
+  totalChunks: number;
+  totalEntities: number;
+}
+
+interface DomainCoverageReport {
+  manuals: ManualDomainCoverage[];
+  globalDomains: DomainScore[];
+  totalManuals: number;
+  scannedAt: string;
+}
+
+const DOMAIN_COLOURS: Record<string, { bar: string; text: string; bg: string }> = {
+  electrical_control: { bar: "bg-blue-500",    text: "text-blue-700",   bg: "bg-blue-50"   },
+  hydraulic_schematic:{ bar: "bg-cyan-500",    text: "text-cyan-700",   bg: "bg-cyan-50"   },
+  pneumatic_schematic:{ bar: "bg-sky-400",     text: "text-sky-700",    bg: "bg-sky-50"    },
+  mechanical_assembly:{ bar: "bg-orange-400",  text: "text-orange-700", bg: "bg-orange-50" },
+  troubleshooting:    { bar: "bg-red-400",     text: "text-red-700",    bg: "bg-red-50"    },
+  process_procedure:  { bar: "bg-emerald-500", text: "text-emerald-700",bg: "bg-emerald-50"},
+};
+
+function DomainBar({ domain, compact = false }: { domain: DomainScore; compact?: boolean }) {
+  const colours = DOMAIN_COLOURS[domain.domain] ?? { bar: "bg-gray-400", text: "text-gray-600", bg: "bg-gray-50" };
+  return (
+    <div className={cn("flex items-center gap-2", compact ? "py-0.5" : "py-1")}>
+      <span className={cn("shrink-0 font-medium", compact ? "text-[10px] w-20" : "text-[11px] w-24", colours.text)}>
+        {domain.label}
+      </span>
+      <div className="flex-1 bg-gray-100 rounded-full h-1.5 overflow-hidden">
+        <div
+          className={cn("h-full rounded-full transition-all duration-500", colours.bar)}
+          style={{ width: `${domain.score}%` }}
+        />
+      </div>
+      <span className="text-[10px] text-gray-500 w-7 text-right shrink-0">{domain.score}%</span>
+    </div>
+  );
+}
+
+function CoveragePanel({ data }: { data: DomainCoverageReport }) {
+  const [expandedManual, setExpandedManual] = useState<number | null>(null);
+  const sorted = [...data.globalDomains].sort((a, b) => b.score - a.score);
+
+  return (
+    <div className="px-4 sm:px-5 py-4 space-y-4">
+      {/* Global bars */}
+      <div>
+        <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-2">
+          Knowledge Base — {data.totalManuals} manual{data.totalManuals !== 1 ? "s" : ""}
+        </p>
+        {sorted.map((d) => <DomainBar key={d.domain} domain={d} />)}
+      </div>
+
+      {/* Per-manual breakdown */}
+      {data.manuals.length > 0 && (
+        <div className="border-t border-gray-100 pt-3 space-y-1.5">
+          <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Per manual</p>
+          {data.manuals.map((m) => {
+            const isOpen = expandedManual === m.manualId;
+            const primary = DOMAIN_COLOURS[m.primaryDomain] ?? { bg: "bg-gray-50", text: "text-gray-600" };
+            return (
+              <div key={m.manualId} className="rounded-lg border border-gray-100 overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => setExpandedManual(isOpen ? null : m.manualId)}
+                  className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 transition-colors text-left"
+                >
+                  <span className={cn("text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0", primary.bg, primary.text)}>
+                    {m.primaryDomain.replace(/_/g, " ").toUpperCase().slice(0, 5)}
+                  </span>
+                  <span className="text-xs font-medium text-gray-700 truncate flex-1">{m.manualName}</span>
+                  <span className="text-[10px] text-gray-400 shrink-0">{m.totalChunks} chunks</span>
+                  <ChevronDown className={cn("w-3 h-3 text-gray-400 shrink-0 transition-transform", isOpen && "rotate-180")} />
+                </button>
+                {isOpen && (
+                  <div className="px-3 pb-2.5 border-t border-gray-100 pt-2 bg-gray-50/50">
+                    {[...m.domains].sort((a, b) => b.score - a.score).map((d) => (
+                      <DomainBar key={d.domain} domain={d} compact />
+                    ))}
+                    <p className="text-[10px] text-gray-400 mt-1.5">
+                      {m.totalEntities} entities · {m.totalChunks} text chunks
+                    </p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="text-[10px] text-gray-400">
+        Scanned {new Date(data.scannedAt).toLocaleTimeString()}
+      </p>
+    </div>
+  );
+}
 import {
   getRecentQuestions,
   countQuestionsThisWeek,
@@ -84,6 +199,8 @@ export default function Dashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [newlyUploadedId, setNewlyUploadedId] = useState<number | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [coverageData, setCoverageData] = useState<DomainCoverageReport | null>(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
   const uploadRef = useRef<UploadPDFRef>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const newCardRef = useRef<HTMLDivElement>(null);
@@ -131,6 +248,23 @@ export default function Dashboard() {
   function handleStarted() {
     queryClient.invalidateQueries({ queryKey: getListManualsQueryKey() });
     refetchStats();
+  }
+
+  async function handleScanCoverage() {
+    setCoverageLoading(true);
+    try {
+      const token = await getToken();
+      const res = await fetch("/api/manuals/domain-coverage", {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error("Scan failed");
+      const data: DomainCoverageReport = await res.json();
+      setCoverageData(data);
+    } catch {
+      toast.error("Coverage scan failed");
+    } finally {
+      setCoverageLoading(false);
+    }
   }
 
   // ── Drag-and-drop ─────────────────────────────────────────────────────────
@@ -356,6 +490,60 @@ export default function Dashboard() {
                   </Button>
                 </Link>
               </div>
+            </div>
+          )}
+
+          {/* Coverage Analysis */}
+          {(stats?.completedManuals ?? 0) > 0 && (
+            <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+              <div className="flex items-center justify-between px-4 sm:px-5 py-3.5 border-b border-gray-100">
+                <div className="flex items-center gap-2">
+                  <BarChart2 className="w-4 h-4 text-gray-500" />
+                  <h2 className="text-sm font-semibold text-gray-700">Coverage Analysis</h2>
+                  {coverageData && (
+                    <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 text-[10px] px-1.5 py-0 font-medium">
+                      {coverageData.totalManuals} scanned
+                    </Badge>
+                  )}
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5 text-gray-600 text-xs h-7"
+                  onClick={handleScanCoverage}
+                  disabled={coverageLoading}
+                >
+                  {coverageLoading
+                    ? <><Loader2 className="w-3 h-3 animate-spin" />Scanning…</>
+                    : <><ScanLine className="w-3 h-3" />{coverageData ? "Re-scan" : "Scan"}</>
+                  }
+                </Button>
+              </div>
+              {!coverageData && !coverageLoading && (
+                <div className="px-4 sm:px-5 py-5 text-center">
+                  <p className="text-xs text-gray-500">
+                    Analyse which technical domains your uploaded manuals cover — electrical, hydraulic, mechanical, and more.
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3 gap-1.5 text-xs text-gray-600"
+                    onClick={handleScanCoverage}
+                  >
+                    <ScanLine className="w-3.5 h-3.5" />
+                    Scan now
+                  </Button>
+                </div>
+              )}
+              {coverageLoading && (
+                <div className="px-4 sm:px-5 py-5 flex items-center justify-center gap-2 text-xs text-gray-400">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Analysing content patterns…
+                </div>
+              )}
+              {coverageData && !coverageLoading && (
+                <CoveragePanel data={coverageData} />
+              )}
             </div>
           )}
 

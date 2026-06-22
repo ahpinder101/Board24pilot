@@ -142,6 +142,21 @@ paths:
               schema:
                 $ref: "#/components/schemas/Manual"
 
+  /manuals/domain-coverage:
+    get:
+      operationId: getDomainCoverage
+      tags: [manuals]
+      summary: Scan all completed manuals and report technical domain coverage
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Domain coverage report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainCoverageReport"
+
   /manuals/{id}:
     get:
       operationId: getManual
@@ -491,6 +506,58 @@ components:
           type: object
         relationshipsByType:
           type: object
+
+    DomainScore:
+      type: object
+      required: [domain, label, score, chunkHits, entityCount]
+      properties:
+        domain:
+          type: string
+        label:
+          type: string
+        score:
+          type: number
+          description: 0–100 coverage score for this domain
+        chunkHits:
+          type: integer
+        entityCount:
+          type: integer
+
+    ManualDomainCoverage:
+      type: object
+      required: [manualId, manualName, domains, primaryDomain, totalChunks, totalEntities]
+      properties:
+        manualId:
+          type: integer
+        manualName:
+          type: string
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/DomainScore"
+        primaryDomain:
+          type: string
+        totalChunks:
+          type: integer
+        totalEntities:
+          type: integer
+
+    DomainCoverageReport:
+      type: object
+      required: [manuals, globalDomains, totalManuals, scannedAt]
+      properties:
+        manuals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ManualDomainCoverage"
+        globalDomains:
+          type: array
+          items:
+            $ref: "#/components/schemas/DomainScore"
+        totalManuals:
+          type: integer
+        scannedAt:
+          type: string
 
     GlobalStats:
       type: object

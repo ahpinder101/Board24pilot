@@ -150,6 +150,31 @@ export interface ManualStats {
   relationshipsByType: ManualStatsRelationshipsByType;
 }
 
+export interface DomainScore {
+  domain: string;
+  label: string;
+  /** 0–100 coverage score for this domain */
+  score: number;
+  chunkHits: number;
+  entityCount: number;
+}
+
+export interface ManualDomainCoverage {
+  manualId: number;
+  manualName: string;
+  domains: DomainScore[];
+  primaryDomain: string;
+  totalChunks: number;
+  totalEntities: number;
+}
+
+export interface DomainCoverageReport {
+  manuals: ManualDomainCoverage[];
+  globalDomains: DomainScore[];
+  totalManuals: number;
+  scannedAt: string;
+}
+
 export type GlobalStatsEntitiesByType = { [key: string]: unknown };
 
 export type GlobalStatsRelationshipsByType = { [key: string]: unknown };
