@@ -1465,6 +1465,33 @@ Please answer based on the above information.`;
       }
     }
 
+    // ── 8b. Suppress unsupportedClaims when scratchpad is confident ───────────
+    // unsupportedClaims are retrieval gaps — the specialist didn't see a claim
+    // in its (truncated) evidence window, but that does NOT mean the answer is wrong.
+    // When the scratchpad (which saw the full evidence) assessed quality as
+    // strong/partial and the specialist found no genuine contradictions, suppress
+    // unsupportedClaims so they don't surface as false "Partial evidence" in the UI.
+    if (
+      !isGuided &&
+      (scratchpad.evidenceQuality === "strong" || scratchpad.evidenceQuality === "partial") &&
+      finalSpecialistResult.validationSummary.conflictingClaims.length === 0
+    ) {
+      const suppressedCount = finalSpecialistResult.validationSummary.unsupportedClaims.length;
+      if (suppressedCount > 0) {
+        finalSpecialistResult = {
+          ...finalSpecialistResult,
+          validationSummary: {
+            ...finalSpecialistResult.validationSummary,
+            unsupportedClaims: [],
+          },
+        };
+        req.log.info(
+          { suppressedCount, evidenceQuality: scratchpad.evidenceQuality },
+          "agent-chat: suppressed unsupportedClaims — scratchpad confident with no conflicts"
+        );
+      }
+    }
+
     // ── 9. Citation logic (same 4-priority system as chat.ts) ─────────────────
     const citedSourceNumbers = Array.isArray(parsed.sources)
       ? parsed.sources.filter((n) => Number.isInteger(n) && n >= 1 && n <= ragChunks.length)

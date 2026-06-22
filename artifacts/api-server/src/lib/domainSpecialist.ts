@@ -204,7 +204,7 @@ DRAFT ANSWER:
 ${input.draftAnswer}
 
 SOURCE EVIDENCE (excerpts the answer was drawn from):
-${input.ragContext.slice(0, 8000)}
+${input.ragContext.slice(0, 18000)}
 ${input.graphContext ? `\nGRAPH CONTEXT:\n${input.graphContext.slice(0, 1500)}` : ""}
 
 Validate the draft answer.`;

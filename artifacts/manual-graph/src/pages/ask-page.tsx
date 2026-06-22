@@ -262,10 +262,11 @@ function ValidationPanel({ validation, validationMetadata, open, onToggle }: {
           )}
           {validation.unsupportedClaims.length > 0 && (
             <div>
-              <p className="font-medium text-amber-700 mb-1">Not in retrieved pages:</p>
+              <p className="font-medium text-blue-600 mb-0.5">Possible retrieval gap:</p>
+              <p className="text-xs text-gray-500 mb-1">These claims are in the answer but weren't found in the retrieved excerpts — the manual likely covers them on a page that wasn't fetched.</p>
               {validation.unsupportedClaims.map((item, i) => (
-                <div key={i} className="flex items-start gap-1 text-gray-600">
-                  <AlertTriangle className="w-3 h-3 text-amber-400 mt-0.5 shrink-0" />
+                <div key={i} className="flex items-start gap-1 text-gray-500">
+                  <HelpCircle className="w-3 h-3 text-blue-400 mt-0.5 shrink-0" />
                   {item}
                 </div>
               ))}
@@ -1108,12 +1109,12 @@ export default function AskPage() {
                         onToggle={() => togglePanel(msg.id, "evidence")}
                       />
                     )}
-                    {!msg.pending && msg.role === "assistant" && msg.missingOrWeakEvidence && msg.missingOrWeakEvidence.length > 0 && (
+                    {!msg.pending && msg.role === "assistant" && msg.missingOrWeakEvidence && msg.missingOrWeakEvidence.filter(i => i.issue !== "gap").length > 0 && (
                       <div className="rounded-lg border border-yellow-200 bg-yellow-50 px-3 py-2 text-xs text-yellow-800 flex items-start gap-1.5">
                         <AlertTriangle className="w-3.5 h-3.5 text-yellow-500 mt-0.5 shrink-0" />
                         <div>
                           <span className="font-medium">Partial evidence: </span>
-                          {msg.missingOrWeakEvidence.slice(0, 2).map((item, i) => (
+                          {msg.missingOrWeakEvidence.filter(i => i.issue !== "gap").slice(0, 2).map((item, i) => (
                             <span key={i}>
                               {i > 0 && " · "}
                               <span className="italic">{item.claimOrQuestionPart}</span>
@@ -1121,8 +1122,8 @@ export default function AskPage() {
                               <span className="text-yellow-600">({item.issue})</span>
                             </span>
                           ))}
-                          {msg.missingOrWeakEvidence.length > 2 && (
-                            <span className="text-yellow-600"> +{msg.missingOrWeakEvidence.length - 2} more</span>
+                          {msg.missingOrWeakEvidence.filter(i => i.issue !== "gap").length > 2 && (
+                            <span className="text-yellow-600"> +{msg.missingOrWeakEvidence.filter(i => i.issue !== "gap").length - 2} more</span>
                           )}
                         </div>
                       </div>
