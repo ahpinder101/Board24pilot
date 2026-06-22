@@ -217,22 +217,11 @@ router.post("/manuals/:id/process", expensiveOpLimiter, async (req, res) => {
     return;
   }
 
-  // Clear any previous extraction data. If this fails after claiming, release the
-  // claim so the manual isn't left stuck in "processing" with no job running.
   const manualId = parsed.data.id;
-  try {
-    await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
-  } catch (err) {
-    await db
-      .update(manualsTable)
-      .set({ status: "failed", errorMessage: String(err), updatedAt: new Date() })
-      .where(eq(manualsTable.id, manualId));
-    req.log.error({ err, manualId }, "Failed to clear prior extraction data");
-    res.status(500).json({ error: String(err) });
-    return;
-  }
 
   // Start full pipeline in background (don't await)
+  // NOTE: entity deletion is now handled inside the pipeline itself, scoped
+  // to only the pages being re-processed (additive extraction design).
   runExtractionPipeline(manualId, pdfBuffer, { startPage, endPage }).catch((err) => {
     req.log.error({ err, manualId }, "Background extraction pipeline error");
   });

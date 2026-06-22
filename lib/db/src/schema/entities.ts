@@ -12,6 +12,8 @@ export const entitiesTable = pgTable("entities", {
   properties: jsonb("properties"),
   pageReferences: jsonb("page_references").$type<number[]>().default([]),
   orderIndex: integer("order_index"),
+  extractionStartPage: integer("extraction_start_page"),
+  extractionEndPage: integer("extraction_end_page"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -28,6 +30,8 @@ export const relationshipsTable = pgTable("relationships", {
   label: text("label").notNull().default(""),
   orderIndex: integer("order_index"),
   properties: jsonb("properties"),
+  extractionStartPage: integer("extraction_start_page"),
+  extractionEndPage: integer("extraction_end_page"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 
@@ -55,6 +59,8 @@ export const pathsTable = pgTable(
     stepSequence: jsonb("step_sequence").$type<string[]>().default([]),
     plainLanguage: text("plain_language").notNull().default(""),
     pageReferences: jsonb("page_references").$type<number[]>().default([]),
+    extractionStartPage: integer("extraction_start_page"),
+    extractionEndPage: integer("extraction_end_page"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (table) => [index("paths_manual_id_idx").on(table.manualId)]

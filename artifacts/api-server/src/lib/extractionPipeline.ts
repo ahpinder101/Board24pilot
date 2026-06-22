@@ -25,7 +25,7 @@ import {
   type InsertEntity,
   type InsertRelationship,
 } from "@workspace/db";
-import { eq, and, count, sql, isNotNull } from "drizzle-orm";
+import { eq, and, count, sql, isNotNull, gte, lte } from "drizzle-orm";
 import { extractPdfText, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
@@ -1327,10 +1327,14 @@ export async function reprocessPageRangeWithVision(
 
 export async function extractGraphFromExistingText(
   manualId: number,
-  opts?: { entityChunks?: number; relChunks?: number }
+  opts?: { entityChunks?: number; relChunks?: number; startPage?: number; endPage?: number }
 ): Promise<{ entities: number; relationships: number }> {
   const entityChunks = opts?.entityChunks ?? Infinity;
   const relChunks = opts?.relChunks ?? Infinity;
+  const startPage = opts?.startPage;
+  const endPage = opts?.endPage;
+  // A partial run targets a specific page range — additive, no blanket delete.
+  const isPartialRun = startPage !== undefined || endPage !== undefined;
 
   // ── Capture state BEFORE touching processingPass ─────────────────────────
   // We need to know which passes were already completed before we overwrite
@@ -1362,11 +1366,13 @@ export async function extractGraphFromExistingText(
   //  • previousPass >= 5 AND entities exist AND not completed → Pass 4 finished; skip it
   //  • previousPass >= 6 AND rels exist AND not completed     → Pass 5 finished; skip it too
   //  • Otherwise (including status="completed")               → delete and run from scratch
-  const resumeFromPass5 = !previouslyCompleted && previousPass >= 5 && existingEntityCount > 0;
+  // For partial page-range runs, resume is disabled — entities from other page
+  // ranges already exist in the DB so the counts are meaningless for this range.
+  const resumeFromPass5 = !isPartialRun && !previouslyCompleted && previousPass >= 5 && existingEntityCount > 0;
   // resumeFromPass6: skip pass 5 if relationships already exist in DB.
   // Since pass 5 now saves per-chunk, any existing relationships mean we have
   // at least partial (often near-complete) pass 5 data — safe to skip to pass 6.
-  const resumeFromPass6 = !previouslyCompleted && previousPass >= 5 && existingRelCount > 0;
+  const resumeFromPass6 = !isPartialRun && !previouslyCompleted && previousPass >= 5 && existingRelCount > 0;
 
   await setManualStatus(manualId, "processing", { processingPass: 4 });
   if (resumeFromPass5) {
@@ -1393,7 +1399,15 @@ export async function extractGraphFromExistingText(
       description: manualPagesTable.description,
     })
     .from(manualPagesTable)
-    .where(eq(manualPagesTable.manualId, manualId))
+    .where(
+      isPartialRun
+        ? and(
+            eq(manualPagesTable.manualId, manualId),
+            startPage !== undefined ? gte(manualPagesTable.pageNumber, startPage) : undefined,
+            endPage   !== undefined ? lte(manualPagesTable.pageNumber, endPage)   : undefined,
+          )
+        : eq(manualPagesTable.manualId, manualId)
+    )
     .orderBy(manualPagesTable.pageNumber);
 
   // For pages where OCR is sparse but Pass 3 generated a vision description,
@@ -1414,12 +1428,34 @@ export async function extractGraphFromExistingText(
     throw new Error(`Manual ${manualId} has no OCR text — run vision OCR first`);
   }
 
-  // Only clear graph data when we are NOT resuming — a resume keeps existing
-  // entities/relationships from the previous (complete) pass.
+  // Clear graph data before extraction.
+  // • Whole-document run: delete everything (fresh start or deliberate re-extract).
+  // • Partial run: only delete entities/paths that were previously tagged for
+  //   this exact page range — entities from other ranges survive untouched.
+  //   Relationships self-clean via CASCADE when their entity is deleted.
   if (!resumeFromPass5) {
-    await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
-    await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
-    await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
+    if (isPartialRun) {
+      await db.delete(entitiesTable).where(
+        and(
+          eq(entitiesTable.manualId, manualId),
+          isNotNull(entitiesTable.extractionStartPage),
+          gte(entitiesTable.extractionStartPage, startPage!),
+          lte(entitiesTable.extractionEndPage, endPage!),
+        )
+      );
+      await db.delete(pathsTable).where(
+        and(
+          eq(pathsTable.manualId, manualId),
+          isNotNull(pathsTable.extractionStartPage),
+          gte(pathsTable.extractionStartPage, startPage!),
+          lte(pathsTable.extractionEndPage, endPage!),
+        )
+      );
+    } else {
+      await db.delete(entitiesTable).where(eq(entitiesTable.manualId, manualId));
+      await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+      await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
+    }
   }
 
   // Pass 1: document structure. Reuse the stored structure from the upload pass
@@ -1490,6 +1526,8 @@ export async function extractGraphFromExistingText(
             properties: entity.properties ?? null,
             pageReferences: entity.pageReferences ?? [],
             orderIndex: entity.orderIndex ?? null,
+            extractionStartPage: startPage ?? null,
+            extractionEndPage: endPage ?? null,
           })
           .returning();
         if (inserted) insertedEntities.push({ name: entity.name, id: inserted.id });
@@ -1511,9 +1549,14 @@ export async function extractGraphFromExistingText(
     logger.info({ manualId, relationships: relCount }, "Pass 5: skipped — relationships already in DB");
     await setActivity(manualId, `Pass 5 ✓ — ${relCount} relationships already extracted, resuming from ordering`);
   } else {
-    // Clear relationships/paths before (re-)running pass 5 — entities are safe
-    await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
-    await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
+    // Clear relationships/paths before (re-)running pass 5.
+    // Partial run: entity CASCADE already removed relationships for deleted entities;
+    // paths for the range were cleaned up before pass 4. Skip the full-table delete.
+    // Whole-doc run: wipe everything as before.
+    if (!isPartialRun) {
+      await db.delete(relationshipsTable).where(eq(relationshipsTable.manualId, manualId));
+      await db.delete(pathsTable).where(eq(pathsTable.manualId, manualId));
+    }
 
     relCount = await pass5RelationshipExtraction(
       manualId,
@@ -1537,6 +1580,8 @@ export async function extractGraphFromExistingText(
           stepSequence: path.stepSequence ?? [],
           plainLanguage: path.plainLanguage,
           pageReferences: path.pageReferences ?? [],
+          extractionStartPage: startPage ?? null,
+          extractionEndPage: endPage ?? null,
         });
         pathCount++;
       } catch (err) {
@@ -1754,7 +1799,7 @@ export async function runExtractionPipeline(
     // the selected page range by passes 2 & 3 above) and runs to completion,
     // setting status → "completed" when done.
     await setActivity(manualId, "Text and chunks complete — starting entity & relationship extraction...");
-    await extractGraphFromExistingText(manualId);
+    await extractGraphFromExistingText(manualId, { startPage: opts?.startPage, endPage: opts?.endPage });
     logger.info({ manualId }, "Full pipeline complete");
   } catch (err) {
     logger.error({ err, manualId }, "Extraction pipeline failed");
