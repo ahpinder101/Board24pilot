@@ -39,6 +39,7 @@ Is there prior conversation? If so, how does the current question relate to it? 
 
 STEP 2 — Assess the evidence
 Scan the retrieved excerpts. What aspects of the question do they cover? What is missing?
+Note any "section:" labels in the source headers — these are document section breadcrumbs from the manual's table of contents (e.g. "section: \\"2. INSTALLATION > 2-3. Lubrication\\""). If most relevant evidence comes from a single section, record the most specific common section fragment in sectionHint (e.g. "Lubrication" or "INSTALLATION"). This enables the retrieval agent to pull more chunks from that section. Set sectionHint to null if evidence spans many unrelated sections or no section labels appear.
 
 STEP 3 — Identify the technical domain from the CONTENT of the excerpts (not from keyword counting)
 • "electrical_control" — circuits, relays, voltage, contactors, coils, wiring, schematic
@@ -56,7 +57,7 @@ STEP 4 — Choose a strategy
 BIAS HEAVILY toward "answer". A partial answer is acceptable and useful. Reserve "cannot_answer" for truly empty, irrelevant evidence.
 
 STEP 5
-If strategy is "answer": write brief planNotes for the answer agent — which sources cover which steps, how to order a procedure, what to synthesise.
+If strategy is "answer": write brief planNotes for the answer agent — which sources cover which steps, how to order a procedure, what to synthesise. Note any [TABLE] or [LIST] sources that contain structured data relevant to the answer.
 If strategy is "clarify": write one focused clarifying question in clarifyingQuestion.
 If strategy is "cannot_answer": leave planNotes empty.
 
@@ -69,7 +70,8 @@ Respond with valid JSON only, no other text:
   "uncoveredAspects": ["what is missing"],
   "strategy": "answer" | "clarify" | "cannot_answer",
   "clarifyingQuestion": "single focused question or null",
-  "planNotes": "brief synthesis plan for the answer agent"
+  "planNotes": "brief synthesis plan for the answer agent",
+  "sectionHint": "most specific section path fragment common to majority of relevant evidence, or null"
 }`;
 
 const GENERIC_NAME_WORDS = new Set([
@@ -183,6 +185,10 @@ type ChunkRow = {
   chunk_index: number;
   content: string;
   rank: number;
+  // Docling structural metadata — present when the manual was processed via Docling.
+  // Optional so all queries (including window-expansion ones) work without change.
+  section_path?: string | null;
+  element_type?: string | null;
 };
 
 type EntityRow = {
@@ -323,6 +329,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
           SELECT
             c.id, c.manual_id, m.name AS manual_name,
             c.page_number, c.chunk_index, c.content,
+            c.section_path, c.element_type,
             ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
@@ -340,6 +347,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         const fallback = await db.execute<ChunkRow>(sql`
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
+                 c.section_path, c.element_type,
                  ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
@@ -389,6 +397,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         const r = await db.execute<PhraseRow>(sql`
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
+                 c.section_path, c.element_type,
                  ts_rank(c.fts_vector, phraseto_tsquery('english', ${text})) AS rank,
                  COUNT(*) OVER () AS total_matches
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
@@ -434,6 +443,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         const andResult = await db.execute<ChunkRow>(sql`
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
+                 c.section_path, c.element_type,
                  ts_rank(c.fts_vector, to_tsquery('english', ${andQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${andQuery})
@@ -524,6 +534,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         SELECT * FROM (
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
+                 c.section_path, c.element_type,
                  ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
@@ -885,10 +896,19 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     }
 
     // ── 4. RAG context + feedback corrections ─────────────────────────────────
+    // Enrich each source label with Docling structural metadata when available:
+    //  - section_path: breadcrumb like "2. INSTALLATION > 2-3. Lubrication"
+    //  - element_type: content-type hint (TABLE, LIST) so agents read them correctly
     let ragContext = ragChunks.length > 0
       ? ragChunks.map((c, i) => {
           const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
-          return `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}]\n${c.content}`;
+          const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
+          const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}]`;
+          // Prefix table/list content so the answer agent knows how to read it
+          const typeHint =
+            c.element_type === "table" ? "[TABLE] " :
+            c.element_type === "list_item" ? "[LIST] " : "";
+          return `${header}\n${typeHint}${c.content}`;
         }).join("\n\n---\n\n")
       : "No relevant manual excerpts found.";
 
@@ -933,6 +953,8 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       strategy: "answer" | "clarify" | "cannot_answer";
       clarifyingQuestion: string | null;
       planNotes: string;
+      /** Docling section breadcrumb fragment observed in evidence — drives section-targeted re-retrieval. Null when not applicable. */
+      sectionHint: string | null;
     };
 
     const historySnippet = conversationHistory.length > 0
@@ -988,6 +1010,9 @@ Analyse the evidence and output your scratchpad JSON.`;
         ) ?? "answer",
         clarifyingQuestion: typeof sp.clarifyingQuestion === "string" ? sp.clarifyingQuestion : null,
         planNotes: typeof sp.planNotes === "string" ? sp.planNotes : "",
+        sectionHint: typeof sp.sectionHint === "string" && sp.sectionHint.trim().length > 0
+          ? sp.sectionHint.trim()
+          : null,
       };
       req.log.info(
         {
@@ -995,6 +1020,7 @@ Analyse the evidence and output your scratchpad JSON.`;
           domain: scratchpad.domain,
           strategy: scratchpad.strategy,
           evidenceQuality: scratchpad.evidenceQuality,
+          sectionHint: scratchpad.sectionHint,
         },
         "agent-chat: scratchpad"
       );
@@ -1009,6 +1035,7 @@ Analyse the evidence and output your scratchpad JSON.`;
         strategy: ragChunks.length > 0 ? "answer" : "cannot_answer",
         clarifyingQuestion: null,
         planNotes: "",
+        sectionHint: null,
       };
     }
 
@@ -1044,12 +1071,71 @@ Analyse the evidence and output your scratchpad JSON.`;
       return;
     }
 
+    // ── 4.65a. Section-hint targeted retrieval ────────────────────────────────
+    // The scratchpad may observe that most evidence comes from a specific section
+    // (e.g. "INSTALLATION > Lubrication") and emit a sectionHint. If so, pull
+    // additional chunks from that section using ILIKE on section_path — a simple,
+    // lossless way to fetch the rest of a relevant section without any hard-coding.
+    // This is purely additive: if sectionHint is null or no results match, nothing changes.
+    if (
+      scratchpad.sectionHint &&
+      scopedManualIds.length > 0
+    ) {
+      const sectionPattern = `%${scratchpad.sectionHint}%`;
+      try {
+        const sectionFts = await db.execute<ChunkRow>(sql`
+          SELECT c.id, c.manual_id, m.name AS manual_name,
+                 c.page_number, c.chunk_index, c.content,
+                 c.section_path, c.element_type,
+                 0.05::float AS rank
+          FROM chunks c JOIN manuals m ON m.id = c.manual_id
+          WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+            AND c.section_path ILIKE ${sectionPattern}
+          ORDER BY c.page_number, c.chunk_index
+          LIMIT 20
+        `);
+
+        if (sectionFts.rows.length > 0) {
+          const existingSectionIds = new Set(ragChunks.map((c) => c.id));
+          let sectionAdded = 0;
+          for (const row of sectionFts.rows) {
+            if (!existingSectionIds.has(row.id)) {
+              ragChunks.push(row);
+              existingSectionIds.add(row.id);
+              sectionAdded++;
+            }
+          }
+          if (sectionAdded > 0) {
+            ragChunks.sort((a, b) => a.page_number - b.page_number || a.chunk_index - b.chunk_index);
+            // Rebuild ragContext to include the new section chunks
+            ragContext = ragChunks.map((c, i) => {
+              const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
+              const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
+              const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}]`;
+              const typeHint =
+                c.element_type === "table" ? "[TABLE] " :
+                c.element_type === "list_item" ? "[LIST] " : "";
+              return `${header}\n${typeHint}${c.content}`;
+            }).join("\n\n---\n\n");
+            req.log.info(
+              { sectionHint: scratchpad.sectionHint, added: sectionAdded },
+              "agent-chat: section-hint retrieval added chunks"
+            );
+          }
+        }
+      } catch (sectionErr) {
+        req.log.warn({ err: sectionErr }, "agent-chat: section-hint retrieval failed — continuing");
+      }
+    }
+
     // ── 4.65. Scratchpad gap re-retrieval ─────────────────────────────────────
     // The scratchpad may report uncoveredAspects even when strategy === "answer"
     // because the original FTS query used abstract vocabulary ("replenish",
     // "supply") while the actual procedure text uses mechanical terms ("nozzle",
     // "rubber cap", "oil tank"). Re-run FTS using the uncoveredAspects as search
     // terms so vocabulary-mismatched pages are fetched before the answer pass.
+    // If sectionHint was observed, try section-scoped gap retrieval first, then
+    // fall back to full manual scope so coverage is maximised either way.
     if (
       scratchpad.strategy === "answer" &&
       scratchpad.uncoveredAspects.length > 0 &&
@@ -1066,13 +1152,20 @@ Analyse the evidence and output your scratchpad JSON.`;
 
       if (gapTsQuery.length > 0) {
         try {
+          // When sectionHint is available, bias gap retrieval to that section first
+          const sectionGapClause = scratchpad.sectionHint
+            ? sql`AND c.section_path ILIKE ${`%${scratchpad.sectionHint}%`}`
+            : sql``;
+
           const gapFts = await db.execute<ChunkRow>(sql`
             SELECT c.id, c.manual_id, m.name AS manual_name,
                    c.page_number, c.chunk_index, c.content,
+                   c.section_path, c.element_type,
                    ts_rank(c.fts_vector, to_tsquery('english', ${gapTsQuery})) AS rank
             FROM chunks c JOIN manuals m ON m.id = c.manual_id
             WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
               AND c.fts_vector @@ to_tsquery('english', ${gapTsQuery})
+              ${sectionGapClause}
             ORDER BY rank DESC
             LIMIT 12
           `);
@@ -1119,11 +1212,16 @@ Analyse the evidence and output your scratchpad JSON.`;
               ragContext = ragChunks
                 .map((c, i) => {
                   const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
-                  return `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}]\n${c.content}`;
+                  const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
+                  const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}]`;
+                  const typeHint =
+                    c.element_type === "table" ? "[TABLE] " :
+                    c.element_type === "list_item" ? "[LIST] " : "";
+                  return `${header}\n${typeHint}${c.content}`;
                 })
                 .join("\n\n---\n\n");
               req.log.info(
-                { gapChunksAdded: newGapChunks.length, uncoveredAspects: scratchpad.uncoveredAspects },
+                { gapChunksAdded: newGapChunks.length, uncoveredAspects: scratchpad.uncoveredAspects, sectionHint: scratchpad.sectionHint },
                 "agent-chat: gap re-retrieval added chunks"
               );
             }
