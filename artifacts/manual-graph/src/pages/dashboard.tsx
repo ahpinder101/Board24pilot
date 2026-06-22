@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   useGetGlobalStats,
   useListManuals,
   useDeleteManual,
   getListManualsQueryKey,
 } from "@workspace/api-client-react";
-import { UploadPDF } from "@/components/upload-pdf";
+import { UploadPDF, type UploadPDFRef } from "@/components/upload-pdf";
 import { FileCard } from "@/components/file-card";
 import { Link } from "wouter";
 import { formatDistanceToNow } from "date-fns";
@@ -20,6 +20,7 @@ import {
   Clock,
   ChevronRight,
   Sparkles,
+  UploadCloud,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -72,8 +73,8 @@ export default function Dashboard() {
     query: {
       queryKey: getListManualsQueryKey(),
       refetchInterval: (query) => {
-        const data = query.state.data as Array<{ status: string }> | undefined;
-        return data?.some((m) => m.status === "processing") ? 3000 : false;
+        const data = query.state.data;
+        return Array.isArray(data) && data.some((m) => m.status === "processing") ? 3000 : false;
       },
     },
   });
@@ -81,12 +82,24 @@ export default function Dashboard() {
   const [recentQs, setRecentQs] = useState<RecentQuestion[]>([]);
   const [weekCount, setWeekCount] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const newlyUploadedRef = useRef<number | null>(null);
+  const [newlyUploadedId, setNewlyUploadedId] = useState<number | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const uploadRef = useRef<UploadPDFRef>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const newCardRef = useRef<HTMLDivElement>(null);
+  const dragCounterRef = useRef(0);
 
   useEffect(() => {
     setRecentQs(getRecentQuestions());
     setWeekCount(countQuestionsThisWeek());
   }, []);
+
+  // Scroll the highlighted card into view once the list updates after upload
+  useEffect(() => {
+    if (newlyUploadedId !== null && newCardRef.current) {
+      newCardRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [newlyUploadedId, manuals]);
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -107,15 +120,45 @@ export default function Dashboard() {
   };
 
   function handleUploaded(id: number) {
-    newlyUploadedRef.current = id;
+    setNewlyUploadedId(id);
     queryClient.invalidateQueries({ queryKey: getListManualsQueryKey() });
     queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
+    // Clear highlight after 4 s
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => setNewlyUploadedId(null), 4000);
   }
 
   function handleStarted() {
     queryClient.invalidateQueries({ queryKey: getListManualsQueryKey() });
     refetchStats();
   }
+
+  // ── Drag-and-drop ─────────────────────────────────────────────────────────
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current += 1;
+    if (e.dataTransfer.types.includes("Files")) setIsDragOver(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current -= 1;
+    if (dragCounterRef.current === 0) setIsDragOver(false);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounterRef.current = 0;
+    setIsDragOver(false);
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    uploadRef.current?.uploadFile(file);
+  }, []);
 
   const lastQ = recentQs[0];
   const pendingCount = manuals?.filter((m) => m.status === "pending" || m.status === "structure_complete").length ?? 0;
@@ -203,7 +246,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 sm:gap-6">
 
         {/* ── File Management ── */}
-        <div className="lg:col-span-3 bg-white rounded-lg border border-gray-200">
+        <div className="lg:col-span-3 bg-white rounded-lg border border-gray-200 overflow-hidden">
           <div className="flex items-center justify-between gap-2 px-4 sm:px-5 py-3.5 border-b border-gray-100">
             <div className="flex items-center gap-2">
               <FolderOpen className="w-4 h-4 text-gray-500" />
@@ -219,10 +262,25 @@ export default function Dashboard() {
                 </Badge>
               )}
             </div>
-            <UploadPDF onUploaded={handleUploaded} />
+            <UploadPDF ref={uploadRef} onUploaded={handleUploaded} />
           </div>
 
-          <div className="p-4 sm:p-5 space-y-3">
+          {/* Drop zone wrapper */}
+          <div
+            className="relative p-4 sm:p-5 space-y-3"
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+          >
+            {/* Drag overlay */}
+            {isDragOver && (
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-b-lg border-2 border-dashed border-blue-400 bg-blue-50/90 pointer-events-none">
+                <UploadCloud className="w-10 h-10 text-blue-500 mb-2" />
+                <p className="text-sm font-semibold text-blue-700">Drop PDF here to upload</p>
+              </div>
+            )}
+
             {manualsLoading ? (
               <div className="space-y-3">
                 {[1, 2, 3].map((i) => (
@@ -241,13 +299,18 @@ export default function Dashboard() {
             ) : manuals?.length ? (
               <div className="space-y-3">
                 {manuals.map((manual) => (
-                  <FileCard
+                  <div
                     key={manual.id}
-                    manual={manual as any}
-                    onDelete={handleDelete}
-                    onStarted={handleStarted}
-                    getToken={getToken}
-                  />
+                    ref={manual.id === newlyUploadedId ? newCardRef : undefined}
+                  >
+                    <FileCard
+                      manual={manual}
+                      onDelete={handleDelete}
+                      onStarted={handleStarted}
+                      getToken={getToken}
+                      highlight={manual.id === newlyUploadedId}
+                    />
+                  </div>
                 ))}
               </div>
             ) : (
@@ -257,7 +320,7 @@ export default function Dashboard() {
                 </div>
                 <p className="text-sm text-gray-500 font-medium">No documents uploaded yet</p>
                 <p className="text-xs text-gray-400 mt-1">
-                  Click <strong>Upload PDF</strong> above to add your first engineering manual.
+                  Click <strong>Upload PDF</strong> above, or drag a file here.
                 </p>
               </div>
             )}

@@ -7,34 +7,19 @@ import {
   FileText, Network, Database, RefreshCw, Trash2,
   Activity, WifiOff, Network as GraphIcon,
 } from "lucide-react";
-import { useGetManualStats, getGetManualStatsQueryKey } from "@workspace/api-client-react";
+import { useGetManualStats, getGetManualStatsQueryKey, type Manual } from "@workspace/api-client-react";
 import { ScopeSelector } from "@/components/scope-selector";
 import { cn } from "@/lib/utils";
 
 const STALL_SECONDS = 90;
 const PASS_PROGRESS: Record<number, number> = { 0: 5, 1: 15, 2: 28, 3: 40, 4: 58, 5: 72, 6: 86 };
 
-type ManualStatus = "pending" | "processing" | "structure_complete" | "completed" | "failed";
-
-interface Manual {
-  id: number;
-  name: string;
-  filename: string;
-  status: ManualStatus | string;
-  processingPass?: number | null;
-  totalPages?: number | null;
-  documentType?: string | null;
-  errorMessage?: string | null;
-  currentActivity?: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
 interface FileCardProps {
   manual: Manual;
   onDelete: (id: number) => void;
   onStarted: () => void;
   getToken: () => Promise<string | null>;
+  highlight?: boolean;
 }
 
 function ProcessingSection({
@@ -85,7 +70,6 @@ function ProcessingSection({
 
   return (
     <div className="mt-3 space-y-2">
-      {/* Progress bar */}
       <div className="space-y-1">
         <div className="flex justify-between items-center text-[11px] font-mono text-gray-400">
           <span className={cn(isStalled ? "text-red-500" : isSlow ? "text-amber-500" : "")}>
@@ -104,19 +88,15 @@ function ProcessingSection({
         </div>
       </div>
 
-      {/* Activity text */}
       <div className={cn(
         "flex items-start gap-1.5 rounded border px-2.5 py-2 font-mono text-[11px] leading-relaxed",
         isStalled ? "border-red-200 bg-red-50 text-red-700" : "border-gray-100 bg-gray-50 text-gray-500"
       )}>
-        {!isStalled && (
-          <span className="mt-0.5 shrink-0 text-green-500 animate-pulse">▶</span>
-        )}
+        {!isStalled && <span className="mt-0.5 shrink-0 text-green-500 animate-pulse">▶</span>}
         {isStalled && <WifiOff className="w-3 h-3 mt-0.5 shrink-0 text-red-400" />}
         <span className="line-clamp-2">{manual.currentActivity ?? "Initialising…"}</span>
       </div>
 
-      {/* Reset button */}
       <button
         onClick={handleReset}
         disabled={isResetting}
@@ -179,7 +159,6 @@ function CompletedSection({
           </span>
         </div>
       )}
-
       <div className="flex items-center gap-2">
         <Link href={`/manuals/${manualId}`}>
           <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold transition-all shadow-sm">
@@ -246,7 +225,7 @@ function FailedSection({
   );
 }
 
-export function FileCard({ manual, onDelete, onStarted, getToken }: FileCardProps) {
+export function FileCard({ manual, onDelete, onStarted, getToken, highlight = false }: FileCardProps) {
   const showScopeSelector = manual.status === "pending" || manual.status === "structure_complete";
   const isProcessing = manual.status === "processing";
   const isCompleted = manual.status === "completed";
@@ -262,7 +241,9 @@ export function FileCard({ manual, onDelete, onStarted, getToken }: FileCardProp
     <FileText className="w-4 h-4 text-gray-400" />
   );
 
-  const borderClass = isCompleted
+  const borderClass = highlight
+    ? "border-blue-400 ring-2 ring-blue-300 ring-offset-1"
+    : isCompleted
     ? "border-green-100"
     : isFailed
     ? "border-red-200"
@@ -283,8 +264,7 @@ export function FileCard({ manual, onDelete, onStarted, getToken }: FileCardProp
     : "bg-white";
 
   return (
-    <div className={cn("rounded-lg border p-3.5 transition-all", borderClass, bgClass)}>
-      {/* Header row */}
+    <div className={cn("rounded-lg border p-3.5 transition-all duration-500", borderClass, bgClass)}>
       <div className="flex items-start gap-2.5">
         <div className={cn(
           "w-7 h-7 rounded flex items-center justify-center shrink-0 mt-0.5",
@@ -305,7 +285,6 @@ export function FileCard({ manual, onDelete, onStarted, getToken }: FileCardProp
           </p>
         </div>
 
-        {/* Delete button */}
         <button
           onClick={() => onDelete(manual.id)}
           className="w-7 h-7 flex items-center justify-center rounded text-gray-300 hover:text-red-500 hover:bg-red-50 transition-all shrink-0"
@@ -315,7 +294,6 @@ export function FileCard({ manual, onDelete, onStarted, getToken }: FileCardProp
         </button>
       </div>
 
-      {/* Status-specific content */}
       {showScopeSelector && (
         <div className="mt-2 pt-3 border-t border-amber-100">
           <ScopeSelector
@@ -337,9 +315,7 @@ export function FileCard({ manual, onDelete, onStarted, getToken }: FileCardProp
         />
       )}
 
-      {isCompleted && (
-        <CompletedSection manualId={manual.id} getToken={getToken} />
-      )}
+      {isCompleted && <CompletedSection manualId={manual.id} getToken={getToken} />}
 
       {isFailed && (
         <FailedSection
