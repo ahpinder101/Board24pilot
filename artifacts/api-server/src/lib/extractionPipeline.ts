@@ -33,6 +33,13 @@ import { logger } from "./logger.js";
 const MODEL = "gpt-5.4";
 const MAX_TOKENS = 8192;
 
+/** Strip characters PostgreSQL UTF-8 rejects (null bytes, other C0 controls
+ *  except tab/newline/CR) so PDF text can be stored without errors. */
+function sanitizeText(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x00/g, "").replace(/[\x01-\x08\x0B\x0C\x0E-\x1F]/g, " ");
+}
+
 async function updateManualPass(manualId: number, pass: number) {
   await db
     .update(manualsTable)
@@ -136,7 +143,7 @@ async function pass2PageContent(
   const pageRecords = newPages.map((p) => ({
     manualId,
     pageNumber: p.pageNumber,
-    rawText: p.text,
+    rawText: sanitizeText(p.text),
     hasImages: p.hasImages ? 1 : 0,
     hasTables: p.hasTables ? 1 : 0,
   }));
@@ -1047,7 +1054,7 @@ async function passVisionOcr(
     for (const { pageNumber, text } of batchResults) {
       await db
         .update(manualPagesTable)
-        .set({ rawText: text })
+        .set({ rawText: sanitizeText(text) })
         .where(
           and(
             eq(manualPagesTable.manualId, manualId),
@@ -1263,7 +1270,7 @@ export async function reprocessPageRangeWithVision(
     for (const { pageNumber, text } of batchResults) {
       await db
         .update(manualPagesTable)
-        .set({ rawText: text })
+        .set({ rawText: sanitizeText(text) })
         .where(
           and(
             eq(manualPagesTable.manualId, manualId),
