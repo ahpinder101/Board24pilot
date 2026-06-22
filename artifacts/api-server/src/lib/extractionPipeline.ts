@@ -810,9 +810,16 @@ async function pass7EmbedChunks(
     if (pass7PageIdx % 20 === 1) {
       await setActivity(manualId, `Pass 7 — indexing page ${page.pageNumber} of ${pages.length} for search`);
     }
-    if (!page.text || page.text.trim().length < 20) continue;
+    // For pages with very little extracted text, still attempt vision enrichment if
+    // the page has embedded images — the procedure text may be inside the illustration
+    // (e.g. installation/lubrication pages where pdf-parse yields < 20 chars but the
+    // page contains numbered steps alongside diagrams).  Only skip outright if there
+    // is no image data to fall back on.
+    const isShortText = !page.text || page.text.trim().length < 20;
+    const hasEmbeddedImages = imagePageNumbers?.has(page.pageNumber) ?? false;
+    if (isShortText && (!hasEmbeddedImages || !sharedPdfPath)) continue;
 
-    let textToChunk = page.text;
+    let textToChunk = page.text ?? "";
     let enriched = false;
 
     // Diagram gate: only runs on pages that have embedded images (Pass 2 flag),
@@ -825,7 +832,7 @@ async function pass7EmbedChunks(
         // the surrounding procedural sentences. Replacing OCR with vision alone
         // strips searchable keywords that only appear in the prose (e.g.
         // "spring stroke", "minimum clearance") and breaks RAG retrieval.
-        const rawOcr = page.text.trim();
+        const rawOcr = (page.text ?? "").trim();
         textToChunk = rawOcr.length > 50
           ? `${visionText}\n\n${rawOcr}`
           : visionText;
@@ -835,7 +842,13 @@ async function pass7EmbedChunks(
           { manualId, pageNumber: page.pageNumber },
           "Pass 7: diagram page enriched with vision description + OCR"
         );
+      } else if (isShortText) {
+        // Vision returned nothing and there's no useful text — skip
+        continue;
       }
+    } else if (isShortText) {
+      // No embedded images and text too short — skip
+      continue;
     } else if (isTabularOcrPage(page.text)) {
       // Pre-process tabular/schematic pages: reconstruct the row-level
       // relationships that OCR linearisation destroyed.  Prose pages pass through

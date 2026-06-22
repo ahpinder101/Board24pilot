@@ -1049,6 +1049,28 @@ Please answer the question based on the above information from the engineering m
     // Map 1-based source numbers → 0-based chunk indices
     const modelCitedIndices = new Set<number>(citedSourceNumbers.map((n) => n - 1));
 
+    // Build answer token set for content-overlap validation and fallback citation.
+    // Used to (a) reject false-positive phrase matches caused by FTS stemming, and
+    // (b) find the chunk most semantically aligned with the answer when other
+    // signals fail (e.g. answer synthesised from general knowledge + partial evidence).
+    const OVERLAP_STOPWORDS = new Set([
+      "the","a","an","and","or","but","is","are","was","were","be","been",
+      "being","have","has","had","do","does","did","will","would","could",
+      "should","may","might","must","can","to","of","in","on","at","for",
+      "from","with","by","into","it","its","this","that","these","those",
+      "not","no","you","your","they","their","we","our","if","then","when",
+      "also","about","more","some","what","how","which","there","here","use",
+    ]);
+    const answerText = (typeof parsed.answer === "string" ? parsed.answer : "").toLowerCase();
+    const answerTokens = new Set(
+      answerText.split(/\W+/).filter(t => t.length > 3 && !OVERLAP_STOPWORDS.has(t))
+    );
+    const computeOverlap = (content: string): number => {
+      if (answerTokens.size === 0) return 0;
+      const words = content.toLowerCase().split(/\W+/);
+      return words.filter(t => answerTokens.has(t)).length / answerTokens.size;
+    };
+
     // ── 6b. Determine citations from AND-query results ───────────────────────
     // The AND query (run before the model call) found chunks containing ALL the
     // distinctive question terms.  Those are the true source pages — no
@@ -1102,13 +1124,11 @@ Please answer the question based on the above information from the engineering m
     }
 
     // Priority 1: phrase matches.  A chunk containing the exact multi-word term
-    // from the question (e.g. "FOLDER GLUER POWER") is a strong source signal —
-    // far more reliable than individual-word overlap or self-reported sources.
-    // However, stemming can cause a false phrase match on a different page (e.g.
-    // "oil supply" → "oil suppli" matching "oil supplied to the rotary hook" on
-    // a lubrication table instead of the replenishment procedure page).  When the
-    // LLM cites a specific source, prefer phrase chunks that overlap with that
-    // citation — the model knows which page it actually drew its answer from.
+    // from the question (e.g. "FOLDER GLUER POWER") is a strong source signal.
+    // Validation gate: reject phrase chunks whose content has very little word
+    // overlap with the answer — these are false positives from FTS stemming (e.g.
+    // "oil supply" → "oil suppli" matching a lubrication-table page that is
+    // unrelated to the actual answer about replenishing the oil tank).
     if (indicesToCite.size === 0 && phraseChunkIds.size > 0) {
       const modelCitedChunkIds = new Set(
         citedSourceNumbers
@@ -1117,18 +1137,36 @@ Please answer the question based on the above information from the engineering m
       );
       const preferred = [...phraseChunkIds].filter((id) => modelCitedChunkIds.has(id));
       const toUse = preferred.length > 0 ? new Set(preferred) : phraseChunkIds;
+      const PHRASE_OVERLAP_MIN = 0.12; // reject phrase chunks with < 12% answer-word coverage
       for (let i = 0; i < ragChunks.length; i++) {
-        if (toUse.has(ragChunks[i].id)) {
-          indicesToCite.add(i);
-          req.log.info(
-            { chunkPage: ragChunks[i].page_number, fromIntersection: preferred.length > 0 },
-            "chat: citation from phrase-search"
-          );
-        }
+        if (!toUse.has(ragChunks[i].id)) continue;
+        const overlap = computeOverlap(ragChunks[i].content);
+        if (answerTokens.size > 5 && overlap < PHRASE_OVERLAP_MIN) continue;
+        indicesToCite.add(i);
+        req.log.info(
+          { chunkPage: ragChunks[i].page_number, overlap, fromIntersection: preferred.length > 0 },
+          "chat: citation from phrase-search"
+        );
       }
     }
 
-    // Priority 2: chunks containing ALL distinctive question terms (AND query).
+    // Priority 2: content-overlap with answer.  When phrase matching is filtered
+    // or absent, find the ragChunk whose vocabulary most closely matches the answer.
+    // This reliably points to the section the model drew from even when the verbatim
+    // quote field is empty and the model's self-reported sources are unreliable.
+    if (indicesToCite.size === 0 && answerTokens.size > 5) {
+      let bestIdx = -1, bestScore = 0;
+      ragChunks.forEach((c, i) => {
+        const score = computeOverlap(c.content);
+        if (score > bestScore && score >= 0.06) { bestScore = score; bestIdx = i; }
+      });
+      if (bestIdx >= 0) {
+        indicesToCite.add(bestIdx);
+        req.log.info({ chunkPage: ragChunks[bestIdx].page_number, overlap: bestScore }, "chat: citation from content-overlap");
+      }
+    }
+
+    // Priority 3: chunks containing ALL distinctive question terms (AND query).
     if (indicesToCite.size === 0 && andQueryChunkIds.size > 0) {
       for (let i = 0; i < ragChunks.length; i++) {
         if (andQueryChunkIds.has(ragChunks[i].id)) {

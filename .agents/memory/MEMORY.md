@@ -12,3 +12,5 @@
 - [drizzle-kit push blocks on schema drift](drizzle-push-schema-drift.md) — db push in non-TTY shells asks about data-loss columns (embedding, fts_vector drift); use executeSql code_execution tool to CREATE TABLE IF NOT EXISTS directly instead.
 - [Vision OCR and Pass 7 page scoping](vision-ocr-page-scoping.md) — passVisionOcr takes page numbers array not totalPages; sparse-page detection is per-page not 80% ratio; Pass 7 must delete stale chunks before re-indexing.
 - [Agent chat second validation pass](agent-chat-second-pass.md) — agentChat.ts runs up to 2 specialist passes; first pass may revise, second pass validates the revised answer; fail on pass 2 → guided no-answer
+- [Pass 7 short-text skip misses image-heavy pages](pass7-short-text-skip.md) — extraction guard `text.length < 20` fired before diagram gate; image-heavy pages like installation diagrams never got vision-enriched. Fixed to allow through if page has embedded images.
+- [Citation content-overlap fallback](citation-content-overlap.md) — phrase match validated with 12% answer-overlap threshold; P2 content-overlap finds chunk with most answer vocabulary when phrase/quote/AND fail.

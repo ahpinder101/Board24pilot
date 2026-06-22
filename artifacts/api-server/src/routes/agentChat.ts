@@ -1330,6 +1330,25 @@ Please answer based on the above information.`;
       ? parsed.sources.filter((n) => Number.isInteger(n) && n >= 1 && n <= ragChunks.length)
       : [];
 
+    // Build answer token set for content-overlap validation and fallback citation.
+    const OVERLAP_STOPWORDS_AC = new Set([
+      "the","a","an","and","or","but","is","are","was","were","be","been",
+      "being","have","has","had","do","does","did","will","would","could",
+      "should","may","might","must","can","to","of","in","on","at","for",
+      "from","with","by","into","it","its","this","that","these","those",
+      "not","no","you","your","they","their","we","our","if","then","when",
+      "also","about","more","some","what","how","which","there","here","use",
+    ]);
+    const acAnswerText = finalAnswer.toLowerCase();
+    const acAnswerTokens = new Set(
+      acAnswerText.split(/\W+/).filter(t => t.length > 3 && !OVERLAP_STOPWORDS_AC.has(t))
+    );
+    const acComputeOverlap = (content: string): number => {
+      if (acAnswerTokens.size === 0) return 0;
+      const words = content.toLowerCase().split(/\W+/);
+      return words.filter(t => acAnswerTokens.has(t)).length / acAnswerTokens.size;
+    };
+
     const indicesToCite = new Set<number>();
 
     // Priority 0: quote-grounded citation
@@ -1355,10 +1374,10 @@ Please answer based on the above information.`;
       }
     }
 
-    // Priority 1: phrase matches — prefer the subset the LLM also cited (most relevant page).
+    // Priority 1: phrase matches — validated against answer content.
     // Stemming can cause a phrase like "oil supply" to match a different page ("oil supplied
-    // to the rotary hook") that scores higher on specificity but isn't what the answer used.
-    // Intersecting with the LLM's own cited sources gives the right page first.
+    // to the rotary hook") that has nothing to do with the answer. Reject phrase chunks
+    // whose content has < 8% word overlap with the answer to filter these false positives.
     if (indicesToCite.size === 0 && phraseChunkIds.size > 0) {
       const modelCitedIds = new Set(
         citedSourceNumbers
@@ -1367,12 +1386,27 @@ Please answer based on the above information.`;
       );
       const preferred = [...phraseChunkIds].filter((id) => modelCitedIds.has(id));
       const toUse = preferred.length > 0 ? new Set(preferred) : phraseChunkIds;
+      const PHRASE_OVERLAP_MIN = 0.12;
       for (let i = 0; i < ragChunks.length; i++) {
-        if (toUse.has(ragChunks[i].id)) indicesToCite.add(i);
+        if (!toUse.has(ragChunks[i].id)) continue;
+        const overlap = acComputeOverlap(ragChunks[i].content);
+        if (acAnswerTokens.size > 5 && overlap < PHRASE_OVERLAP_MIN) continue;
+        indicesToCite.add(i);
       }
     }
 
-    // Priority 2: AND query
+    // Priority 2: content-overlap with answer.  Find the ragChunk whose vocabulary
+    // most closely matches the final answer — reliable when phrase/quote signals fail.
+    if (indicesToCite.size === 0 && acAnswerTokens.size > 5) {
+      let bestIdx = -1, bestScore = 0;
+      ragChunks.forEach((c, i) => {
+        const score = acComputeOverlap(c.content);
+        if (score > bestScore && score >= 0.06) { bestScore = score; bestIdx = i; }
+      });
+      if (bestIdx >= 0) indicesToCite.add(bestIdx);
+    }
+
+    // Priority 3: AND query
     if (indicesToCite.size === 0 && andQueryChunkIds.size > 0) {
       for (let i = 0; i < ragChunks.length; i++) {
         if (andQueryChunkIds.has(ragChunks[i].id)) indicesToCite.add(i);
