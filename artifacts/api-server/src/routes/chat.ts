@@ -1104,12 +1104,24 @@ Please answer the question based on the above information from the engineering m
     // Priority 1: phrase matches.  A chunk containing the exact multi-word term
     // from the question (e.g. "FOLDER GLUER POWER") is a strong source signal —
     // far more reliable than individual-word overlap or self-reported sources.
+    // However, stemming can cause a false phrase match on a different page (e.g.
+    // "oil supply" → "oil suppli" matching "oil supplied to the rotary hook" on
+    // a lubrication table instead of the replenishment procedure page).  When the
+    // LLM cites a specific source, prefer phrase chunks that overlap with that
+    // citation — the model knows which page it actually drew its answer from.
     if (indicesToCite.size === 0 && phraseChunkIds.size > 0) {
+      const modelCitedChunkIds = new Set(
+        citedSourceNumbers
+          .map((n) => ragChunks[n - 1]?.id)
+          .filter((id): id is number => id !== undefined)
+      );
+      const preferred = [...phraseChunkIds].filter((id) => modelCitedChunkIds.has(id));
+      const toUse = preferred.length > 0 ? new Set(preferred) : phraseChunkIds;
       for (let i = 0; i < ragChunks.length; i++) {
-        if (phraseChunkIds.has(ragChunks[i].id)) {
+        if (toUse.has(ragChunks[i].id)) {
           indicesToCite.add(i);
           req.log.info(
-            { chunkPage: ragChunks[i].page_number },
+            { chunkPage: ragChunks[i].page_number, fromIntersection: preferred.length > 0 },
             "chat: citation from phrase-search"
           );
         }
