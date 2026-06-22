@@ -1,0 +1,24 @@
+kind = "api"
+previewPath = "/docling-api"
+title = "Docling PDF Service"
+version = "1.0.0"
+id = "docling-service"
+
+[[services]]
+localPort = 8000
+name = "Docling PDF Service"
+paths = ["/docling-api"]
+
+[services.development]
+run = "python artifacts/docling-service/main.py"
+
+[services.production]
+
+[services.production.build]
+args = []
+
+[services.production.run]
+args = ["python", "artifacts/docling-service/main.py"]
+
+[services.production.health.startup]
+path = "/docling-api/healthz"

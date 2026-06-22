@@ -26,7 +26,7 @@ import {
   type InsertRelationship,
 } from "@workspace/db";
 import { eq, and, count, sql, isNotNull, gte, lte } from "drizzle-orm";
-import { extractPdfText, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, type PdfContent } from "./pdfExtractor.js";
+import { extractPdfText, extractWithDocling, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, type PdfContent, type DoclingElement } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
 
@@ -116,7 +116,7 @@ Analyze the document and return a JSON object with:
 
 async function pass2PageContent(
   manualId: number,
-  pages: Array<{ pageNumber: number; text: string; hasImages: boolean; hasTables: boolean }>
+  pages: Array<{ pageNumber: number; text: string; hasImages: boolean; hasTables: boolean; printedPageNumber?: string | null }>
 ) {
   // Check which page numbers are already in the DB so we can skip them on resume.
   const existingRows = await db
@@ -146,6 +146,10 @@ async function pass2PageContent(
     rawText: sanitizeText(p.text),
     hasImages: p.hasImages ? 1 : 0,
     hasTables: p.hasTables ? 1 : 0,
+    // Store the human-readable page number from Docling header extraction
+    // (e.g. "7" for PDF page 16 whose first 9 pages are cover/TOC).
+    // Omit entirely for pdf-parse fallback (avoids storing null explicitly).
+    ...(p.printedPageNumber != null ? { printedPageNumber: p.printedPageNumber } : {}),
   }));
 
   for (let i = 0; i < pageRecords.length; i += 20) {
@@ -635,6 +639,32 @@ function isTabularOcrPage(text: string): boolean {
 }
 
 /**
+ * Builds clean, structured text for chunking from Docling element metadata.
+ *
+ * Why: Docling preserves reading order, marks structural boundaries, and
+ * provides markdown tables.  This is significantly better input for
+ * chunkPageSemantically() than raw pdf-parse output, which loses column
+ * structure, includes page headers/footers as boilerplate, and mis-orders
+ * multi-column layouts.
+ *
+ * - page_header / page_footer → excluded (boilerplate, not useful for RAG)
+ * - table → use markdown representation (preserves row/column structure)
+ * - picture → excluded (no text; vision descriptions are added separately)
+ * - all other elements → use plain text from the element
+ */
+function buildTextFromElements(elements: DoclingElement[]): string {
+  const parts: string[] = [];
+  for (const el of elements) {
+    if (el.type === "page_header" || el.type === "page_footer" || el.type === "picture") continue;
+    const body = el.type === "table" && el.markdown?.trim()
+      ? el.markdown.trim()
+      : el.text?.trim();
+    if (body) parts.push(body);
+  }
+  return parts.join("\n\n");
+}
+
+/**
  * Calls GPT to reconstruct relational meaning from OCR-linearised tabular pages.
  *
  * Problem: a wiring table encodes relationships spatially (each table row pairs
@@ -730,7 +760,7 @@ async function describePageWithVision(
 
 async function pass7EmbedChunks(
   manualId: number,
-  pages: Array<{ pageNumber: number; text: string }>,
+  pages: Array<{ pageNumber: number; text: string; elements?: DoclingElement[]; printedPageNumber?: string | null }>,
   pdfBuffer?: Buffer,
   options: { updatePass?: boolean } = {}
 ): Promise<void> {
@@ -819,12 +849,18 @@ async function pass7EmbedChunks(
     const hasEmbeddedImages = imagePageNumbers?.has(page.pageNumber) ?? false;
     if (isShortText && (!hasEmbeddedImages || !sharedPdfPath)) continue;
 
-    let textToChunk = page.text ?? "";
+    // If Docling elements are available use the element tree to build structured
+    // text (excludes headers/footers as boilerplate, uses markdown for tables).
+    // Otherwise fall back to the raw pdf-parse text.
+    let textToChunk = page.elements && page.elements.length > 0
+      ? buildTextFromElements(page.elements)
+      : (page.text ?? "");
     let enriched = false;
 
-    // Diagram gate: only runs on pages that have embedded images (Pass 2 flag),
-    // using a pre-written shared PDF path to avoid re-writing the buffer each page.
-    if (sharedPdfPath && imagePageNumbers?.has(page.pageNumber) && await hasDiagramImageFromPath(sharedPdfPath, page.pageNumber)) {
+    // Diagram gate: runs on pages that have embedded images (Pass 2 flag) OR
+    // pages where Docling found picture elements.
+    const hasDoclingPicture = page.elements?.some((e) => e.type === "picture") ?? false;
+    if (sharedPdfPath && (imagePageNumbers?.has(page.pageNumber) || hasDoclingPicture) && await hasDiagramImageFromPath(sharedPdfPath, page.pageNumber)) {
       const visionText = await describePageWithVision(sharedPdfPath, page.pageNumber);
       if (visionText) {
         // Combine vision description (structured drawing metadata) with the
@@ -1859,8 +1895,11 @@ export async function runExtractionPipeline(
     await setManualStatus(manualId, "processing", { processingPass: startingPass });
     await setActivity(manualId, hasStructure ? "Resuming pipeline — checking progress..." : "Starting — extracting text from PDF...");
 
-    // Always extract text from the PDF buffer (fast, no AI — just native parsing).
-    const pdfContent = await extractPdfText(pdfBuffer);
+    // Extract text from the PDF buffer.  Try the Docling sidecar first — it
+    // produces layout-aware text, printed page numbers, and element metadata.
+    // Falls back to pdf-parse transparently on any error (503 model-loading,
+    // connection refused, timeout) so the pipeline never blocks on the sidecar.
+    let pdfContent = (await extractWithDocling(pdfBuffer)) ?? (await extractPdfText(pdfBuffer));
 
     // ── Pass 1: Document structure ───────────────────────────────────────────
     // Pass 1 always analyses the full document for structural context, regardless

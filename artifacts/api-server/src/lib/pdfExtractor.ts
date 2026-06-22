@@ -5,6 +5,7 @@ import { writeFile, readFile, readdir, rm, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
+import { logger } from "./logger.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -209,17 +210,115 @@ export async function renderPdfPageToBase64FromPath(
   }
 }
 
+/** Single structural element returned by the Docling sidecar. */
+export interface DoclingElement {
+  /** Docling label string: "text" | "section_header" | "list_item" | "table" | "picture" | "page_header" | "page_footer" | … */
+  type: string;
+  text: string;
+  /** Heading level (1 = H1) — only present on section_header elements. */
+  level?: number;
+  /** Markdown-rendered table — only present on table elements. */
+  markdown?: string;
+  /** Figure caption — only present on picture elements. */
+  caption?: string;
+}
+
 export interface PageContent {
   pageNumber: number;
   text: string;
   hasImages: boolean;
   hasTables: boolean;
+  /**
+   * Human-readable page number extracted from the page header/footer by Docling
+   * (e.g. "7" for PDF page 16 whose first 9 pages are cover/TOC).
+   * Null / undefined when using the pdf-parse fallback.
+   */
+  printedPageNumber?: string | null;
+  /**
+   * Full Docling element tree for this page.
+   * Undefined when using the pdf-parse fallback.
+   */
+  elements?: DoclingElement[];
 }
 
 export interface PdfContent {
   totalPages: number;
   pages: PageContent[];
   fullText: string;
+}
+
+// ─── Docling sidecar client ──────────────────────────────────────────────────
+
+interface DoclingApiPage {
+  pageNumber: number;
+  printedPageNumber: string | null;
+  text: string;
+  elements: DoclingElement[];
+  hasImages: boolean;
+  hasTables: boolean;
+}
+
+interface DoclingApiResponse {
+  pages: DoclingApiPage[];
+  fullText: string;
+  totalPages: number;
+}
+
+/** Internal URL: server → sidecar (bypasses the shared proxy). */
+const DOCLING_URL = "http://localhost:8000/docling-api/extract";
+/** 5-minute timeout — large PDFs (200+ pages) can take ~60 s on cold start. */
+const DOCLING_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Extracts PDF content via the Docling FastAPI sidecar.
+ *
+ * Returns `null` on any error (connection refused, 503 model-loading, 5xx,
+ * timeout) so the caller can transparently fall back to `extractPdfText()`.
+ */
+export async function extractWithDocling(pdfBuffer: Buffer): Promise<PdfContent | null> {
+  try {
+    const form = new FormData();
+    // Cast to Uint8Array — Buffer extends Uint8Array but TS's BlobPart type
+    // declaration doesn't widen to include the Node.js Buffer subtype.
+    const blob = new Blob([new Uint8Array(pdfBuffer)], { type: "application/pdf" });
+    form.append("file", blob, "document.pdf");
+
+    const response = await fetch(DOCLING_URL, {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(DOCLING_TIMEOUT_MS),
+    });
+
+    if (response.status === 503) {
+      logger.warn({ url: DOCLING_URL }, "Docling model still loading — falling back to pdf-parse");
+      return null;
+    }
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      logger.warn({ status: response.status, body }, "Docling service error — falling back to pdf-parse");
+      return null;
+    }
+
+    const data = await response.json() as DoclingApiResponse;
+
+    logger.info({ totalPages: data.totalPages, url: DOCLING_URL }, "extractWithDocling: success");
+
+    return {
+      totalPages: data.totalPages,
+      fullText: data.fullText,
+      pages: data.pages.map((p) => ({
+        pageNumber:        p.pageNumber,
+        printedPageNumber: p.printedPageNumber ?? null,
+        text:              p.text,
+        hasImages:         p.hasImages,
+        hasTables:         p.hasTables,
+        elements:          p.elements,
+      })),
+    };
+  } catch (err) {
+    logger.warn({ err }, "extractWithDocling failed — falling back to pdf-parse");
+    return null;
+  }
 }
 
 /**

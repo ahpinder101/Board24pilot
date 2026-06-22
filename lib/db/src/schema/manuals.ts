@@ -38,6 +38,10 @@ export const manualPagesTable = pgTable("manual_pages", {
   hasImages: integer("has_images").notNull().default(0), // 0 or 1
   hasTables: integer("has_tables").notNull().default(0), // 0 or 1
   description: text("description"),
+  // Printed page number as it appears in the document header/footer (e.g. "7" for PDF
+  // page 16 of a manual whose first 9 pages are cover/TOC). Populated by Docling extraction;
+  // NULL for manuals processed before Docling was integrated.
+  printedPageNumber: text("printed_page_number"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

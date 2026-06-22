@@ -3,10 +3,11 @@ import { db } from "@workspace/db";
 import {
   chatMessagesTable,
   manualsTable,
+  manualPagesTable,
   type ChatCitation,
 } from "@workspace/db";
 import { openai } from "../lib/openai.js";
-import { sql } from "drizzle-orm";
+import { sql, or, and, eq } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import {
   detectDomain,
@@ -848,9 +849,47 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       graphContext = parts.join("\n\n");
     }
 
+    // ── 4. Printed-page lookup ───────────────────────────────────────────────
+    // For manuals processed via Docling, manual_pages.printed_page_number holds
+    // the human-readable page label from the document header/footer so the LLM
+    // cites the page the user would look up in the physical manual.
+    const printedPgMap = new Map<string, string>();
+    if (ragChunks.length > 0) {
+      const uniquePairs = [
+        ...new Map(ragChunks.map((c) => [`${c.manual_id}:${c.page_number}`, c])).values(),
+      ];
+      try {
+        const pgRows = await db
+          .select({
+            manualId: manualPagesTable.manualId,
+            pageNumber: manualPagesTable.pageNumber,
+            printedPageNumber: manualPagesTable.printedPageNumber,
+          })
+          .from(manualPagesTable)
+          .where(
+            or(
+              ...uniquePairs.map((c) =>
+                and(
+                  eq(manualPagesTable.manualId, c.manual_id),
+                  eq(manualPagesTable.pageNumber, c.page_number)
+                )
+              )
+            )
+          );
+        for (const row of pgRows) {
+          if (row.printedPageNumber) {
+            printedPgMap.set(`${row.manualId}:${row.pageNumber}`, row.printedPageNumber);
+          }
+        }
+      } catch { /* non-critical: fall back to PDF sequential page number */ }
+    }
+
     // ── 4. RAG context + feedback corrections ─────────────────────────────────
     let ragContext = ragChunks.length > 0
-      ? ragChunks.map((c, i) => `[Source ${i + 1}: "${c.manual_name}", page ${c.page_number}]\n${c.content}`).join("\n\n---\n\n")
+      ? ragChunks.map((c, i) => {
+          const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
+          return `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}]\n${c.content}`;
+        }).join("\n\n---\n\n")
       : "No relevant manual excerpts found.";
 
     let feedbackContext = "";
@@ -1078,7 +1117,10 @@ Analyse the evidence and output your scratchpad JSON.`;
               ragChunks.push(...newGapChunks);
               ragChunks.sort((a, b) => a.page_number - b.page_number || a.chunk_index - b.chunk_index);
               ragContext = ragChunks
-                .map((c, i) => `[Source ${i + 1}: "${c.manual_name}", page ${c.page_number}]\n${c.content}`)
+                .map((c, i) => {
+                  const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
+                  return `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}]\n${c.content}`;
+                })
                 .join("\n\n---\n\n");
               req.log.info(
                 { gapChunksAdded: newGapChunks.length, uncoveredAspects: scratchpad.uncoveredAspects },

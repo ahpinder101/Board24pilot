@@ -6,11 +6,12 @@ import {
   entitiesTable,
   pathsTable,
   manualsTable,
+  manualPagesTable,
   feedbackTable,
   type ChatCitation,
 } from "@workspace/db";
 import { openai } from "../lib/openai.js";
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, or, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
 
 const router = Router();
@@ -893,14 +894,51 @@ router.post("/chat", async (req: Request, res: Response) => {
       graphContext = parts.join("\n\n");
     }
 
+    // ── 4. Printed-page lookup ───────────────────────────────────────────────
+    // For manuals processed via Docling, manual_pages.printed_page_number holds
+    // the human-readable page label from the document header/footer (e.g. "7"
+    // for PDF page 16 of a manual whose first 9 cover/TOC pages offset the count).
+    // The LLM sees this label so it can cite the page number the user would look up
+    // in the physical manual, not the PDF sequential page number.
+    const printedPgMap = new Map<string, string>();
+    if (ragChunks.length > 0) {
+      const uniquePairs = [
+        ...new Map(ragChunks.map((c) => [`${c.manual_id}:${c.page_number}`, c])).values(),
+      ];
+      try {
+        const pgRows = await db
+          .select({
+            manualId: manualPagesTable.manualId,
+            pageNumber: manualPagesTable.pageNumber,
+            printedPageNumber: manualPagesTable.printedPageNumber,
+          })
+          .from(manualPagesTable)
+          .where(
+            or(
+              ...uniquePairs.map((c) =>
+                and(
+                  eq(manualPagesTable.manualId, c.manual_id),
+                  eq(manualPagesTable.pageNumber, c.page_number)
+                )
+              )
+            )
+          );
+        for (const row of pgRows) {
+          if (row.printedPageNumber) {
+            printedPgMap.set(`${row.manualId}:${row.pageNumber}`, row.printedPageNumber);
+          }
+        }
+      } catch { /* non-critical: fall back to PDF sequential page number */ }
+    }
+
     // ── 4. Build RAG context ────────────────────────────────────────────────
     const ragContext =
       ragChunks.length > 0
         ? ragChunks
-            .map(
-              (c, i) =>
-                `[Source ${i + 1}: "${c.manual_name}", page ${c.page_number}]\n${c.content}`
-            )
+            .map((c, i) => {
+              const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
+              return `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}]\n${c.content}`;
+            })
             .join("\n\n---\n\n")
         : "No relevant manual excerpts found.";
 
