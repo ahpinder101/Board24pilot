@@ -754,6 +754,30 @@ async function pass7EmbedChunks(
     await setActivity(manualId, `Pass 7 — resuming: ${chunkedPageSet.size} pages already indexed, processing remaining`);
   }
 
+  // For a partial re-run, delete existing chunks for the selected pages before
+  // indexing so that stale chunks from a previous full-doc run don't survive.
+  // The resume logic below skips any page already in chunkedPageSet — without
+  // this delete, an old chunk would block the fresh OCR text from being indexed.
+  // We read the pages list to find which page numbers are in scope; if all
+  // pages are being processed (rechunk path), chunkedPageSet=0 handles the clear.
+  if (pages.length > 0) {
+    const pageNums = pages.map((p) => p.pageNumber);
+    const existingForRange = await db
+      .select({ pageNumber: chunksTable.pageNumber })
+      .from(chunksTable)
+      .where(eq(chunksTable.manualId, manualId));
+    const existingInRange = existingForRange.filter((r) => pageNums.includes(r.pageNumber));
+    if (existingInRange.length > 0 && existingInRange.length < existingForRange.length) {
+      // Partial overlap — only delete chunks for the pages we're about to re-index
+      for (const { pageNumber } of existingInRange) {
+        await db.delete(chunksTable).where(
+          and(eq(chunksTable.manualId, manualId), eq(chunksTable.pageNumber, pageNumber))
+        );
+      }
+      logger.info({ manualId, deleted: existingInRange.length }, "Pass 7: deleted stale chunks for re-indexed pages");
+    }
+  }
+
   // Pre-write the PDF buffer to a single shared temp file (if provided) so the
   // diagram gate can call pdfimages/pdftoppm without re-writing the buffer on
   // every page.  Also restrict the diagram gate to pages with embedded images
@@ -1637,6 +1661,12 @@ export async function rechunkManual(manualId: number): Promise<{ chunks: number 
 
   if (pages.length === 0) throw new Error(`No pages found for manual ${manualId}`);
 
+  // Delete all existing chunks first — pass7EmbedChunks's resume logic skips
+  // any page already in chunkedPageSet, making rechunk a no-op on already-chunked
+  // manuals without this explicit clear.
+  await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
+  logger.info({ manualId, pages: pages.length }, "rechunkManual: cleared existing chunks, re-indexing all pages");
+
   // Prefer the enriched description for sparse pages (mirrors extractGraphFromExistingText)
   // so re-chunking keeps the vision/restructured content instead of thin OCR text.
   await pass7EmbedChunks(
@@ -1737,44 +1767,49 @@ export async function runExtractionPipeline(
     // pass2PageContent already checks which pages exist and only inserts new ones.
     await pass2PageContent(manualId, pdfContent.pages);
 
-    // ── Image-based PDF detection (MUST happen before Pass 3) ────────────────
-    // Calculate the empty-page ratio from the RAW extracted text, before any
-    // description patching.  If we do this after Pass 3 patches in-memory text,
-    // the placeholder descriptions ("no page text provided...") generated for
-    // image-only pages are long enough to satisfy the length check, making the
-    // threshold appear un-met and preventing Vision OCR from ever running.
-    const rawEmptyCount = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20).length;
-    const isImageBasedPdf = pdfContent.pages.length > 0 && rawEmptyCount / pdfContent.pages.length > 0.8;
+    // ── Sparse-page Vision OCR (MUST happen before Pass 3) ───────────────────
+    // Run Vision OCR on every page where pdf-parse returned < 20 chars —
+    // these are either scanned pages or blank pages.  We decide per-page rather
+    // than using a whole-document ratio so mixed-format PDFs (part text, part
+    // scanned wiring diagrams) get correct OCR on their image pages without
+    // flooding fully-text pages through the vision pipeline.
+    //
+    // The check uses RAW extracted text, before any Pass 3 description patching.
+    // If we did it after, Pass 3's placeholder descriptions would look non-empty
+    // and prevent Vision OCR from running at all.
+    const sparsePages = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20);
+    const sparsePageNums = sparsePages.map((p) => p.pageNumber);
 
-    if (isImageBasedPdf) {
+    if (sparsePageNums.length > 0) {
       // ── Vision OCR runs BEFORE Pass 3 so Pass 3 gets real image text ──────
-      // Check whether vision OCR was already fully (or partially) completed.
+      // Check whether vision OCR was already fully (or partially) completed
+      // for the sparse pages (resume-safe: passVisionOcr skips already-written rows).
       const ocrRows = await db
         .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
         .from(manualPagesTable)
         .where(and(eq(manualPagesTable.manualId, manualId), isNotNull(manualPagesTable.rawText)));
-      // rawText rows with < 20 chars are not real OCR content (pdf-parse fills
-      // these even on blank pages).  Only count rows with substantial text.
-      const requestedPageNums = pdfContent.pages.map((p) => p.pageNumber);
+      // Only count rows with substantial text — pdf-parse fills even blank pages
+      // with a few whitespace chars which must not be treated as real OCR output.
       const ocrSavedPages = new Map(
         ocrRows
-          .filter((r) => (r.rawText ?? "").trim().length >= 20 && requestedPageNums.includes(r.pageNumber))
+          .filter((r) => (r.rawText ?? "").trim().length >= 20 && sparsePageNums.includes(r.pageNumber))
           .map((r) => [r.pageNumber, r.rawText!])
       );
 
-      if (ocrSavedPages.size >= pdfContent.pages.length * 0.8) {
-        // OCR already done for the requested pages — patch in-memory from DB
-        logger.info({ manualId, saved: ocrSavedPages.size }, "Vision OCR: skipping — rawText already in DB");
-        await setActivity(manualId, `Vision OCR ✓ — ${ocrSavedPages.size} pages already OCR'd, loading from database`);
+      if (ocrSavedPages.size >= sparsePageNums.length * 0.8) {
+        // OCR already done for the sparse pages — patch in-memory from DB
+        logger.info({ manualId, saved: ocrSavedPages.size, sparsePages: sparsePageNums.length }, "Vision OCR: skipping — rawText already in DB");
+        await setActivity(manualId, `Vision OCR ✓ — ${ocrSavedPages.size} sparse pages already OCR'd, loading from database`);
         for (const page of pdfContent.pages) {
           const saved = ocrSavedPages.get(page.pageNumber);
           if (saved) page.text = saved;
         }
       } else {
-        // Run/resume vision OCR only for the requested pages (passVisionOcr saves
+        // Run/resume vision OCR only for sparse pages (passVisionOcr saves
         // rawText per-page so a resume skips pages already written).
-        logger.info({ manualId, rawEmptyCount }, "Image-based PDF — running vision OCR before Pass 3");
-        const ocrPages = await passVisionOcr(manualId, pdfBuffer, requestedPageNums);
+        logger.info({ manualId, sparsePages: sparsePageNums.length }, "Sparse pages detected — running Vision OCR before Pass 3");
+        await setActivity(manualId, `Vision OCR — scanning ${sparsePageNums.length} sparse/scanned pages (pages: ${sparsePageNums.join(", ")})`);
+        const ocrPages = await passVisionOcr(manualId, pdfBuffer, sparsePageNums);
         for (const ocrPage of ocrPages) {
           const page = pdfContent.pages.find((p) => p.pageNumber === ocrPage.pageNumber);
           if (page) page.text = ocrPage.text;
