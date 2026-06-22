@@ -12,6 +12,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { saveRecentQuestion } from "@/hooks/use-recent-questions";
 
+// ── Procedural query auto-detection ──────────────────────────────────────────
+// Mirror of the server-side PROCEDURAL_QUERY_RE — used to auto-switch mode to
+// "Procedure / Step-by-Step" when the question is clearly a procedure request.
+const PROCEDURAL_QUERY_RE =
+  /\b(walk\s+me\s+through|step[-\s]by[-\s]step|steps?\s+to\s+\w|how\s+(do\s+I|to)\s+(replace|remove|install|disassemble|assemble|adjust|clean|set\s+up|change|perform|fix)|procedure\s+for|guide\s+me|show\s+me\s+(how|the\s+steps?)|all\s+steps?|sequence\s+for|process\s+of)\b/i;
+
 // ── Languages ────────────────────────────────────────────────────────────────
 
 const LANGUAGES = [
@@ -729,6 +735,15 @@ export default function AskPage() {
     const question = input.trim() || "What can you tell me about this?";
     if (!canSend) return;
 
+    // Auto-switch to Procedure mode when the question clearly asks for steps.
+    // Only promotes from Quick Answer → Procedure (never demotes a manual selection).
+    const isProceduralQ = agentMode && PROCEDURAL_QUERY_RE.test(question);
+    const effectiveRetrievalMode: "fact_lookup" | "process_trace" =
+      isProceduralQ && retrievalMode === "fact_lookup" ? "process_trace" : retrievalMode;
+    if (effectiveRetrievalMode !== retrievalMode) {
+      setRetrievalMode(effectiveRetrievalMode);
+    }
+
     saveRecentQuestion(question);
     const imageSnapshot = attachedImage;
 
@@ -756,7 +771,7 @@ export default function AskPage() {
       if (imageSnapshot) body.imageDataUrl = imageSnapshot;
       if (agentMode) {
         body.strictness = strictness;
-        body.retrievalMode = retrievalMode;
+        body.retrievalMode = effectiveRetrievalMode;
       }
 
       const res = await fetch(endpoint, {
