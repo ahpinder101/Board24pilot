@@ -269,8 +269,8 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       db.execute<HistoryRow>(sql`
         SELECT role, content FROM chat_messages
         WHERE session_id = ${sessionId}
-        ORDER BY created_at ASC
-        LIMIT 12
+        ORDER BY created_at DESC
+        LIMIT 6
       `),
     ]);
 
@@ -278,7 +278,8 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       manualId: r.manual_id,
       name: r.name,
     }));
-    const conversationHistory = historyResult.rows;
+    // DESC gives newest-first; reverse to restore chronological order for prompts
+    const conversationHistory = [...historyResult.rows].reverse();
 
     // ── 0.5. Vision pre-pass ─────────────────────────────────────────────────
     let visionKeywords = "";
@@ -991,12 +992,10 @@ Please answer based on the above information.`;
           ]
         : userPrompt;
 
-    const historyMessages = conversationHistory
-      .slice(-6)
-      .map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content.slice(0, 1200),
-      }));
+    const historyMessages = conversationHistory.map((m) => ({
+      role: m.role as "user" | "assistant",
+      content: m.content.slice(0, 1200),
+    }));
 
     const completion = await openai.chat.completions.create({
       model: CHAT_MODEL,

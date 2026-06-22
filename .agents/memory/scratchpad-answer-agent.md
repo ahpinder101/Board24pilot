@@ -5,34 +5,29 @@ description: Two-pass LLM flow in agentChat.ts — scratchpad reasons about evid
 
 ## Pattern
 
-**Pass 1 (scratchpad)**: GPT-4o reviews ragContext + graphContext + conversation history, outputs JSON:
-`{ questionType, domain, evidenceQuality, coveredAspects, uncoveredAspects, strategy, clarifyingQuestion, planNotes }`
+**Pass 1 (scratchpad)**: GPT-4o reviews retrieved evidence + conversation history, outputs JSON with `{ questionType, domain, evidenceQuality, coveredAspects, uncoveredAspects, strategy, clarifyingQuestion, planNotes }`.
 
 Strategies:
-- `"answer"` → proceed to Pass 2 (default, heavily biased toward this)
-- `"clarify"` → early return with clarifying question (isClarifying: true in response, saved to DB)
-- `"cannot_answer"` → early return with buildGuidedNoAnswer (isGuided: true, saved to DB)
+- `"answer"` → proceed to Pass 2 (heavily biased default)
+- `"clarify"` → early return with a clarifying question (`isClarifying: true`, saved to DB, no specialist validation)
+- `"cannot_answer"` → early return with `buildGuidedNoAnswer` (`isGuided: true`, saved to DB)
 
-**Pass 2 (answer)**: Uses scratchpad.domain (not detectDomain), scratchpad.planNotes injected into system prompt, conversation history prepended to messages array (last 6, 1200 char limit).
+**Pass 2 (answer)**: System prompt includes scratchpad domain and planNotes. Conversation history prepended to messages array in chronological order.
 
-## Key quote gate removal
+**Why:** The old single-pass flow had a quote-gate ("NOT IN EXCERPTS → must say manual does not specify") that killed answers even when 34 relevant chunks were retrieved. The scratchpad decouples reasoning from generation.
 
-Old prompt had: "If quote is NOT IN EXCERPTS, answer must say the manual does not specify this."
-This was the primary cause of false "not in excerpts" answers even with 34 relevant chunks.
+## History loading — critical order detail
 
-New quote field: "citation anchoring only, does NOT constrain your answer."
-Added Rule 5: "Multi-step procedures: synthesise from ALL excerpts — never say manual does not specify when steps are present."
+Query uses `ORDER BY created_at DESC LIMIT 6` then the result is reversed in code to restore chronological order before passing to prompts. Using `ASC LIMIT 12` fetches the oldest messages, not the most recent context.
+
+**Why:** For follow-up questions ("what is the cause of this?"), the LLM needs the most recent 6 messages, not the oldest 12.
+
+## Quote gate removal
+
+The answer pass prompt previously forced "manual does not specify" whenever the quote field was NOT IN EXCERPTS. This gate is removed. The quote field is now described as "citation anchoring only" — it does not constrain the answer.
+
+Rule 5 was added: "Multi-step procedures: synthesise from ALL excerpts — never say manual does not specify when steps are present."
 
 ## Confidence guard
 
-`finalConfidence = isGuided ? "unverified" : finalSpecialistResult.confidence`
-
-This was added to prevent the "High confidence + Guided response" contradiction visible in the old UI.
-
-## Conversation history
-
-Loaded in the initial `Promise.all` alongside manuals and machine entities.
-Uses `sessionId` (not `incomingSession`) — new sessions return 0 rows automatically.
-Scratchpad receives last 400 chars per message; answer pass receives last 6 messages at 1200 chars each.
-
-**Why:** `sessionId` is always defined (either from client or from `randomUUID()`). Loading history for a brand-new UUID simply returns empty rows — no conditional branch needed.
+`isGuided = true` always forces `confidence = "unverified"` in the response, preventing the "High confidence + Guided response" contradiction.
