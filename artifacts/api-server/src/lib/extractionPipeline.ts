@@ -2557,6 +2557,20 @@ export async function pass8EnrichChunks(
       continue;
     }
 
+    // Delete any semantic_expansion chunks that may exist for this page from a
+    // prior partial/crashed run.  Combined with writing page_context LAST, this
+    // makes per-page processing idempotent: a retry always starts from a clean
+    // state for this page and cannot accumulate duplicate expansions.
+    await db
+      .delete(chunksTable)
+      .where(
+        and(
+          eq(chunksTable.manualId, manualId),
+          eq(chunksTable.pageNumber, pageNumber),
+          eq(chunksTable.elementType, "semantic_expansion")
+        )
+      );
+
     // ── 8a. Detect page anchor ─────────────────────────────────────────────────
     const anchor = await detectPageAnchor(pageChunks, manualName, rejectedLabels);
 
