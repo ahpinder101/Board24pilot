@@ -957,7 +957,8 @@ router.post("/chat", async (req: Request, res: Response) => {
         ? ragChunks
             .map((c, i) => {
               const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
-              return `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}]\n${c.content}`;
+              const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
+              return `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${pageCtxTag}]\n${c.content}`;
             })
             .join("\n\n---\n\n")
         : "No relevant manual excerpts found.";
@@ -1001,8 +1002,9 @@ CRITICAL RULES FOR ACCURACY:
 4. Repeated identifier lists: when a part number, catalogue code, or component name appears as a repeated list in an excerpt (the same identifier on consecutive lines, e.g. "QST-5/16-12\nQST-5/16-12\nQST-5/16-12…"), each repetition represents one physical instance. Count them — that count IS the answer to "how many" questions about that item. Then look at context lines immediately after the list to identify which assemblies they serve.
 5. Dimension tables: when an excerpt shows a table with lettered column headers (A, B, C …) and numeric values below them, those letters refer to labelled dimensions in a figure. Report all available dimension values (e.g. "A=515mm, B=435mm, C=385mm") and note which figure they reference. If the question asks for a specific dimension (e.g. "height") but the table only has A/B/C labels, provide all dimensions and note the figure reference so the engineer can identify which is height.
 6. Machine dimensions vs packaging dimensions: manuals typically contain TWO separate dimension tables — one for the machine itself (e.g. "Machine dimensions and weight", Fig 2.x) and one for the shipping/packaging box (e.g. "Delivery and handling", Fig 3.x). When the question asks about the machine's height/size, answer from the MACHINE dimensions table. When the question asks about the box or packaging the machine ships in, answer from the PACKAGING dimensions table. If both are present in the excerpts, clearly label which is which.
-7. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
-8. Verbatim values — this is absolute: for any specific value (number, measurement, angle, distance, duration, temperature, product name, part number, model code, catalogue code, phone number, URL, or proper noun) you MUST copy it character-for-character from the excerpt text above. Do NOT paraphrase it, round it, convert its units, or recall it from memory. If the exact value does not appear literally in one of the Source excerpts, write "The manual does not specify this" — never substitute a plausible-sounding figure. This rule exists because engineers act on these values and a wrong number causes real harm.
+7. Drawing and spec-sheet names: when a Source header includes a 'spec sheet:' label (e.g. 'spec sheet: "ORDER SPEC SHEET — PP2 049"'), reference that name explicitly in your answer text — for example "According to the ORDER SPEC SHEET for PP2 049..." or "As shown on the ORDER SPEC SHEET (PP2 049)...". Do not leave the drawing name only in the citation chip; name it inline so engineers immediately know which document the value comes from.
+8. Never fabricate technical details. If the information is genuinely absent from all provided excerpts, say so explicitly.
+9. Verbatim values — this is absolute: for any specific value (number, measurement, angle, distance, duration, temperature, product name, part number, model code, catalogue code, phone number, URL, or proper noun) you MUST copy it character-for-character from the excerpt text above. Do NOT paraphrase it, round it, convert its units, or recall it from memory. If the exact value does not appear literally in one of the Source excerpts, write "The manual does not specify this" — never substitute a plausible-sounding figure. This rule exists because engineers act on these values and a wrong number causes real harm.
 
 FORMATTING:
 - Write in plain prose. Do NOT use markdown bold (**text**), headers (##), or bullet dashes that start with **.

@@ -901,11 +901,13 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     // Enrich each source label with Docling structural metadata when available:
     //  - section_path: breadcrumb like "2. INSTALLATION > 2-3. Lubrication"
     //  - element_type: content-type hint (TABLE, LIST) so agents read them correctly
+    //  - page_context: drawing/spec-sheet name for this chunk (e.g. "ORDER SPEC SHEET — PP2 049")
     let ragContext = ragChunks.length > 0
       ? ragChunks.map((c, i) => {
           const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
           const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
-          const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}]`;
+          const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
+          const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
           // Prefix table/list content so the answer agent knows how to read it
           const typeHint =
             c.element_type === "table" ? "[TABLE] " :
@@ -1113,7 +1115,8 @@ Analyse the evidence and output your scratchpad JSON.`;
             ragContext = ragChunks.map((c, i) => {
               const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
               const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
-              const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}]`;
+              const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
+              const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
               const typeHint =
                 c.element_type === "table" ? "[TABLE] " :
                 c.element_type === "list_item" ? "[LIST] " : "";
@@ -1215,7 +1218,8 @@ Analyse the evidence and output your scratchpad JSON.`;
                 .map((c, i) => {
                   const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
                   const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
-                  const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}]`;
+                  const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
+                  const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
                   const typeHint =
                     c.element_type === "table" ? "[TABLE] " :
                     c.element_type === "list_item" ? "[LIST] " : "";
@@ -1293,9 +1297,10 @@ CRITICAL RULES:
 1. Scope labels: excerpts may begin with a scope qualifier like [Valid only for Sq machines]. Always respect these.
 2. Numeric tables: read values directly from tables present in the excerpts.
 3. Verbatim values — ABSOLUTE: for any specific value (number, measurement, part number, model code) copy it character-for-character from the excerpt. If the exact value does not appear literally, write "The manual does not specify this."
-4. Never fabricate technical details.
-5. Multi-step procedures: synthesise steps from ALL provided excerpts in sequence. No single sentence needs to cover the whole procedure — build it across multiple sources. Never say "the manual does not specify" for a procedure when the excerpts contain relevant steps.
-6. PROCEDURE STEPS section: when "PROCEDURE STEPS (verified from knowledge graph)" appears above the excerpts, list every step in full as the primary answer — do not summarise, skip, reorder, or paraphrase any step. Number them exactly as given.
+4. Drawing and spec-sheet names: when a Source header includes a 'spec sheet:' label (e.g. 'spec sheet: "ORDER SPEC SHEET — PP2 049"'), reference that drawing or spec-sheet name explicitly in your answer text — for example "According to the ORDER SPEC SHEET for PP2 049..." or "As shown on the ORDER SPEC SHEET (PP2 049)...". Do not leave the drawing name only in the citation chip; name it inline so engineers immediately know which document the value comes from.
+5. Never fabricate technical details.
+6. Multi-step procedures: synthesise steps from ALL provided excerpts in sequence. No single sentence needs to cover the whole procedure — build it across multiple sources. Never say "the manual does not specify" for a procedure when the excerpts contain relevant steps.
+7. PROCEDURE STEPS section: when "PROCEDURE STEPS (verified from knowledge graph)" appears above the excerpts, list every step in full as the primary answer — do not summarise, skip, reorder, or paraphrase any step. Number them exactly as given.
 
 FORMATTING — answers are rendered as Markdown in the UI:
 - Prose answers: flowing paragraphs.
