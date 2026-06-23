@@ -57,12 +57,26 @@ STEP 4 — Choose a strategy
 BIAS HEAVILY toward "answer". A partial answer is acceptable and useful. Reserve "cannot_answer" for truly empty, irrelevant evidence.
 
 STEP 5 — Expand search terms if evidence is thin
-If evidenceQuality is "weak" or "none" AND questionType is "fact", populate termExpansions with 3-5 alternative phrasings the manual might use for the same concept. Draw on your engineering vocabulary — component aliases, standard part-name conventions, abbreviations, directional variants (inner/outer/upper/lower stripped), and BOM label styles. Do NOT simply repeat the user's words. Leave termExpansions empty for all other cases (procedures, strong evidence, non-fact questions).
+If evidenceQuality is "weak" or "none" AND questionType is "fact", populate termExpansions with 3-5 alternative phrasings a BOM, spec sheet, or engineering drawing might use for the same concept.
 
-Examples:
-• "inner hex bolt" → ["hex bolt nut", "socket head bolt", "hex cap screw", "allen bolt", "hexagon bolt"]
-• "supply voltage" → ["input voltage", "power voltage", "voltage rating", "mains voltage", "V AC"]
-• "main drive motor" → ["drive motor", "primary motor", "motor assembly", "main motor"]
+Rules for termExpansions — EVERY item MUST follow all of these:
+1. At least one word in the item must NOT appear anywhere in the user's question.
+2. Strip ALL context/assembly words (inner, outer, upper, lower, front, back, left, right, feeder, unit, assembly, machine, system). Focus on the CORE COMPONENT TYPE NOUN.
+3. Think in BOM/catalog terminology: uppercase part names, ISO/EN standard names, abbreviated forms, directional-stripped variants.
+4. Never rephrase or reorder the user's words — generate genuinely different engineering terms.
+
+GOOD example — "inner hex bolt for feeder unit":
+  Strip context → core noun: "hex bolt"
+  BOM alternatives: ["HEX BOLT NUT", "HEX CAP SCREW", "SOCKET HEAD BOLT", "HEXAGON BOLT", "ALLEN BOLT"]
+
+BAD example (do NOT do this): ["hex bolt feeder", "inner bolt feeder", "bolt for feeder assembly"] — these just rearrange the user's words.
+
+More examples:
+• "supply voltage" → ["input voltage", "power voltage", "voltage rating", "mains voltage", "rated voltage"]
+• "main drive motor" → ["drive motor", "primary motor", "motor assembly", "spindle motor"]
+• "cooling fan speed" → ["fan RPM", "fan speed rating", "blower speed", "cooling speed"]
+
+Leave termExpansions as [] for all other cases (procedures, strong/partial evidence, non-fact questions).
 
 STEP 6
 If strategy is "answer": write brief planNotes for the answer agent — which sources cover which steps, how to order a procedure, what to synthesise. Note any [TABLE] or [LIST] sources that contain structured data relevant to the answer.
@@ -234,6 +248,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     fromPage: requestedFromPage,
     toPage: requestedToPage,
     minConfidence: requestedMinConfidence,
+    manualId: requestedManualId,
   } = req.body as {
     question?: string;
     sessionId?: string;
@@ -244,6 +259,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     fromPage?: number;
     toPage?: number;
     minConfidence?: string;
+    manualId?: number;
   };
 
   if (!question || typeof question !== "string" || question.trim().length === 0) {
@@ -532,7 +548,13 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     }
 
     // ── 2b. Domain classification ────────────────────────────────────────────
-    const scopedManualIds = classifyDomain(searchText, allManuals, ragChunks, machineEntities);
+    // If the caller pinned a specific manual, bypass classifyDomain entirely.
+    const pinnedManualId = typeof requestedManualId === "number" && requestedManualId > 0
+      ? requestedManualId
+      : null;
+    const scopedManualIds = pinnedManualId
+      ? [pinnedManualId]
+      : classifyDomain(searchText, allManuals, ragChunks, machineEntities);
     const scopedManualArray = `{${scopedManualIds.join(",")}}`;
 
     if (scopedManualIds.length > 0) {
@@ -1256,11 +1278,15 @@ Analyse the evidence and output your scratchpad JSON.`;
 
     // ── 4.66. Term-expansion retrieval pass ───────────────────────────────────
     // When the scratchpad judges evidence weak/none on a fact question it emits
-    // termExpansions: alternative phrasings the manual may use for the same
-    // concept (e.g. "inner hex bolt" → ["hex bolt nut", "socket head bolt", …]).
-    // Fan those terms out through a single unioned FTS query and merge any new
-    // chunks found into ragChunks before the answer pass. No hardcoded synonyms.
-    if (scratchpad.termExpansions.length > 0 && scopedManualIds.length > 0) {
+    // termExpansions: genuine engineering-vocabulary alternatives for the user's
+    // phrasing (e.g. "inner hex bolt" → ["HEX BOLT NUT", "HEX CAP SCREW", …]).
+    // Fan those terms out through FTS and merge any new chunks before the answer
+    // pass. When evidenceQuality is "none" (initial retrieval hit the wrong
+    // manual or nothing at all) we search ALL manuals so the scope mis-match
+    // cannot hide the answer. If expansion finds chunks and the scratchpad had
+    // decided "cannot_answer", we override to "answer" so those chunks are used.
+    let expansionRescued = false;
+    if (scratchpad.termExpansions.length > 0) {
       const expansionTerms = scratchpad.termExpansions
         .join(" ")
         .replace(/[^a-zA-Z0-9 ]/g, " ")
@@ -1270,7 +1296,13 @@ Analyse the evidence and output your scratchpad JSON.`;
         .slice(0, 30);
       const expansionTsQuery = expansionTerms.join(" | ");
 
-      if (expansionTsQuery.length > 0) {
+      // When there's no evidence at all the original scope is unreliable —
+      // search all manuals so a wrong-manual classification can't block the hit.
+      const expansionScope = scratchpad.evidenceQuality === "none"
+        ? `{${allManuals.map((m) => m.id).join(",")}}`
+        : scopedManualArray;
+
+      if (expansionTsQuery.length > 0 && expansionScope !== "{}") {
         try {
           const expansionFts = await db.execute<ChunkRow>(sql`
             SELECT c.id, c.manual_id, m.name AS manual_name,
@@ -1278,7 +1310,7 @@ Analyse the evidence and output your scratchpad JSON.`;
                    c.section_path, c.element_type, c.page_context,
                    ts_rank(c.fts_vector, to_tsquery('english', ${expansionTsQuery})) AS rank
             FROM chunks c JOIN manuals m ON m.id = c.manual_id
-            WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+            WHERE c.manual_id = ANY(${expansionScope}::integer[])
               AND c.fts_vector @@ to_tsquery('english', ${expansionTsQuery})
             ORDER BY rank DESC
             LIMIT 20
@@ -1307,10 +1339,18 @@ Analyse the evidence and output your scratchpad JSON.`;
                   c.element_type === "list_item" ? "[LIST] " : "";
                 return `${header}\n${typeHint}${c.content}`;
               }).join("\n\n---\n\n");
-              req.log.info(
-                { expansionChunksAdded: newExpChunks.length, termExpansions: scratchpad.termExpansions },
-                "agent-chat: term-expansion retrieval added chunks"
-              );
+              if (scratchpad.strategy === "cannot_answer") {
+                expansionRescued = true;
+                req.log.info(
+                  { expansionChunksAdded: newExpChunks.length, termExpansions: scratchpad.termExpansions },
+                  "agent-chat: term-expansion rescued cannot_answer — upgrading to answer"
+                );
+              } else {
+                req.log.info(
+                  { expansionChunksAdded: newExpChunks.length, termExpansions: scratchpad.termExpansions },
+                  "agent-chat: term-expansion retrieval added chunks"
+                );
+              }
             }
           }
         } catch (expErr) {
@@ -1319,7 +1359,7 @@ Analyse the evidence and output your scratchpad JSON.`;
       }
     }
 
-    if (scratchpad.strategy === "cannot_answer") {
+    if (scratchpad.strategy === "cannot_answer" && !expansionRescued) {
       req.log.info("agent-chat: scratchpad cannot_answer — guided response");
       const guidedText = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, {
         status: "fail" as const,

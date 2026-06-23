@@ -45,7 +45,8 @@ export const SendAgentChatMessageBody = zod.object({
   "retrievalMode": zod.enum(['fact_lookup', 'process_trace', 'troubleshooting_flow', 'relationship_trace']).optional().describe('Controls retrieval strategy — fact_lookup=tight phrase, process_trace=wider window+paths, troubleshooting_flow=symptom-first+graph, relationship_trace=graph-first'),
   "fromPage": zod.number().optional().describe('Filter retrieved chunks to pages >= this value'),
   "toPage": zod.number().optional().describe('Filter retrieved chunks to pages <= this value'),
-  "minConfidence": zod.enum(['any', 'medium', 'high']).optional().describe('Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15')
+  "minConfidence": zod.enum(['any', 'medium', 'high']).optional().describe('Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15'),
+  "manualId": zod.number().optional().describe('Pin retrieval to a specific manual. Omit (or null) to search all manuals automatically.')
 })
 
 export const SendAgentChatMessageResponse = zod.object({

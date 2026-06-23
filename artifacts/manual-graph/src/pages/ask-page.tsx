@@ -5,8 +5,10 @@ import {
   Bot, User, Send, BookOpen, Loader2, MessageSquare, ExternalLink,
   FileText, Paperclip, X, Image, Globe, ThumbsUp, ThumbsDown,
   ChevronDown, ChevronRight, Zap, Shield, FlaskConical, CheckCircle2,
-  AlertTriangle, XCircle, Database, GitBranch, HelpCircle,
+  AlertTriangle, XCircle, Database, GitBranch, HelpCircle, BookMarked,
 } from "lucide-react";
+import { useListManuals } from "@workspace/api-client-react";
+import type { Manual } from "@workspace/api-client-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -630,6 +632,9 @@ export default function AskPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [agentMode, setAgentMode] = useState(true);
   const [strictness, setStrictness] = useState<"normal" | "engineering_strict" | "safety_critical">("normal");
+  const [selectedManualId, setSelectedManualId] = useState<number | null>(null);
+  const { data: allManuals } = useListManuals();
+  const completedManuals = (allManuals ?? []).filter((m: Manual) => m.status === "completed");
   const [expandedPanels, setExpandedPanels] = useState<Record<string, { evidence?: boolean; validation?: boolean }>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -773,6 +778,7 @@ export default function AskPage() {
         body.strictness = strictness;
         body.retrievalMode = effectiveRetrievalMode;
       }
+      if (selectedManualId !== null) body.manualId = selectedManualId;
 
       const res = await fetch(endpoint, {
         method: "POST",
@@ -875,6 +881,34 @@ export default function AskPage() {
               {agentMode ? "Enhanced" : "Enhanced"}
             </button>
           </div>
+
+          {/* Manual scope selector — always visible when manuals are loaded */}
+          {completedManuals.length > 0 && (
+            <div className="mt-2 flex items-center gap-2 p-2 rounded-lg bg-gray-50 border border-gray-200">
+              <BookMarked className="w-3.5 h-3.5 text-gray-400 shrink-0" />
+              <label className="text-[11px] text-gray-500 shrink-0">Manual:</label>
+              <select
+                value={selectedManualId ?? ""}
+                onChange={(e) => setSelectedManualId(e.target.value === "" ? null : Number(e.target.value))}
+                className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700 flex-1 min-w-0 truncate"
+              >
+                <option value="">All manuals</option>
+                {completedManuals.map((m: Manual) => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
+                ))}
+              </select>
+              {selectedManualId !== null && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedManualId(null)}
+                  className="text-gray-400 hover:text-gray-600 shrink-0"
+                  title="Clear manual selection"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Agent settings row — only shown when enhanced mode is on */}
           {agentMode && (

@@ -380,6 +380,8 @@ export interface AgentChatRequest {
   toPage?: number;
   /** Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15 */
   minConfidence?: AgentChatRequestMinConfidence;
+  /** Pin retrieval to a specific manual. Omit (or null) to search all manuals automatically. */
+  manualId?: number;
 }
 
 export type MissingOrWeakEvidenceItemIssue = typeof MissingOrWeakEvidenceItemIssue[keyof typeof MissingOrWeakEvidenceItemIssue];

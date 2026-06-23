@@ -851,6 +851,9 @@ components:
           type: string
           enum: [any, medium, high]
           description: Minimum FTS rank threshold — any=0.01 (default), medium=0.05, high=0.15
+        manualId:
+          type: integer
+          description: Pin retrieval to a specific manual. Omit (or null) to search all manuals automatically.
 
     MissingOrWeakEvidenceItem:
       type: object
