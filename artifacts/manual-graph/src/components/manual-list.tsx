@@ -7,7 +7,7 @@ import { Link } from "wouter";
 import { formatDistanceToNow } from "date-fns";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Skeleton } from "@/components/ui/skeleton";
+import { formatStageProgress, stageProgressPercent } from "@/lib/pipelineStages";
 
 export function ManualList() {
   const { data: manuals, isLoading } = useListManuals();
@@ -78,20 +78,24 @@ export function ManualList() {
             <div className="text-xs font-mono text-muted-foreground">
               Added {formatDistanceToNow(new Date(manual.createdAt))} ago
             </div>
-            {manual.status === 'processing' && (
+            {manual.status === 'processing' && (() => {
+              const pass = manual.processingPass ?? 0;
+              const stageVersion = manual.pipelineStageVersion ?? 1;
+              return (
               <div className="mt-4 p-3 bg-secondary/50 rounded-md border border-border">
                 <div className="flex justify-between text-xs font-mono mb-2">
-                  <span className="text-muted-foreground">Pass {manual.processingPass || 1}/6</span>
+                  <span className="text-muted-foreground">{formatStageProgress(pass, stageVersion, manual.status)}</span>
                   <span className="text-primary animate-pulse">Running...</span>
                 </div>
                 <div className="h-1 bg-background rounded-full overflow-hidden">
                   <div 
                     className="h-full bg-primary transition-all duration-500 ease-out" 
-                    style={{ width: `${((manual.processingPass || 1) / 6) * 100}%` }}
+                    style={{ width: `${stageProgressPercent(pass, stageVersion, manual.status)}%` }}
                   />
                 </div>
               </div>
-            )}
+              );
+            })()}
             {manual.status === 'failed' && (
               <div className="mt-4 text-xs text-destructive font-mono bg-destructive/10 p-2 rounded border border-destructive/20 line-clamp-2">
                 {manual.errorMessage || "Unknown error occurred"}

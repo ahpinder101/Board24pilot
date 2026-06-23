@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
 import { logger } from "./logger.js";
+import { applyPlcIoTableTag } from "./chunkEnrichment.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -749,18 +750,20 @@ export function chunkPageSemantically(pageText: string): string[] {
 
   const enrichedChunks = finalChunks.map((chunk) => {
     const lines = chunk.split("\n").filter((l) => l.trim().length > 0);
-    if (lines.length < 3) return chunk;
-    const tabularLines = lines.filter(isTabularLine);
-    if (tabularLines.length / lines.length >= 0.35) {
-      return chunk + SPEC_TAG;
+    let result = chunk;
+    if (lines.length >= 3) {
+      const tabularLines = lines.filter(isTabularLine);
+      if (tabularLines.length / lines.length >= 0.35) {
+        result = result + SPEC_TAG;
+      }
     }
-    return chunk;
+    return applyPlcIoTableTag(result);
   });
 
   // Fallback: nothing passed the length threshold — return whole filtered page.
   return enrichedChunks.length > 0
     ? enrichedChunks
-    : [prefix + contentLines.join("\n")];
+    : [applyPlcIoTableTag(prefix + contentLines.join("\n"))];
 }
 
 /**

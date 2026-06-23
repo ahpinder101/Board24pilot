@@ -444,6 +444,9 @@ components:
           enum: [pending, processing, completed, failed, structure_complete]
         processingPass:
           type: ["integer", "null"]
+        pipelineStageVersion:
+          type: ["integer", "null"]
+          description: "1 = legacy pass numbering; 2 = pipeline stages 0–9"
         totalPages:
           type: ["integer", "null"]
         documentType:

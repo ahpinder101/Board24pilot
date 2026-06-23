@@ -22,6 +22,11 @@ import {
   GetManualGraphParams,
 } from "@workspace/api-zod";
 import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText, reprocessCompoundPages, repairGraphPasses, pass8EnrichChunks } from "../lib/extractionPipeline.js";
+import {
+  PIPELINE_COMPLETE_STAGE,
+  PIPELINE_STAGE,
+  normalizeProcessingPass,
+} from "../lib/pipelineStages.js";
 import { logger } from "../lib/logger.js";
 import { expensiveOpLimiter } from "../middlewares/rateLimit.js";
 
@@ -53,6 +58,7 @@ const manualCols = {
   objectPath: manualsTable.objectPath,
   status: manualsTable.status,
   processingPass: manualsTable.processingPass,
+  pipelineStageVersion: manualsTable.pipelineStageVersion,
   totalPages: manualsTable.totalPages,
   documentType: manualsTable.documentType,
   errorMessage: manualsTable.errorMessage,
@@ -1039,13 +1045,17 @@ router.post("/manuals/:id/repair-graph", expensiveOpLimiter, async (req, res) =>
     return;
   }
 
-  const pass = manual.processingPass ?? 0;
-  if (pass < 4) {
-    res.status(400).json({ error: "Manual has not completed entity extraction (pass 4) — run full extraction first" });
+  const pass = normalizeProcessingPass(
+    manual.processingPass,
+    manual.pipelineStageVersion,
+    manual.status
+  );
+  if (pass < PIPELINE_STAGE.EXTRACT_ENTITIES) {
+    res.status(400).json({ error: "Manual has not completed entity extraction (stage 5) — run full extraction first" });
     return;
   }
-  if (pass >= 7 && manual.status === "completed") {
-    res.status(400).json({ error: "Manual graph is already complete (pass 7) — use Re-extract pages for a full re-run" });
+  if (pass >= PIPELINE_STAGE.RANK_HIERARCHY && manual.status === "completed") {
+    res.status(400).json({ error: "Manual graph is already complete — use Re-extract pages for a full re-run" });
     return;
   }
 
@@ -1125,7 +1135,7 @@ router.post("/manuals/:id/re-enrich", expensiveOpLimiter, async (req: Request, r
     const result = await pass8EnrichChunks(manualId, { forceReset: true });
     await db
       .update(manualsTable)
-      .set({ processingPass: 8, updatedAt: new Date() })
+      .set({ processingPass: PIPELINE_COMPLETE_STAGE, pipelineStageVersion: 2, updatedAt: new Date() })
       .where(eq(manualsTable.id, manualId));
     res.json({ ok: true, manualId, ...result });
   } catch (err) {

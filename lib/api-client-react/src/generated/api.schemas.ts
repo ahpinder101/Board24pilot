@@ -39,6 +39,8 @@ export interface Manual {
   status: ManualStatus;
   /** @nullable */
   processingPass?: number | null;
+  /** 1 = legacy pass numbering; 2 = stages 0–9 */
+  pipelineStageVersion?: number | null;
   /** @nullable */
   totalPages?: number | null;
   /** @nullable */

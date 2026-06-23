@@ -1,9 +1,8 @@
 /**
- * One-time backfill: run Pass 8 chunk enrichment on all completed manuals
- * that have not yet been enriched (processingPass < 8 or NULL).
+ * One-time backfill: run enrich_chunks (stage 9) on completed manuals
+ * that have not yet been enriched.
  *
- * Idempotent: skips manuals that already have processingPass >= 8.
- * Safe to re-run; pass8EnrichChunks uses page_context NULL as a resume marker.
+ * Idempotent: skips manuals that already have processingPass >= 9 (or legacy pass 8).
  *
  * Usage:
  *   pnpm --filter @workspace/scripts run backfill-pass8
@@ -12,12 +11,12 @@
 import { db } from "@workspace/db";
 import { manualsTable } from "@workspace/db";
 import { eq, and, or, isNull, lt, sql } from "drizzle-orm";
+import { PIPELINE_COMPLETE_STAGE } from "../../artifacts/api-server/src/lib/pipelineStages.js";
 
-// Relative import — tsx resolves .js → .ts from the file's own location.
 import { pass8EnrichChunks } from "../../artifacts/api-server/src/lib/extractionPipeline.js";
 
 async function main() {
-  console.log("=== Pass 8 backfill starting ===");
+  console.log("=== Stage 9 (enrich_chunks) backfill starting ===");
 
   const manuals = await db
     .select({ id: manualsTable.id, name: manualsTable.name, processingPass: manualsTable.processingPass })
@@ -25,13 +24,18 @@ async function main() {
     .where(
       and(
         eq(manualsTable.status, "completed"),
-        or(isNull(manualsTable.processingPass), lt(manualsTable.processingPass, 8))
+        or(
+          isNull(manualsTable.processingPass),
+          lt(manualsTable.processingPass, PIPELINE_COMPLETE_STAGE),
+          // Legacy manuals marked complete at pass 8
+          sql`(${manualsTable.processingPass} = 8 AND COALESCE(${manualsTable.pipelineStageVersion}, 1) < 2)`
+        )
       )
     )
     .orderBy(manualsTable.id);
 
   if (manuals.length === 0) {
-    console.log("No manuals need enrichment. All completed manuals already have processingPass >= 8.");
+    console.log("No manuals need enrichment.");
     return;
   }
 
@@ -46,12 +50,12 @@ async function main() {
 
   for (const manual of manuals) {
     const { id, name } = manual;
-    console.log(`[${id}] "${name}" — starting Pass 8 enrichment...`);
+    console.log(`[${id}] "${name}" — starting enrich_chunks...`);
     try {
       const result = await pass8EnrichChunks(id);
       await db
         .update(manualsTable)
-        .set({ processingPass: 8, updatedAt: new Date() })
+        .set({ processingPass: PIPELINE_COMPLETE_STAGE, pipelineStageVersion: 2, updatedAt: new Date() })
         .where(eq(manualsTable.id, id));
       console.log(
         `[${id}] "${name}" — done. enriched=${result.enriched} stitched=${result.stitched} expansions=${result.expansions}`
@@ -64,7 +68,7 @@ async function main() {
   }
 
   console.log();
-  console.log(`=== Pass 8 backfill complete: ${succeeded} succeeded, ${failed} failed ===`);
+  console.log(`=== Stage 9 backfill complete: ${succeeded} succeeded, ${failed} failed ===`);
 
   if (failed > 0) {
     process.exit(1);

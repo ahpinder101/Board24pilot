@@ -18,25 +18,42 @@ import {
   runDomainSpecialist,
   buildGuidedNoAnswer,
   getDomainPolicy,
+  getEffectiveDomainPolicy,
+  missingOnlyOptionalStages,
   containsDomainIdentifier,
   requiresSpecialistReview,
   type TechnicalDomain,
   type AnswerStrictness,
   type EvidenceSummary,
 } from "../lib/domainSpecialist.js";
+import {
+  resolveRetrievalMode,
+  resolvePinnedManualDomain,
+  isProceduralQuestion,
+  isTroubleshootingQuestion,
+  isRelationshipTraceQuestion,
+  isPlcIoQuestion,
+  isInterconnectQuestion,
+  type RetrievalMode,
+} from "../lib/queryIntent.js";
+import {
+  fetchElectricalSymbolChunks,
+  fetchPlcIoTableChunks,
+  fetchInterconnectChunks,
+  fetchTroubleshootingComponentChunks,
+  fetchRelationshipTraceChunks,
+  type ElectricalChunkRow,
+} from "../lib/electricalRetrieval.js";
 
 const router = Router();
 
 const CHAT_MODEL = "gpt-4o";
 const TOP_K_CHUNKS = 8;
 const TOP_K_SCOPED = 14;
+const TOP_K_ELECTRICAL = 16;
 const TOP_K_PROCEDURAL = 32;
 const TOP_K_ENTITIES = 10;
 const FTS_RANK_THRESHOLD = 0.01;
-
-/** Matches questions that ask for a full multi-step procedure. */
-const PROCEDURAL_QUERY_RE =
-  /\b(walk\s+me\s+through|step[-\s]by[-\s]step|steps?\s+to\s+\w|how\s+(do\s+I|to)\s+(replace|remove|install|disassemble|assemble|adjust|clean|set\s+up|change|perform|fix)|procedure\s+for|guide\s+me|show\s+me\s+(how|the\s+steps?)|all\s+steps?|sequence\s+for|process\s+of)\b/i;
 
 // ── Scratchpad system prompt (Pass 1) ────────────────────────────────────────
 const SCRATCHPAD_SYSTEM = `You are the reasoning pass of a two-pass engineering Q\&A system. Before any answer is written, you review all available evidence and decide the best path forward.
@@ -216,21 +233,29 @@ function classifyDomain(
 const normalizeForMatch = (s: string) =>
   s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
-type ChunkRow = {
-  id: number;
-  manual_id: number;
-  manual_name: string;
-  page_number: number;
-  chunk_index: number;
-  content: string;
-  rank: number;
-  // Docling structural metadata — present when the manual was processed via Docling.
-  // Optional so all queries (including window-expansion ones) work without change.
-  section_path?: string | null;
-  element_type?: string | null;
-  /** Pass 8 page context — drawing/spec sheet name for this chunk. */
-  page_context?: string | null;
-};
+type ChunkRow = ElectricalChunkRow;
+
+function mergeRetrievedChunks(
+  ragChunks: ChunkRow[],
+  incoming: ChunkRow[],
+): number {
+  const existingIds = new Set(ragChunks.map((c) => c.id));
+  let added = 0;
+  for (const row of incoming) {
+    if (!existingIds.has(row.id)) {
+      ragChunks.push(row);
+      existingIds.add(row.id);
+      added++;
+    }
+  }
+  if (added > 0) {
+    ragChunks.sort(
+      (a, b) =>
+        b.rank - a.rank || a.page_number - b.page_number || a.chunk_index - b.chunk_index,
+    );
+  }
+  return added;
+}
 
 type EntityRow = {
   id: number;
@@ -257,6 +282,7 @@ type DomainRetrievalMetadata = {
   retrievalLane: "none" | "electrical_control";
   rescueStageUsed: "none" | "symbol_hit";
   relevantChunkIds: number[];
+  retrievalModes: string[];
 };
 
 function buildEvidenceSummary(
@@ -271,79 +297,6 @@ function buildEvidenceSummary(
     hasGraphContext: graphPaths.length > 0 || graphEntities.length > 0,
     manualsSearched: [...new Set(ragChunks.map((c) => c.manual_name))],
   };
-}
-
-async function fetchElectricalSymbolChunks(
-  scopedManualArray: string,
-  symbols: string[],
-  question: string,
-): Promise<ChunkRow[]> {
-  if (symbols.length === 0) return [];
-
-  const symbolConditions = symbols.map((symbol) =>
-    sql`(c.content ILIKE ${"%" + symbol + "%"} OR COALESCE(c.page_context, '') ILIKE ${"%" + symbol + "%"})`
-  );
-  const symbolHits = await db.execute<ChunkRow>(sql`
-    SELECT c.id, c.manual_id, m.name AS manual_name,
-           c.page_number, c.chunk_index, c.content,
-           c.section_path, c.element_type, c.page_context,
-           (
-             CASE WHEN c.element_type = 'table' THEN 0.35 ELSE 0 END +
-             CASE WHEN c.page_context IS NOT NULL THEN 0.15 ELSE 0 END +
-             CASE WHEN ${containsDomainIdentifier(question)} THEN 0.1 ELSE 0 END
-           )::float AS rank
-    FROM chunks c JOIN manuals m ON m.id = c.manual_id
-    WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
-      AND (${sql.join(symbolConditions, sql` OR `)})
-    ORDER BY rank DESC, c.page_number, c.chunk_index
-    LIMIT 20
-  `);
-
-  if (symbolHits.rows.length === 0) return [];
-
-  const merged = [...symbolHits.rows];
-  const existingIds = new Set(merged.map((row) => row.id));
-  const pageKeys = new Set<string>();
-  const pageContextValues = new Set<string>();
-  for (const row of symbolHits.rows) {
-    pageKeys.add(`${row.manual_id}:${row.page_number}`);
-    if (row.page_context) pageContextValues.add(row.page_context);
-  }
-
-  if (pageKeys.size > 0 || pageContextValues.size > 0) {
-    const pageClauses = [...pageKeys].map((key) => {
-      const [mid, pg] = key.split(":").map(Number);
-      return sql`(c.manual_id = ${mid} AND c.page_number = ${pg})`;
-    });
-    const pageContextClauses = [...pageContextValues].map((pageContext) =>
-      sql`c.page_context = ${pageContext}`
-    );
-    const expansionClauses = [...pageClauses, ...pageContextClauses];
-    if (expansionClauses.length > 0) {
-      const expandedHits = await db.execute<ChunkRow>(sql`
-        SELECT c.id, c.manual_id, m.name AS manual_name,
-               c.page_number, c.chunk_index, c.content,
-               c.section_path, c.element_type, c.page_context,
-               (
-                 CASE WHEN c.element_type = 'table' THEN 0.2 ELSE 0 END +
-                 CASE WHEN c.page_context IS NOT NULL THEN 0.05 ELSE 0 END
-               )::float AS rank
-        FROM chunks c JOIN manuals m ON m.id = c.manual_id
-        WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
-          AND (${sql.join(expansionClauses, sql` OR `)})
-        ORDER BY c.page_number, c.chunk_index
-        LIMIT 40
-      `);
-      for (const row of expandedHits.rows) {
-        if (!existingIds.has(row.id)) {
-          merged.push(row);
-          existingIds.add(row.id);
-        }
-      }
-    }
-  }
-
-  return merged;
 }
 
 function buildRagContext(chunks: ChunkRow[], printedPgMap: Map<string, string>): string {
@@ -437,20 +390,20 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       ? (requestedStrictness as AnswerStrictness)
       : "normal";
 
-  type RetrievalMode = "fact_lookup" | "process_trace" | "troubleshooting_flow" | "relationship_trace";
-  const retrievalMode: RetrievalMode = (
-    ["fact_lookup", "process_trace", "troubleshooting_flow", "relationship_trace"].includes(requestedRetrievalMode ?? "")
-      ? (requestedRetrievalMode as RetrievalMode)
-      : "fact_lookup"
+  const retrievalMode: RetrievalMode = resolveRetrievalMode(
+    trimmedQuestion,
+    requestedRetrievalMode,
   );
   const fromPage = typeof requestedFromPage === "number" && requestedFromPage > 0 ? requestedFromPage : null;
   const toPage = typeof requestedToPage === "number" && requestedToPage > 0 ? requestedToPage : null;
   const ftsRankThreshold = requestedMinConfidence === "high" ? 0.15 : requestedMinConfidence === "medium" ? 0.05 : FTS_RANK_THRESHOLD;
 
+  const pinnedManualId = parsePinnedManualId(requestedManualId);
+
   try {
     // ── 0. Load manuals + machine entities ───────────────────────────────────
     type HistoryRow = { role: string; content: string };
-    const [allManuals, machineEntityRows, historyResult] = await Promise.all([
+    const [allManuals, machineEntityRows, historyResult, pinnedManualRow] = await Promise.all([
       db.select({ id: manualsTable.id, name: manualsTable.name }).from(manualsTable),
       db.execute<{ manual_id: number; name: string }>(sql`
         SELECT manual_id, name FROM entities
@@ -463,7 +416,29 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         ORDER BY created_at DESC
         LIMIT 6
       `),
+      pinnedManualId !== null
+        ? db
+            .select({ documentType: manualsTable.documentType })
+            .from(manualsTable)
+            .where(eq(manualsTable.id, pinnedManualId))
+            .limit(1)
+        : Promise.resolve([]),
     ]);
+
+    const pinnedDocumentType = pinnedManualRow[0]?.documentType ?? null;
+    const pinnedDomainHint = resolvePinnedManualDomain(
+      pinnedDocumentType,
+      trimmedQuestion,
+      requestedDomain,
+    );
+
+    const domainRetrievalMetadata: DomainRetrievalMetadata = {
+      detectedSymbols: [],
+      retrievalLane: "none",
+      rescueStageUsed: "none",
+      relevantChunkIds: [],
+      retrievalModes: [retrievalMode],
+    };
 
     const machineEntities = machineEntityRows.rows.map((r) => ({
       manualId: r.manual_id,
@@ -487,18 +462,34 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         ? `${trimmedQuestion} ${visionKeywords.replace(/,/g, " ")}`
         : trimmedQuestion;
 
-    // Procedural walk-through queries get a larger retrieval window so multi-page
-    // procedures can pull all relevant pages into the validator's evidence window.
-    const isProceduralQuery = PROCEDURAL_QUERY_RE.test(trimmedQuestion) || retrievalMode === "process_trace";
-    const topK = isProceduralQuery ? TOP_K_PROCEDURAL : TOP_K_CHUNKS;
-    const topKScoped = isProceduralQuery ? TOP_K_PROCEDURAL * 2 : TOP_K_SCOPED;
+    const isProceduralQuery =
+      isProceduralQuestion(trimmedQuestion) || retrievalMode === "process_trace";
+    const isTroubleshootingQuery =
+      isTroubleshootingQuestion(trimmedQuestion) || retrievalMode === "troubleshooting_flow";
+    const isRelationshipQuery =
+      isRelationshipTraceQuestion(trimmedQuestion) || retrievalMode === "relationship_trace";
+    const isWideRetrievalQuery =
+      isProceduralQuery || isTroubleshootingQuery || isRelationshipQuery;
+    const isPinnedElectrical =
+      pinnedManualId !== null &&
+      (pinnedDomainHint === "electrical_control" || containsDomainIdentifier(trimmedQuestion));
 
-    const pinnedManualId = parsePinnedManualId(requestedManualId);
+    let topK = TOP_K_CHUNKS;
+    if (isWideRetrievalQuery) {
+      topK = TOP_K_PROCEDURAL;
+    } else if (isPinnedElectrical) {
+      topK = TOP_K_ELECTRICAL;
+    }
+    const topKScoped = isWideRetrievalQuery ? TOP_K_PROCEDURAL * 2 : TOP_K_SCOPED;
+
     const manualScopeSql =
       pinnedManualId !== null ? sql`AND c.manual_id = ${pinnedManualId}` : sql``;
 
     if (pinnedManualId !== null) {
-      req.log.info({ pinnedManualId }, "agent-chat: manual scope pinned");
+      req.log.info(
+        { pinnedManualId, retrievalMode, pinnedDomainHint },
+        "agent-chat: manual scope pinned",
+      );
     }
 
     // ── 1. FTS retrieval ─────────────────────────────────────────────────────
@@ -692,7 +683,10 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       const retrievedIds = new Set(ragChunks.map((c) => c.id));
       const adjacentIds = new Set<string>();
       for (const c of ragChunks) {
-        const windowDeltas = retrievalMode === "process_trace" ? [-3, -2, -1, 1, 2, 3] : [-2, -1, 1, 2];
+        const windowDeltas =
+          retrievalMode === "process_trace" || retrievalMode === "relationship_trace"
+            ? [-3, -2, -1, 1, 2, 3]
+            : [-2, -1, 1, 2];
       for (const delta of windowDeltas) {
           const adj = c.chunk_index + delta;
           if (adj >= 0) adjacentIds.add(`${c.manual_id}:${c.page_number}:${adj}`);
@@ -800,11 +794,6 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         if (!existingIds2.has(row.id)) { ragChunks.push(row); existingIds2.add(row.id); }
       }
 
-      // ── Cross-page window expansion (procedural queries only) ────────────
-      // Numbered procedure steps may be on a different page from the
-      // introductory text that scores highest for the user's query terms.
-      // Fetch all chunks from directly adjacent pages (page_number ± 1)
-      // so inter-page procedure sequences are never truncated.
       if (isProceduralQuery) {
         const seenPageKeys = new Set(ragChunks.map((c) => `${c.manual_id}:${c.page_number}`));
         const crossPageEntries: Array<{ mid: number; pg: number }> = [];
@@ -844,41 +833,64 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       }
     }
 
-    // ── 2c-b. Early electrical symbol retrieval (pinned manual) ─────────────
-    // Fetch schematic symbol pages before scratchpad when the user pinned a manual
-    // and the question names a relay/contactor-style designation (e.g. RL1).
-    if (pinnedManualId !== null) {
-      const earlySymbols = extractElectricalSymbols(trimmedQuestion);
-      if (earlySymbols.length > 0) {
-        try {
-          const symbolChunks = await fetchElectricalSymbolChunks(
-            scopedManualArray,
-            earlySymbols,
-            trimmedQuestion,
+    // ── 2c-b. Early domain-specific retrieval (pinned manual) ───────────────
+    if (pinnedManualId !== null && scopedManualArray !== "{}") {
+      try {
+        const earlyLanes: Array<Promise<ChunkRow[]>> = [];
+
+        if (isPlcIoQuestion(trimmedQuestion)) {
+          earlyLanes.push(fetchPlcIoTableChunks(scopedManualArray, trimmedQuestion));
+        }
+
+        const earlySymbols = extractElectricalSymbols(trimmedQuestion);
+        if (earlySymbols.length > 0) {
+          earlyLanes.push(
+            fetchElectricalSymbolChunks(scopedManualArray, earlySymbols, trimmedQuestion),
           );
-          if (symbolChunks.length > 0) {
-            const existingIds = new Set(ragChunks.map((c) => c.id));
-            let added = 0;
-            for (const row of symbolChunks) {
-              if (!existingIds.has(row.id)) {
-                ragChunks.push(row);
-                existingIds.add(row.id);
-                added++;
-              }
-            }
-            if (added > 0) {
-              ragChunks.sort((a, b) =>
-                b.rank - a.rank || a.page_number - b.page_number || a.chunk_index - b.chunk_index
-              );
-              req.log.info(
-                { pinnedManualId, earlySymbols, symbolChunksAdded: added },
-                "agent-chat: early symbol retrieval added chunks"
-              );
+        }
+
+        if (isTroubleshootingQuery) {
+          earlyLanes.push(
+            fetchTroubleshootingComponentChunks(scopedManualArray, trimmedQuestion),
+          );
+        }
+
+        if (isRelationshipQuery) {
+          earlyLanes.push(
+            fetchRelationshipTraceChunks(scopedManualArray, trimmedQuestion),
+          );
+        }
+
+        if (isInterconnectQuestion(trimmedQuestion)) {
+          earlyLanes.push(fetchInterconnectChunks(scopedManualArray, trimmedQuestion));
+        }
+
+        const laneResults = await Promise.all(earlyLanes);
+        let totalAdded = 0;
+        for (const chunks of laneResults) {
+          if (chunks.length === 0) continue;
+          totalAdded += mergeRetrievedChunks(ragChunks, chunks);
+          for (const row of chunks) {
+            if (!domainRetrievalMetadata.relevantChunkIds.includes(row.id)) {
+              domainRetrievalMetadata.relevantChunkIds.push(row.id);
             }
           }
-        } catch (earlySymbolErr) {
-          req.log.warn({ err: earlySymbolErr }, "agent-chat: early symbol retrieval failed — continuing");
+          domainRetrievalMetadata.retrievalLane = "electrical_control";
+          domainRetrievalMetadata.rescueStageUsed = "symbol_hit";
         }
+
+        if (earlySymbols.length > 0) {
+          domainRetrievalMetadata.detectedSymbols = earlySymbols;
+        }
+
+        if (totalAdded > 0) {
+          req.log.info(
+            { pinnedManualId, retrievalMode, earlyChunksAdded: totalAdded },
+            "agent-chat: early domain retrieval added chunks",
+          );
+        }
+      } catch (earlyErr) {
+        req.log.warn({ err: earlyErr }, "agent-chat: early domain retrieval failed — continuing");
       }
     }
 
@@ -886,7 +898,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     // For walk-through queries, cross-manual FTS noise can crowd the top-K
     // window with chunks from unrelated manuals. Give the highest-ranked manual
     // a guaranteed majority share (≥70 %) so the validator sees coherent evidence.
-    if (isProceduralQuery && ragChunks.length > 0) {
+    if (isWideRetrievalQuery && ragChunks.length > 0) {
       // Count total rank score per manual to identify the dominant one.
       const manualRankSum = new Map<number, number>();
       for (const c of ragChunks) {
@@ -966,7 +978,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     // Fetch paths whose page_references overlap with the pages already retrieved
     // by FTS.  page_references is stored as JSONB so we use EXISTS +
     // jsonb_array_elements_text to compare against a PG integer array.
-    if (isProceduralQuery && ragChunks.length > 0) {
+    if (isWideRetrievalQuery && ragChunks.length > 0) {
       const retrievedPages = [...new Set(ragChunks.map((c) => c.page_number))];
       if (retrievedPages.length > 0) {
         const pgArrayLit = `{${retrievedPages.join(",")}}`;
@@ -1450,18 +1462,6 @@ Analyse the evidence and output your scratchpad JSON.`;
     }
 
     // ── 4.66. Term-expansion retrieval pass ───────────────────────────────────
-    // When the scratchpad judges evidence weak/none on a fact question it emits
-    // termExpansions: genuine engineering-vocabulary alternatives for the user's
-    // phrasing (e.g. "inner hex bolt" → ["HEX BOLT NUT", "HEX CAP SCREW", …]).
-    // Fan those terms out through FTS and merge any new chunks before the answer
-    // pass. When evidenceQuality is "none" and no manual is pinned, search ALL
-    // manuals so a wrong-manual classification cannot hide the answer.
-    let domainRetrievalMetadata: DomainRetrievalMetadata = {
-      detectedSymbols: [],
-      retrievalLane: "none",
-      rescueStageUsed: "none",
-      relevantChunkIds: [],
-    };
     let expansionRescued = false;
     if (scratchpad.termExpansions.length > 0) {
       const expansionTerms = scratchpad.termExpansions
@@ -1529,7 +1529,10 @@ Analyse the evidence and output your scratchpad JSON.`;
       }
     }
 
-    if (scratchpad.domain === "electrical_control" && scopedManualIds.length > 0) {
+    if (
+      (scratchpad.domain === "electrical_control" || pinnedDomainHint === "electrical_control") &&
+      scopedManualIds.length > 0
+    ) {
       const electricalSymbols = extractElectricalSymbols(
         `${trimmedQuestion} ${scratchpad.uncoveredAspects.join(" ")} ${ragChunks.map((c) => c.page_context ?? "").join(" ")}`
       );
@@ -1546,7 +1549,12 @@ Analyse the evidence and output your scratchpad JSON.`;
           if (symbolChunks.length > 0) {
             domainRetrievalMetadata.retrievalLane = "electrical_control";
             domainRetrievalMetadata.rescueStageUsed = "symbol_hit";
-            domainRetrievalMetadata.relevantChunkIds = symbolChunks.map((row) => row.id);
+            domainRetrievalMetadata.relevantChunkIds = [
+              ...new Set([
+                ...domainRetrievalMetadata.relevantChunkIds,
+                ...symbolChunks.map((row) => row.id),
+              ]),
+            ];
 
             const existingIds = new Set(ragChunks.map((c) => c.id));
             const newDomainChunks = symbolChunks.filter((row) => !existingIds.has(row.id));
@@ -1682,6 +1690,7 @@ CRITICAL RULES:
 3. Verbatim values — ABSOLUTE: for any specific value (number, measurement, part number, model code, PLC address, terminal reference, symbol tag) copy it character-for-character from the excerpt.
 4. If the question is about a specialist diagram domain and the excerpts show relevant circuit or schematic evidence, answer from that evidence even when it is incomplete. State what is confirmed first, then what remains unresolved.
 5. For electrical-control questions: copy exact symbol/value labels when present; explain relay/contact/coil/load paths when visible; do not say the manual does not specify unless the retrieved drawing evidence clearly lacks the requested detail.
+5b. Solenoid valve count questions: enumerate every SV designation from PLC I/O assignment or output-list excerpts; state supply voltage per row when shown.
 6. Drawing and spec-sheet names: when a Source header includes a 'spec sheet:' label (e.g. 'spec sheet: "ORDER SPEC SHEET — PP2 049"'), reference that drawing or spec-sheet name explicitly in your answer text — for example "According to the ORDER SPEC SHEET for PP2 049..." or "As shown on the ORDER SPEC SHEET (PP2 049)...". Do not leave the drawing name only in the citation chip; name it inline so engineers immediately know which document the value comes from.
 7. Never fabricate technical details.
 8. Multi-step procedures: synthesise steps from ALL provided excerpts in sequence. No single sentence needs to cover the whole procedure — build it across multiple sources. Never say "the manual does not specify" for a procedure when the excerpts contain relevant steps.
@@ -1770,7 +1779,7 @@ Please answer based on the above information.`;
       requestedDomain && requestedDomain !== "auto" &&
       ["electrical_control", "hydraulic_schematic", "pneumatic_schematic", "mechanical_assembly", "troubleshooting", "generic_process"].includes(requestedDomain)
         ? (requestedDomain as TechnicalDomain)
-        : scratchpad.domain;
+        : pinnedDomainHint ?? scratchpad.domain;
 
     req.log.info({ technicalDomain, strictness }, "agent-chat: domain + strictness");
 
@@ -1811,6 +1820,11 @@ Please answer based on the above information.`;
     if (quoteNorm.length >= 8) {
       const qIdx = ragChunks.findIndex(c => normalizeForMatch(c.content).includes(quoteNorm));
       if (qIdx >= 0) specIdxSet.add(qIdx);
+    }
+
+    for (const chunkId of domainRetrievalMetadata.relevantChunkIds) {
+      const rescueIdx = ragChunks.findIndex((c) => c.id === chunkId);
+      if (rescueIdx >= 0) specIdxSet.add(rescueIdx);
     }
 
     // Build the specialist context, re-sorted by page/chunk order for readability
@@ -1948,21 +1962,33 @@ Please answer based on the above information.`;
       specialistResult.validationStatus === "fail" ||
       specialistResult.answerability === "not_answerable"
     ) {
-      // Guard: if the scratchpad assessed strong/partial evidence and the specialist
-      // found no actual contradictions (only retrieval gaps in unsupported_claims),
-      // keep the draft answer — the specialist may have seen a truncated evidence
-      // window that missed the relevant chunks.
       const hasConflicts = specialistResult.validationSummary.conflictingClaims.length > 0;
       const scratchpadConfident =
         scratchpad.evidenceQuality === "strong" || scratchpad.evidenceQuality === "partial";
-      if (scratchpadConfident && !hasConflicts) {
+      const effectivePolicy = getEffectiveDomainPolicy(technicalDomain, trimmedQuestion);
+      const partialCircuitOk =
+        specialistResult.answerability === "partially_answerable" &&
+        !hasConflicts &&
+        missingOnlyOptionalStages(
+          effectivePolicy,
+          specialistResult.validationSummary.missingItems,
+        );
+
+      if (partialCircuitOk) {
+        req.log.info(
+          { answerability: specialistResult.answerability },
+          "agent-chat: partial circuit answer kept — only optional stages missing",
+        );
+        finalSpecialistResult = {
+          ...specialistResult,
+          validationStatus: "revise" as const,
+          answerability: "partially_answerable",
+        };
+      } else if (scratchpadConfident && !hasConflicts) {
         req.log.info(
           { scratchpadEvidence: scratchpad.evidenceQuality, specialistStatus: specialistResult.validationStatus },
           "agent-chat: specialist fail overridden — scratchpad strong/partial evidence with no contradictions"
         );
-        // finalAnswer stays as draftAnswer.
-        // Clear unsupportedClaims so the UI does not show "Not in retrieved pages"
-        // for steps we've already decided to trust — they're retrieval gaps, not errors.
         finalSpecialistResult = {
           ...specialistResult,
           validationStatus: "revise" as const,

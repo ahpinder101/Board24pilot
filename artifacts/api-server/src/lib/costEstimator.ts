@@ -98,18 +98,18 @@ export function estimateProcessingCost(params: {
     steps.push(makeStep(pricing, "Document structure analysis", 1, 2_000, 1_000));
   }
   if (sparsePages > 0) {
-    steps.push(makeStep(pricing, "Vision OCR — sparse/scanned pages", sparsePages, 2_800, 4_096));
+    steps.push(makeStep(pricing, "Vision interpret — stage 3", sparsePages, 2_800, 4_096));
   }
   if (diagramPages > 0) {
-    steps.push(makeStep(pricing, "Diagram interpretation — Pass 7", diagramPages, 1_800, 3_000));
+    steps.push(makeStep(pricing, "Diagram chunking — stage 4 (deduped when stage 3 ran)", diagramPages, 0, 0));
   }
   if (tabularPages > 0) {
-    steps.push(makeStep(pricing, "Table reconstruction — Pass 7", tabularPages, 1_500, 1_000));
+    steps.push(makeStep(pricing, "Table reconstruction — stage 4", tabularPages, 1_500, 1_000));
   }
-  steps.push(makeStep(pricing, "Entity extraction — Pass 4", textChunks, 2_500, 4_000));
-  steps.push(makeStep(pricing, "Relationship extraction — Pass 5", textChunks, 2_000, 3_000));
-  steps.push(makeStep(pricing, "Procedure paths — Pass 5b", textChunks, 1_500, 2_000));
-  steps.push(makeStep(pricing, "Hierarchy ordering — Pass 6", 1, 1_500, 500));
+  steps.push(makeStep(pricing, "Entity extraction — stage 5", textChunks, 2_500, 4_000));
+  steps.push(makeStep(pricing, "Relationship extraction — stage 6", textChunks, 2_000, 3_000));
+  steps.push(makeStep(pricing, "Procedure paths — stage 7", textChunks, 1_500, 2_000));
+  steps.push(makeStep(pricing, "Hierarchy ordering — stage 8", 1, 1_500, 500));
 
   const inputTokensTotal = steps.reduce((s, t) => s + t.inputTokens, 0);
   const outputTokensTotal = steps.reduce((s, t) => s + t.outputTokens, 0);
@@ -158,18 +158,18 @@ export function calculateActualCost(params: {
   const steps: StepEstimate[] = [];
   steps.push(makeStep(pricing, "Document structure analysis", 1, 2_000, 1_000));
   if (sparsePages > 0) {
-    steps.push(makeStep(pricing, "Vision OCR — sparse/scanned pages", sparsePages, 2_800, 4_096));
+    steps.push(makeStep(pricing, "Vision interpret — stage 3", sparsePages, 2_800, 4_096));
   }
   if (diagramPages > 0) {
-    steps.push(makeStep(pricing, "Diagram interpretation — Pass 7", diagramPages, 1_800, 3_000));
+    steps.push(makeStep(pricing, "Diagram chunking — stage 4 (deduped when stage 3 ran)", diagramPages, 0, 0));
   }
   if (tabularPages > 0) {
-    steps.push(makeStep(pricing, "Table reconstruction — Pass 7", tabularPages, 1_500, 1_000));
+    steps.push(makeStep(pricing, "Table reconstruction — stage 4", tabularPages, 1_500, 1_000));
   }
-  steps.push(makeStep(pricing, "Entity extraction — Pass 4", textChunks, 2_500, 4_000));
-  steps.push(makeStep(pricing, "Relationship extraction — Pass 5", textChunks, 2_000, 3_000));
-  steps.push(makeStep(pricing, "Procedure paths — Pass 5b", textChunks, 1_500, 2_000));
-  steps.push(makeStep(pricing, "Hierarchy ordering — Pass 6", 1, 1_500, 500));
+  steps.push(makeStep(pricing, "Entity extraction — stage 5", textChunks, 2_500, 4_000));
+  steps.push(makeStep(pricing, "Relationship extraction — stage 6", textChunks, 2_000, 3_000));
+  steps.push(makeStep(pricing, "Procedure paths — stage 7", textChunks, 1_500, 2_000));
+  steps.push(makeStep(pricing, "Hierarchy ordering — stage 8", 1, 1_500, 500));
 
   const inputTokensTotal = steps.reduce((s, t) => s + t.inputTokens, 0);
   const outputTokensTotal = steps.reduce((s, t) => s + t.outputTokens, 0);

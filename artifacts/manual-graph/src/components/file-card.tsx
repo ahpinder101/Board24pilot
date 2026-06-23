@@ -10,10 +10,15 @@ import {
 } from "lucide-react";
 import { useGetManualStats, getGetManualStatsQueryKey, useReEnrichManual, type Manual } from "@workspace/api-client-react";
 import { ScopeSelector } from "@/components/scope-selector";
-import { cn } from "@/lib/utils";
+import {
+  formatStageProgress,
+  isPipelineComplete,
+  PIPELINE_COMPLETE_STAGE,
+  showGraphRepairButton,
+  stageProgressPercent,
+} from "@/lib/pipelineStages";
 
 const STALL_SECONDS = 90;
-const PASS_PROGRESS: Record<number, number> = { 0: 5, 1: 15, 2: 28, 4: 52, 5: 68, 6: 84 };
 
 interface FileCardProps {
   manual: Manual;
@@ -53,7 +58,8 @@ function ProcessingSection({
   const isStalled = secondsAgo > STALL_SECONDS;
   const isSlow = secondsAgo > 40;
   const pass = manual.processingPass ?? 0;
-  const progressPct = PASS_PROGRESS[pass] ?? (pass >= 7 ? 100 : 5);
+  const stageVersion = manual.pipelineStageVersion ?? 1;
+  const progressPct = stageProgressPercent(pass, stageVersion, manual.status);
 
   async function handleReset() {
     setIsResetting(true);
@@ -74,7 +80,7 @@ function ProcessingSection({
       <div className="space-y-1">
         <div className="flex justify-between items-center text-[11px] font-mono text-gray-400">
           <span className={cn(isStalled ? "text-red-500" : isSlow ? "text-amber-500" : "")}>
-            {isStalled ? `Stalled ${secondsAgo}s` : `Pass ${pass} · ${secondsAgo}s ago`}
+            {isStalled ? `Stalled ${secondsAgo}s` : `${formatStageProgress(pass, stageVersion, manual.status)} · ${secondsAgo}s ago`}
           </span>
           <span>{progressPct}%</span>
         </div>
@@ -120,12 +126,14 @@ function CompletedSection({
   manualId,
   totalPages,
   processingPass,
+  pipelineStageVersion,
   getToken,
   onStarted,
 }: {
   manualId: number;
   totalPages: number;
   processingPass: number;
+  pipelineStageVersion?: number | null;
   getToken: () => Promise<string | null>;
   onStarted: () => void;
 }) {
@@ -269,7 +277,7 @@ function CompletedSection({
           <CheckCircle2 className="w-3 h-3" />
           Processing complete
         </span>
-        {processingPass < 8 && (
+        {!isPipelineComplete(processingPass, pipelineStageVersion) && (
           <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-[11px] font-medium text-amber-700">
             <Wrench className="w-3 h-3" />
             Enrich pending
@@ -375,12 +383,12 @@ function CompletedSection({
           <ExternalLink className="w-3.5 h-3.5" />
           {pdfLoading ? "Opening…" : "Open PDF"}
         </button>
-        {processingPass < 8 && (
+        {!isPipelineComplete(processingPass, pipelineStageVersion) && (
           <button
             onClick={() => reEnrich.mutate({ id: manualId })}
             disabled={reEnrich.isPending}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100 text-xs font-medium transition-all disabled:opacity-50"
-            title="Re-run Pass 8: backfill page context labels and expand BOM tables for all chunks"
+            title="Re-run enrich_chunks (stage 9): backfill page context labels and expand BOM tables for all chunks"
           >
             <Wrench className={cn("w-3.5 h-3.5", reEnrich.isPending && "animate-spin")} />
             {reEnrich.isPending ? "Enriching…" : "Re-enrich chunks"}
@@ -601,7 +609,7 @@ export function FileCard({ manual, onDelete, onStarted, getToken, highlight = fa
             onStarted={onStarted}
             compact
           />
-          {(manual.processingPass ?? 0) >= 4 && (manual.processingPass ?? 0) < 7 && (
+          {showGraphRepairButton(manual.processingPass, manual.pipelineStageVersion, manual.status) && (
             <RepairGraphButton
               manualId={manual.id}
               getToken={getToken}
@@ -625,6 +633,7 @@ export function FileCard({ manual, onDelete, onStarted, getToken, highlight = fa
           manualId={manual.id}
           totalPages={manual.totalPages ?? 0}
           processingPass={manual.processingPass ?? 0}
+          pipelineStageVersion={manual.pipelineStageVersion}
           getToken={getToken}
           onStarted={onStarted}
         />

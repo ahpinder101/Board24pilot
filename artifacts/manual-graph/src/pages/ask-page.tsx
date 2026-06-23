@@ -13,12 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { saveRecentQuestion } from "@/hooks/use-recent-questions";
-
-// ── Procedural query auto-detection ──────────────────────────────────────────
-// Mirror of the server-side PROCEDURAL_QUERY_RE — used to auto-switch mode to
-// "Procedure / Step-by-Step" when the question is clearly a procedure request.
-const PROCEDURAL_QUERY_RE =
-  /\b(walk\s+me\s+through|step[-\s]by[-\s]step|steps?\s+to\s+\w|how\s+(do\s+I|to)\s+(replace|remove|install|disassemble|assemble|adjust|clean|set\s+up|change|perform|fix)|procedure\s+for|guide\s+me|show\s+me\s+(how|the\s+steps?)|all\s+steps?|sequence\s+for|process\s+of)\b/i;
+import { resolveRetrievalMode, resolvePinnedManualDomain } from "@/lib/queryIntent";
 
 const MANUAL_SCOPE_STORAGE_KEY = "ask-selected-manual-id";
 
@@ -652,6 +647,10 @@ export default function AskPage() {
     selectedManualId !== null
       ? completedManuals.find((m: Manual) => m.id === selectedManualId)?.name
       : undefined;
+  const selectedManualDocType =
+    selectedManualId !== null
+      ? completedManuals.find((m: Manual) => m.id === selectedManualId)?.documentType
+      : null;
   const [expandedPanels, setExpandedPanels] = useState<Record<string, { evidence?: boolean; validation?: boolean }>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -777,9 +776,13 @@ export default function AskPage() {
     const question = input.trim() || "What can you tell me about this?";
     if (!canSend) return;
 
-    // Auto-detect procedural questions and route to process_trace retrieval.
-    const effectiveRetrievalMode: "fact_lookup" | "process_trace" =
-      agentMode && PROCEDURAL_QUERY_RE.test(question) ? "process_trace" : "fact_lookup";
+    const effectiveRetrievalMode = agentMode
+      ? resolveRetrievalMode(question)
+      : "fact_lookup";
+    const pinnedDomain =
+      selectedManualId !== null
+        ? resolvePinnedManualDomain(selectedManualDocType ?? null, question)
+        : null;
 
     saveRecentQuestion(question);
     const imageSnapshot = attachedImage;
@@ -809,6 +812,7 @@ export default function AskPage() {
       if (agentMode) {
         body.strictness = strictness;
         body.retrievalMode = effectiveRetrievalMode;
+        if (pinnedDomain) body.domain = pinnedDomain;
       }
       if (selectedManualId !== null) body.manualId = selectedManualId;
 

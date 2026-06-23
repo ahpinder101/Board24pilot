@@ -1,14 +1,16 @@
 /**
- * Multi-pass AI extraction pipeline for engineering manuals.
+ * Multi-pass AI extraction pipeline for engineering manuals (stages 0–9).
  *
- * Pass 1: Document structure analysis (type, sections, overview)
- * Pass 2: Per-page content (text, image/table detection)
- * Pass 4: Entity extraction (machines, components, subsystems, processes, parts, etc.)
- * Pass 5: Relationship extraction (connects-to, part-of, contains, sequence, etc.)
- * Pass 6: Ordering & hierarchy (sequences, procedures, dependency order)
- * Pass 7: RAG chunking — element-aware chunks + vision descriptions for diagram pages
- * Pass 8: Self-contained chunk enrichment — page context annotation, short-chunk stitching,
- *          and LLM-powered BOM table row expansion into natural-language sentences.
+ * 0 parse_layout          — Docling / pdf-parse (compute)
+ * 1 profile_document      — document type, sections, overview (LLM)
+ * 2 index_pages           — per-page text + image/table flags (compute)
+ * 3 vision_interpret      — ISO/IEC page classification + interpretation (LLM)
+ * 4 build_chunks          — RAG chunking + optional tabular restructure (mixed)
+ * 5 extract_entities      — machines, components, parts, etc. (LLM)
+ * 6 extract_relationships — connects-to, part-of, sequence, etc. (LLM)
+ * 7 extract_paths         — ordered procedural sequences (LLM)
+ * 8 rank_hierarchy        — top-level machine ranking (LLM)
+ * 9 enrich_chunks         — page context, stitching, BOM expansion (mixed)
  */
 
 import { openai } from "./openai.js";
@@ -28,6 +30,13 @@ import {
 } from "@workspace/db";
 import { eq, and, count, sql, isNotNull, gte, lte, ne, isNull, or } from "drizzle-orm";
 import { extractPdfText, extractWithDocling, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, chunkFromElements, type PdfContent, type DoclingElement, type TypedChunk } from "./pdfExtractor.js";
+import { applyPlcIoTableTag } from "./chunkEnrichment.js";
+import { PIPELINE_STAGE, PIPELINE_COMPLETE_STAGE, normalizeProcessingPass } from "./pipelineStages.js";
+import {
+  parsePageTypeFromVisionText,
+  passesVisionQualityGate,
+  buildPageClassifyPrompt,
+} from "./visionPageUtils.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
 
@@ -44,7 +53,7 @@ function sanitizeText(text: string): string {
 async function updateManualPass(manualId: number, pass: number) {
   await db
     .update(manualsTable)
-    .set({ processingPass: pass, updatedAt: new Date() })
+    .set({ processingPass: pass, pipelineStageVersion: 2, updatedAt: new Date() })
     .where(eq(manualsTable.id, manualId));
 }
 
@@ -71,11 +80,22 @@ async function setManualStatus(
 async function saveVisionPageText(
   manualId: number,
   pageNumber: number,
-  text: string
+  text: string,
+  pageType?: string | null
 ) {
+  const pageUpdate: {
+    rawText: string;
+    visionEscalated: number;
+    pageType?: string;
+  } = {
+    rawText: sanitizeText(text),
+    visionEscalated: 1,
+  };
+  if (pageType) pageUpdate.pageType = pageType;
+
   const updated = await db
     .update(manualPagesTable)
-    .set({ rawText: sanitizeText(text), visionEscalated: 1 })
+    .set(pageUpdate)
     .where(
       and(
         eq(manualPagesTable.manualId, manualId),
@@ -95,17 +115,27 @@ async function saveVisionPageText(
     doclingExtracted: 0,
     doclingElementCount: 0,
     visionEscalated: 1,
+    ...(pageType ? { pageType } : {}),
   });
 }
 
-// ─── PASS 1: Document structure ────────────────────────────────────────────
+// ─── Stage 1: profile_document ───────────────────────────────────────────────
 
+/** @deprecated Use profileDocument */
 async function pass1DocumentStructure(
   manualId: number,
   fullText: string,
   totalPages: number
-): Promise<{ documentType: string; overview: string; machines: string[]; sections: string[] }> {
-  await updateManualPass(manualId, 1);
+): Promise<{ documentType: string; overview: string; machines: string[]; sections: string[]; contentProfile?: string }> {
+  return profileDocument(manualId, fullText, totalPages);
+}
+
+async function profileDocument(
+  manualId: number,
+  fullText: string,
+  totalPages: number
+): Promise<{ documentType: string; overview: string; machines: string[]; sections: string[]; contentProfile?: string }> {
+  await updateManualPass(manualId, PIPELINE_STAGE.PROFILE_DOCUMENT);
 
   const sample = fullText.slice(0, 8000);
   const response = await openai.chat.completions.create({
@@ -116,10 +146,13 @@ async function pass1DocumentStructure(
         role: "system",
         content: `You are an expert technical document analyst specializing in engineering manuals.
 Analyze the document and return a JSON object with:
-- documentType: one of "maintenance_manual", "operation_manual", "installation_manual", "parts_catalog", "technical_specification", "service_manual", "user_guide", "system_manual", or "other"
+- documentType: one of "maintenance_manual", "operation_manual", "installation_manual", "parts_catalog", "technical_specification", "service_manual", "user_guide", "system_manual", "electrical_schematic", "electrical_wiring_diagram", "plc_io_manual", or "other"
+- contentProfile: optional short label when the manual is schematic-heavy — one of "electrical_schematic", "pneumatic_schematic", "mixed_technical", or omit for general manuals
 - overview: a concise 2-3 sentence description of what this manual covers
 - machines: array of machine/equipment names mentioned (top-level machines only, 1-10 items)
-- sections: array of main section names from the document`,
+- sections: array of main section names from the document
+
+Use electrical_schematic or electrical_wiring_diagram when the document is primarily wiring diagrams, ladder logic, or control schematics (e.g. feeder sections, MCC drawings). Use plc_io_manual when the primary content is PLC I/O assignment tables.`,
       },
       {
         role: "user",
@@ -134,6 +167,7 @@ Analyze the document and return a JSON object with:
     const parsed = JSON.parse(raw);
     return {
       documentType: parsed.documentType ?? "other",
+      contentProfile: typeof parsed.contentProfile === "string" ? parsed.contentProfile : undefined,
       overview: parsed.overview ?? "",
       machines: Array.isArray(parsed.machines) ? parsed.machines : [],
       sections: Array.isArray(parsed.sections) ? parsed.sections : [],
@@ -143,8 +177,9 @@ Analyze the document and return a JSON object with:
   }
 }
 
-// ─── PASS 2: Per-page content analysis ─────────────────────────────────────
+// ─── Stage 2: index_pages ────────────────────────────────────────────────────
 
+/** @deprecated Use indexPages */
 async function pass2PageContent(
   manualId: number,
   pages: Array<{
@@ -173,7 +208,7 @@ async function pass2PageContent(
   }
 
   // Only advance processingPass when we're actually doing new work
-  await updateManualPass(manualId, 2);
+  await updateManualPass(manualId, PIPELINE_STAGE.INDEX_PAGES);
 
   if (existingSet.size > 0) {
     logger.info({ manualId, existing: existingSet.size, inserting: newPages.length }, "Pass 2: resuming — inserting remaining pages");
@@ -298,7 +333,7 @@ async function pass4EntityExtraction(
   maxChunks = Infinity,
   knownMachines: string[] = []
 ): Promise<ExtractedEntity[]> {
-  await updateManualPass(manualId, 4);
+  await updateManualPass(manualId, PIPELINE_STAGE.EXTRACT_ENTITIES);
 
   const allEntities: ExtractedEntity[] = [];
   const chunks = chunkText(fullText, 3000);
@@ -401,6 +436,7 @@ async function pass5ExtractPaths(
   maxChunks = Infinity,
   entities: ExtractedEntity[] = []
 ): Promise<ExtractedPath[]> {
+  await updateManualPass(manualId, PIPELINE_STAGE.EXTRACT_PATHS);
   const allPaths: ExtractedPath[] = [];
   const chunks = chunkText(fullText, 4000);
 
@@ -478,7 +514,7 @@ async function pass5RelationshipExtraction(
   nameToId: Map<string, number>,
   maxChunks = Infinity
 ): Promise<number> {
-  await updateManualPass(manualId, 5);
+  await updateManualPass(manualId, PIPELINE_STAGE.EXTRACT_RELATIONSHIPS);
 
   const entityNames = entities.map((e) => e.name).join(", ");
   let relCount = 0;
@@ -569,7 +605,7 @@ async function pass6OrderingHierarchy(
   entities: ExtractedEntity[],
   knownMachines: string[] = []
 ): Promise<{ hierarchyNotes: string; topLevelMachines: string[]; procedureOrder: string[] }> {
-  await updateManualPass(manualId, 6);
+  await updateManualPass(manualId, PIPELINE_STAGE.RANK_HIERARCHY);
 
   // Seed with the top-level machines Pass 1 already identified so the model
   // ranks a known list rather than re-deriving it from scratch.
@@ -786,7 +822,7 @@ async function pass7EmbedChunks(
   pdfBuffer?: Buffer,
   options: { updatePass?: boolean } = {}
 ): Promise<void> {
-  if (options.updatePass !== false) await updateManualPass(manualId, 7);
+  if (options.updatePass !== false) await updateManualPass(manualId, PIPELINE_STAGE.BUILD_CHUNKS);
 
   // Check which pages already have chunks so we can resume instead of starting over.
   // If NO chunks exist at all, do the traditional full clear-and-replace to ensure
@@ -886,7 +922,39 @@ async function pass7EmbedChunks(
     // pages where Docling found picture elements.
     const hasDoclingPicture = page.elements?.some((e) => e.type === "picture") ?? false;
     if (sharedPdfPath && (imagePageNumbers?.has(page.pageNumber) || hasDoclingPicture) && await hasDiagramImageFromPath(sharedPdfPath, page.pageNumber)) {
-      const visionText = await describePageWithVision(sharedPdfPath, page.pageNumber);
+      const [storedPage] = await db
+        .select({
+          visionEscalated: manualPagesTable.visionEscalated,
+          rawText: manualPagesTable.rawText,
+          description: manualPagesTable.description,
+          pageType: manualPagesTable.pageType,
+        })
+        .from(manualPagesTable)
+        .where(
+          and(
+            eq(manualPagesTable.manualId, manualId),
+            eq(manualPagesTable.pageNumber, page.pageNumber)
+          )
+        )
+        .limit(1);
+
+      const storedVisionText = (storedPage?.description ?? storedPage?.rawText ?? "").trim();
+      const skipDuplicateVision =
+        storedPage?.visionEscalated === 1 &&
+        storedVisionText.length >= 80 &&
+        passesVisionQualityGate(storedPage?.pageType ?? parsePageTypeFromVisionText(storedVisionText), storedVisionText);
+
+      let visionText: string | null = null;
+      if (skipDuplicateVision) {
+        visionText = storedVisionText;
+        logger.info(
+          { manualId, pageNumber: page.pageNumber },
+          "build_chunks: reusing vision_interpret output — skipping duplicate vision call"
+        );
+      } else {
+        visionText = await describePageWithVision(sharedPdfPath, page.pageNumber);
+      }
+
       if (visionText) {
         // Combine vision description (structured drawing metadata) with the
         // original OCR text so FTS can match BOTH the diagram annotations AND
@@ -1102,12 +1170,10 @@ async function pass7EmbedChunks(
 //   MECHANICAL_DRAWING   — ISO 128 (technical drawings / projections)
 //   TEXT_TABLE           — plain text, tables, or mixed procedural content
 
-function buildPageInterpretationPrompt(pageNumber: number): string {
-  return `You are an expert engineering document analyst trained in ISO and IEC technical standards.
-
-This is page ${pageNumber} of an engineering manual.
-
-STEP 1 — Classify the page. Output exactly one of these labels on the first line:
+function buildPageInterpretationPrompt(pageNumber: number, forcedPageType?: string): string {
+  const classifyStep = forcedPageType
+    ? `PAGE_TYPE: ${forcedPageType}`
+    : `STEP 1 — Classify the page. Output exactly one of these labels on the first line:
   PAGE_TYPE: PNEUMATIC_SCHEMATIC
   PAGE_TYPE: HYDRAULIC_SCHEMATIC
   PAGE_TYPE: ELECTRICAL_WIRING
@@ -1115,7 +1181,13 @@ STEP 1 — Classify the page. Output exactly one of these labels on the first li
   PAGE_TYPE: MECHANICAL_DRAWING
   PAGE_TYPE: TEXT_TABLE
 
-STEP 2 — Interpret the page according to the relevant standard. Follow the rules for the type you identified:
+STEP 2 — Interpret the page according to the relevant standard. Follow the rules for the type you identified:`;
+
+  return `You are an expert engineering document analyst trained in ISO and IEC technical standards.
+
+This is page ${pageNumber} of an engineering manual.
+
+${classifyStep}
 
 ━━━ PNEUMATIC_SCHEMATIC or HYDRAULIC_SCHEMATIC (ISO 1219-1/2) ━━━
 Output the following sections:
@@ -1140,9 +1212,13 @@ CIRCUIT FLOW DESCRIPTION:
 ━━━ ELECTRICAL_WIRING (IEC 60617) ━━━
 Output:
 POWER RAILS: voltage levels and AC/DC type.
-LOADS: each load's label, model, and rating.
+LOADS: each load's label, model, and rating (include motor kW/HP if labelled).
 SWITCHING ELEMENTS: relays, contactors, switches — model and coil/contact ratings.
+RELAY/CONTACTOR CONTACTS: for each relay/contactor (e.g. RL1, KM1): coil circuit, NO/NC contact designations, what each contact feeds (contactor coil, PLC input, lamp, etc.), and energise/de-energise conditions when visible.
+INDICATOR LAMPS (HL): each lamp designation (HL1, HL2, …), function label (e.g. ready, fault, run), and PLC output or relay contact that energises it.
+INTERCONNECT / TERMINAL BLOCKS: terminal strip reference (XT, TB), cable core count, and cross-sheet references where visible.
 CIRCUIT TRACES: for each circuit, describe: power source → switching elements → load, with wire colour and terminal numbers where visible.
+E-STOP / SAFETY: normally-closed E-stop contacts in series, safety relay path, and effect on contactor coils and VFD inhibit when pressed.
 
 ━━━ PLC_IO_TABLE (IEC 61131-3) ━━━
 Extract every row as a structured record:
@@ -1192,6 +1268,105 @@ PAGE REF: <value>
 If the page is blank or contains only unlabelled artwork with no text, output exactly: [diagram only]`;
 }
 
+/** Two-step vision: classify (low detail) then interpret with type-specific prompt; quality-gate retry. */
+async function runVisionInterpretForPage(
+  pdfPath: string,
+  pageNumber: number
+): Promise<{ text: string; pageType: string | null }> {
+  let pageType: string | null = null;
+  try {
+    const classifyImage = await renderPdfPageToBase64FromPath(pdfPath, pageNumber);
+    const classifyResp = await openai.chat.completions.create({
+      model: MODEL,
+      max_completion_tokens: 64,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${classifyImage}`, detail: "low" },
+            },
+            { type: "text", text: buildPageClassifyPrompt(pageNumber) },
+          ],
+        },
+      ],
+    });
+    pageType = parsePageTypeFromVisionText(classifyResp.choices[0]?.message?.content ?? "");
+  } catch (err) {
+    logger.warn({ err, pageNumber }, "vision_interpret: classify step failed");
+  }
+
+  const base64Image = await renderPdfPageToBase64FromPath(pdfPath, pageNumber);
+  const response = await openai.chat.completions.create({
+    model: MODEL,
+    max_completion_tokens: 4096,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { url: `data:image/png;base64,${base64Image}`, detail: "high" },
+          },
+          {
+            type: "text",
+            text: buildPageInterpretationPrompt(pageNumber, pageType ?? undefined),
+          },
+        ],
+      },
+    ],
+  });
+
+  let text = response.choices[0]?.message?.content ?? "";
+  text = text.trim() === "[diagram only]" ? "" : text.trim();
+  pageType = parsePageTypeFromVisionText(text) ?? pageType;
+
+  if (text && !passesVisionQualityGate(pageType, text)) {
+    logger.info({ pageNumber, pageType }, "vision_interpret: quality gate failed — compound retry");
+    try {
+      const retryResp = await openai.chat.completions.create({
+        model: MODEL,
+        max_completion_tokens: 4096,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image_url",
+                image_url: { url: `data:image/png;base64,${base64Image}`, detail: "high" },
+              },
+              { type: "text", text: buildCompoundPagePrompt(pageNumber) },
+            ],
+          },
+        ],
+      });
+      const retryText = (retryResp.choices[0]?.message?.content ?? "").trim();
+      if (retryText && retryText !== "[diagram only]" && retryText.length > text.length) {
+        text = retryText;
+        pageType = parsePageTypeFromVisionText(text) ?? pageType;
+      }
+    } catch (err) {
+      logger.warn({ err, pageNumber }, "vision_interpret: compound retry failed");
+    }
+  }
+
+  return { text, pageType };
+}
+
+async function isSchematicHeavyManual(manualId: number): Promise<boolean> {
+  const rows = await db
+    .select({ pageType: manualPagesTable.pageType })
+    .from(manualPagesTable)
+    .where(eq(manualPagesTable.manualId, manualId));
+  const classified = rows.filter((r) => r.pageType);
+  if (classified.length === 0) return false;
+  const schematicCount = classified.filter(
+    (r) => r.pageType === "ELECTRICAL_WIRING" || r.pageType === "PLC_IO_TABLE"
+  ).length;
+  return schematicCount / classified.length > 0.5;
+}
+
 async function passVisionOcr(
   manualId: number,
   pdfBuffer: Buffer,
@@ -1231,6 +1406,11 @@ async function passVisionOcr(
   // Write the PDF buffer to disk once; all page renders reuse the same path.
   const { pdfPath, cleanup: cleanupPdf } = await writePdfToTempFile(pdfBuffer);
 
+  const pagesToRun = pageNumbers.filter((p) => !alreadyOcrd.has(p));
+  if (pagesToRun.length > 0) {
+    await updateManualPass(manualId, PIPELINE_STAGE.VISION_INTERPRET);
+  }
+
   for (let start = 0; start < pageNumbers.length; start += CONCURRENCY) {
     const batch = pageNumbers.slice(start, start + CONCURRENCY).filter((p) => !alreadyOcrd.has(p));
     if (batch.length === 0) continue;
@@ -1238,47 +1418,24 @@ async function passVisionOcr(
     const batchResults = await Promise.all(
       batch.map(async (pageNumber) => {
         try {
-          const base64Image = await renderPdfPageToBase64FromPath(pdfPath, pageNumber);
-
-          const response = await openai.chat.completions.create({
-            model: MODEL,
-            max_completion_tokens: 4096,
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "image_url",
-                    image_url: {
-                      url: `data:image/png;base64,${base64Image}`,
-                      detail: "high",
-                    },
-                  },
-                  {
-                    type: "text",
-                    text: buildPageInterpretationPrompt(pageNumber),
-                  },
-                ],
-              },
-            ],
-          });
-
-          const text = response.choices[0]?.message?.content ?? "";
-          const cleanedText = text.trim() === "[diagram only]" ? "" : text.trim();
-          return { pageNumber, text: cleanedText };
+          const { text, pageType } = await runVisionInterpretForPage(pdfPath, pageNumber);
+          return { pageNumber, text, pageType };
         } catch (err) {
           logger.warn({ err, pageNumber }, "Vision OCR failed for page");
-          return { pageNumber, text: "" };
+          return { pageNumber, text: "", pageType: null as string | null };
         }
       })
     );
 
-    results.push(...batchResults);
-    await setActivity(manualId, `Vision OCR — processed pages ${batch[0]}–${batch[batch.length - 1]} of ${totalPages}`);
+    results.push(...batchResults.map(({ pageNumber, text }) => ({ pageNumber, text })));
+    await setActivity(
+      manualId,
+      `vision_interpret (3/9) — pages ${batch[0]}–${batch[batch.length - 1]} of ${totalPages}`
+    );
 
     // Persist OCR text to manual_pages immediately so progress is saved
-    for (const { pageNumber, text } of batchResults) {
-      await saveVisionPageText(manualId, pageNumber, text);
+    for (const { pageNumber, text, pageType } of batchResults) {
+      await saveVisionPageText(manualId, pageNumber, text, pageType);
     }
 
     logger.info(
@@ -1321,7 +1478,7 @@ export async function reprocessManualWithVision(
     await db.delete(chunksTable).where(eq(chunksTable.manualId, manualId));
 
     // Vision OCR — populate rawText for every page
-    await updateManualPass(manualId, 2);
+    await updateManualPass(manualId, PIPELINE_STAGE.INDEX_PAGES);
     const allPageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
     const ocrPages = await passVisionOcr(manualId, pdfBuffer, allPageNumbers, { forcePages: allPageNumbers });
     const fullText = ocrPages.map((p) => p.text).join("\n\n");
@@ -1409,7 +1566,7 @@ export async function reprocessManualWithVision(
       ocrPages.map((p) => ({ pageNumber: p.pageNumber, text: p.text }))
     );
 
-    await setManualStatus(manualId, "completed", { processingPass: 7 });
+    await setManualStatus(manualId, "completed", { processingPass: PIPELINE_STAGE.RANK_HIERARCHY, pipelineStageVersion: 2 });
     logger.info({ manualId, paths: extractedPaths.length }, "Vision reprocess completed");
   } catch (err) {
     await setManualStatus(manualId, "failed", {
@@ -1551,10 +1708,19 @@ export async function extractGraphFromExistingText(
   // We need to know which passes were already completed before we overwrite
   // processingPass with 4, so we can skip them on resume.
   const [priorState] = await db
-    .select({ processingPass: manualsTable.processingPass, status: manualsTable.status })
+    .select({
+      processingPass: manualsTable.processingPass,
+      pipelineStageVersion: manualsTable.pipelineStageVersion,
+      status: manualsTable.status,
+    })
     .from(manualsTable)
     .where(eq(manualsTable.id, manualId));
   const previousPass = priorState?.processingPass ?? 0;
+  const normalizedPrevious = normalizeProcessingPass(
+    previousPass,
+    priorState?.pipelineStageVersion,
+    priorState?.status
+  );
   // A "completed" status means the previous run finished successfully — this is
   // a deliberate re-extraction, not a resume.  Treat it as a fresh run so all
   // passes re-execute rather than skipping based on leftover entity counts.
@@ -1574,18 +1740,18 @@ export async function extractGraphFromExistingText(
   const existingRelCount = relCountRow?.cnt ?? 0;
 
   // Resume rules (only apply when truly stalled mid-pass, never on a fresh re-run):
-  //  • previousPass >= 5 AND entities exist AND not completed → Pass 4 finished; skip it
-  //  • previousPass >= 6 AND rels exist AND not completed     → Pass 5 finished; skip it too
-  //  • Otherwise (including status="completed")               → delete and run from scratch
-  // For partial page-range runs, resume is disabled — entities from other page
-  // ranges already exist in the DB so the counts are meaningless for this range.
-  const resumeFromPass5 = !isPartialRun && !previouslyCompleted && previousPass >= 5 && existingEntityCount > 0;
-  // resumeFromPass6: skip pass 5 if relationships already exist in DB.
-  // Since pass 5 now saves per-chunk, any existing relationships mean we have
-  // at least partial (often near-complete) pass 5 data — safe to skip to pass 6.
-  const resumeFromPass6 = !isPartialRun && !previouslyCompleted && previousPass >= 5 && existingRelCount > 0;
+  const resumeFromPass5 =
+    !isPartialRun &&
+    !previouslyCompleted &&
+    normalizedPrevious >= PIPELINE_STAGE.EXTRACT_RELATIONSHIPS &&
+    existingEntityCount > 0;
+  const resumeFromPass6 =
+    !isPartialRun &&
+    !previouslyCompleted &&
+    normalizedPrevious >= PIPELINE_STAGE.EXTRACT_RELATIONSHIPS &&
+    existingRelCount > 0;
 
-  await setManualStatus(manualId, "processing", { processingPass: 4 });
+  await setManualStatus(manualId, "processing", { processingPass: PIPELINE_STAGE.EXTRACT_ENTITIES, pipelineStageVersion: 2 });
   if (resumeFromPass5) {
     await setActivity(manualId, `Resuming — Pass 4 already done (${existingEntityCount} entities found), checking relationships...`);
     logger.info({ manualId, existingEntityCount, previousPass }, "extractGraphFromExistingText: resuming from Pass 5 — entities already extracted");
@@ -1698,7 +1864,7 @@ export async function extractGraphFromExistingText(
 
   if (resumeFromPass5) {
     // Load entities from DB so Pass 5 context (entity name anchoring) stays consistent
-    await updateManualPass(manualId, 5);
+    await updateManualPass(manualId, PIPELINE_STAGE.EXTRACT_RELATIONSHIPS);
     const dbEntities = await db
       .select({ id: entitiesTable.id, name: entitiesTable.name, type: entitiesTable.type, description: entitiesTable.description, pageReferences: entitiesTable.pageReferences, properties: entitiesTable.properties })
       .from(entitiesTable)
@@ -1756,7 +1922,7 @@ export async function extractGraphFromExistingText(
   let relCount = 0;
   if (resumeFromPass6) {
     relCount = existingRelCount;
-    await updateManualPass(manualId, 6);
+    await updateManualPass(manualId, PIPELINE_STAGE.RANK_HIERARCHY);
     logger.info({ manualId, relationships: relCount }, "Pass 5: skipped — relationships already in DB");
     await setActivity(manualId, `Pass 5 ✓ — ${relCount} relationships already extracted, resuming from ordering`);
   } else {
@@ -1806,7 +1972,7 @@ export async function extractGraphFromExistingText(
   const hierarchy = await pass6OrderingHierarchy(manualId, fullText, extractedEntitiesForContext, structure.machines);
   await applyTopLevelOrdering(manualId, hierarchy.topLevelMachines);
 
-  await setManualStatus(manualId, "completed", { processingPass: 7 });
+  await setManualStatus(manualId, "completed", { processingPass: PIPELINE_STAGE.RANK_HIERARCHY, pipelineStageVersion: 2 });
   logger.info(
     { manualId, entities: insertedEntities.length, relationships: relCount, entityChunks, relChunks, resumeFromPass5, resumeFromPass6 },
     "Graph extraction from existing text complete"
@@ -1852,7 +2018,7 @@ export async function repairGraphPasses(manualId: number): Promise<{ relationshi
   if (pages.length === 0) throw new Error(`Manual ${manualId} has no OCR text — run vision OCR first`);
   if (entityCount === 0) throw new Error(`Manual ${manualId} has no extracted entities — run full extraction first`);
 
-  await setManualStatus(manualId, "processing", { processingPass: 4 });
+  await setManualStatus(manualId, "processing", { processingPass: PIPELINE_STAGE.EXTRACT_ENTITIES, pipelineStageVersion: 2 });
   await setActivity(manualId, `Repair — loading ${entityCount} existing entities for relationship + path extraction`);
 
   try {
@@ -1922,7 +2088,7 @@ export async function repairGraphPasses(manualId: number): Promise<{ relationshi
     const hierarchy = await pass6OrderingHierarchy(manualId, fullText, extractedEntitiesForContext, structure.machines);
     await applyTopLevelOrdering(manualId, hierarchy.topLevelMachines);
 
-    await setManualStatus(manualId, "completed", { processingPass: 7 });
+    await setManualStatus(manualId, "completed", { processingPass: PIPELINE_STAGE.RANK_HIERARCHY, pipelineStageVersion: 2 });
     logger.info({ manualId, relationships: relCount, paths: pathCount }, "Repair graph passes complete");
     return { relationships: relCount, paths: pathCount };
   } catch (err) {
@@ -2032,10 +2198,14 @@ export async function runExtractionPipeline(
         .set({ totalPages: pdfContent.totalPages, updatedAt: new Date() })
         .where(eq(manualsTable.id, manualId));
       structure = await pass1DocumentStructure(manualId, pdfContent.fullText, pdfContent.totalPages);
+      const resolvedDocType =
+        structure.contentProfile?.includes("electrical") && structure.documentType === "other"
+          ? "electrical_schematic"
+          : structure.documentType;
       await db
         .update(manualsTable)
         .set({
-          documentType: structure.documentType,
+          documentType: resolvedDocType,
           structure: { overview: structure.overview, machines: structure.machines, sections: structure.sections },
           updatedAt: new Date(),
         })
@@ -2127,30 +2297,38 @@ export async function runExtractionPipeline(
       pdfContent.fullText = pdfContent.pages.map((p) => p.text).join("\n\n");
     }
 
-    // ── Pass 7: RAG chunking ─────────────────────────────────────────────────
+    if (pagesNeedingVisionNums.length > 0) {
+      await updateManualPass(manualId, PIPELINE_STAGE.VISION_INTERPRET);
+    }
+
+    // ── Stage 4: build_chunks ────────────────────────────────────────────────
     // pass7EmbedChunks now skips pages that already have chunks in the DB, so
     // a stall mid-pass resumes from the first un-indexed page.
     // updatePass=false so the progress bar doesn't jump to 100% mid-pipeline.
     await pass7EmbedChunks(manualId, pdfContent.pages, pdfBuffer, { updatePass: false });
 
-    // ── Passes 4 / 5 / 5b / 6: entity, relationship, path, hierarchy ─────────
-    // All extraction passes now run automatically in the same pipeline.
-    // extractGraphFromExistingText reads from manual_pages (already filtered to
-    // the selected page range by passes 2 & 3 above) and runs to completion,
-    // setting status → "completed" when done.
+    // ── Stages 5–8: entity graph (skipped for schematic-heavy manuals) ───────
     await setActivity(manualId, "Text and chunks complete — starting entity & relationship extraction...");
-    await extractGraphFromExistingText(manualId, { startPage: opts?.startPage, endPage: opts?.endPage });
+    const skipGraphStages = await isSchematicHeavyManual(manualId);
+    if (skipGraphStages) {
+      logger.info({ manualId }, "Schematic-heavy manual — skipping graph stages 5–7");
+      await setActivity(manualId, "Schematic-heavy manual — skipping entity/relationship graph (stages 5–7)");
+      await setManualStatus(manualId, "completed", {
+        processingPass: PIPELINE_STAGE.RANK_HIERARCHY,
+        pipelineStageVersion: 2,
+      });
+    } else {
+      await extractGraphFromExistingText(manualId, { startPage: opts?.startPage, endPage: opts?.endPage });
+    }
 
-    // ── Pass 8: Self-Contained Chunk Enrichment ───────────────────────────────
-    // Runs after extraction completes (status is already "completed").
-    // Sets processingPass=8 to signal enrichment is done; status stays completed.
-    await setActivity(manualId, "Pass 8 — enriching chunks with page context and expanding BOM tables...");
+    // ── Stage 9: enrich_chunks ───────────────────────────────────────────────
+    await setActivity(manualId, "enrich_chunks (9/9) — page context and BOM table expansion...");
     const enrichResult = await pass8EnrichChunks(manualId);
     await db
       .update(manualsTable)
-      .set({ processingPass: 8, updatedAt: new Date() })
+      .set({ processingPass: PIPELINE_COMPLETE_STAGE, pipelineStageVersion: 2, updatedAt: new Date() })
       .where(eq(manualsTable.id, manualId));
-    logger.info({ manualId, ...enrichResult }, "Full pipeline complete (Pass 8 done)");
+    logger.info({ manualId, ...enrichResult }, "Full pipeline complete (stage 9 done)");
   } catch (err) {
     logger.error({ err, manualId }, "Extraction pipeline failed");
     await setManualStatus(manualId, "failed", {
@@ -2181,9 +2359,13 @@ If this page contains an electrical wiring diagram or schematic (IEC 60617), ext
 
 PAGE_TYPE: ELECTRICAL_WIRING
 POWER RAILS: voltage levels and AC/DC type.
-LOADS: each load's label, model, and rating.
+LOADS: each load's label, model, and rating (include motor kW/HP if labelled).
 SWITCHING ELEMENTS: relays, contactors, switches — model and coil/contact ratings.
-CIRCUIT TRACES: for each circuit, describe: power source → switching elements → load, with wire colours and terminal numbers where visible.
+RELAY/CONTACTOR CONTACTS: for each relay/contactor (e.g. RL1, KM1): coil circuit, NO/NC contact designations, what each contact feeds (contactor coil, PLC input, lamp, etc.), and energise/de-energise conditions when visible.
+INDICATOR LAMPS (HL): each lamp designation (HL1, HL2, …), function label (e.g. ready, fault, run), and PLC output or relay contact that energises it.
+INTERCONNECT / TERMINAL BLOCKS: terminal strip reference (XT, TB), cable core count, and cross-sheet references where visible.
+CIRCUIT TRACES: for each circuit, describe: power source → switching elements → load, with wire colour and terminal numbers where visible.
+E-STOP / SAFETY: normally-closed E-stop contacts in series, safety relay path, and effect on contactor coils and VFD inhibit when pressed.
 
 If instead the page is a pneumatic/hydraulic schematic (ISO 1219-1/2), extract ACTUATORS, DIRECTIONAL CONTROL VALVES, FLOW CONTROL & CHECK VALVES, PRESSURE/FILTER/REGULATOR, and CIRCUIT FLOW DESCRIPTION.
 
@@ -2808,6 +2990,12 @@ export async function pass8EnrichChunks(
     enriched += pageChunks.length;
   }
 
-  logger.info({ manualId, enriched, stitched, expansions }, "pass8: enrichment complete");
+  logger.info({ manualId, enriched, stitched, expansions }, "enrich_chunks: enrichment complete");
   return { enriched, stitched, expansions };
 }
+
+/** Stage 4 — element-aware RAG chunking (alias for legacy pass7EmbedChunks). */
+export const buildChunks = pass7EmbedChunks;
+
+/** Stage 9 — self-contained chunk enrichment (alias for legacy pass8EnrichChunks). */
+export const enrichChunks = pass8EnrichChunks;

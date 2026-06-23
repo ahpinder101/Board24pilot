@@ -15,6 +15,7 @@ export interface Manual {
   status: ManualStatus;
   /** @nullable */
   processingPass?: number | null;
+  pipelineStageVersion?: number | null;
   /** @nullable */
   totalPages?: number | null;
   /** @nullable */

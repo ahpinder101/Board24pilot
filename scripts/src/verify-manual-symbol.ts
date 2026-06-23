@@ -1,16 +1,19 @@
 /**
- * Verify that a manual's chunks contain a schematic symbol (e.g. RL1).
+ * Verify that a manual's chunks contain schematic symbols and PLC I/O data.
  *
  * Usage:
  *   DATABASE_URL=... pnpm --filter @workspace/scripts run verify:manual-symbol
  *
  * Optional:
  *   VERIFY_MANUAL_PATTERN="P2-049|PP2 049"
- *   VERIFY_SYMBOL=RL1
+ *   VERIFY_SYMBOL=RL1          (single symbol — legacy)
+ *   VERIFY_SYMBOLS=RL1,HL,X0  (comma-separated checklist; default PP2-049 set)
  */
 
 import { db, manualsTable } from "@workspace/db";
 import { ilike, or, sql } from "drizzle-orm";
+
+const DEFAULT_SYMBOLS = ["RL1", "HL", "X0"];
 
 async function resolveManualId(): Promise<{ id: number; name: string } | null> {
   const explicitId = Number(process.env.VERIFY_MANUAL_ID ?? "");
@@ -42,8 +45,60 @@ async function resolveManualId(): Promise<{ id: number; name: string } | null> {
   return matches[0]!;
 }
 
+async function countSymbolHits(manualId: number, symbol: string): Promise<number> {
+  const hits = await db.execute<{ cnt: number }>(sql`
+    SELECT COUNT(*)::int AS cnt
+    FROM chunks c
+    WHERE c.manual_id = ${manualId}
+      AND (
+        c.content ILIKE ${"%" + symbol + "%"}
+        OR COALESCE(c.page_context, '') ILIKE ${"%" + symbol + "%"}
+      )
+  `);
+  return hits.rows[0]?.cnt ?? 0;
+}
+
+async function countPlcIoTableChunks(manualId: number): Promise<number> {
+  const hits = await db.execute<{ cnt: number }>(sql`
+    SELECT COUNT(*)::int AS cnt
+    FROM chunks c
+    WHERE c.manual_id = ${manualId}
+      AND (
+        c.content LIKE ${"%[PLC I/O assignment%"}
+        OR c.content ~* ${"\\m[XYI][0-9]+[.:][0-9]{1,2}\\M"}
+      )
+  `);
+  return hits.rows[0]?.cnt ?? 0;
+}
+
+async function reportPageTypes(manualId: number): Promise<void> {
+  const rows = await db.execute<{ page_type: string | null; cnt: number }>(sql`
+    SELECT page_type, COUNT(*)::int AS cnt
+    FROM manual_pages
+    WHERE manual_id = ${manualId}
+    GROUP BY page_type
+    ORDER BY cnt DESC
+  `);
+
+  console.log("Page type breakdown (manual_pages.page_type):");
+  if (rows.rows.length === 0) {
+    console.log("  (no pages)");
+    return;
+  }
+  for (const row of rows.rows) {
+    const label = row.page_type ?? "(unset)";
+    console.log(`  ${label}: ${row.cnt} page(s)`);
+  }
+  console.log("");
+}
+
 async function main() {
-  const symbol = (process.env.VERIFY_SYMBOL ?? "RL1").toUpperCase();
+  const symbolsEnv = process.env.VERIFY_SYMBOLS ?? process.env.VERIFY_SYMBOL ?? DEFAULT_SYMBOLS.join(",");
+  const symbols = symbolsEnv
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter((s) => s.length > 0);
+
   const manual = await resolveManualId();
 
   if (!manual) {
@@ -52,39 +107,43 @@ async function main() {
   }
 
   console.log(`Manual: [${manual.id}] ${manual.name}`);
-  console.log(`Symbol: ${symbol}`);
+  console.log(`Checking symbols: ${symbols.join(", ")}`);
   console.log("");
 
-  const hits = await db.execute<{
-    page_number: number;
-    chunk_index: number;
-    preview: string;
-  }>(sql`
-    SELECT c.page_number, c.chunk_index, left(c.content, 160) AS preview
-    FROM chunks c
-    WHERE c.manual_id = ${manual.id}
-      AND (
-        c.content ILIKE ${"%" + symbol + "%"}
-        OR COALESCE(c.page_context, '') ILIKE ${"%" + symbol + "%"}
-      )
-    ORDER BY c.page_number, c.chunk_index
-    LIMIT 20
-  `);
+  await reportPageTypes(manual.id);
 
-  if (hits.rows.length === 0) {
-    console.log(`No chunks contain "${symbol}".`);
-    console.log("");
+  let failures = 0;
+
+  for (const symbol of symbols) {
+    const count = await countSymbolHits(manual.id, symbol);
+    if (count === 0) {
+      console.log(`  FAIL  ${symbol} — not found in chunks`);
+      failures++;
+    } else {
+      console.log(`  OK    ${symbol} — ${count} chunk reference(s)`);
+    }
+  }
+
+  const plcCount = await countPlcIoTableChunks(manual.id);
+  if (plcCount === 0) {
+    console.log(`  FAIL  PLC I/O — no I/O table rows or tagged chunks`);
+    failures++;
+  } else {
+    console.log(`  OK    PLC I/O — ${plcCount} chunk(s) with addresses or I/O tag`);
+  }
+
+  console.log("");
+
+  if (failures > 0) {
     console.log("Next steps on Replit:");
     console.log(`  1. git pull origin main`);
     console.log(`  2. POST /api/manuals/${manual.id}/repair-diagram-pages`);
     console.log(`     (or POST /api/manuals/${manual.id}/reprocess-vision for full OCR)`);
+    console.log(`  3. Re-run: VERIFY_MANUAL_PATTERN="${process.env.VERIFY_MANUAL_PATTERN ?? "P2-049|PP2 049"}" pnpm verify:manual-symbol`);
     process.exit(1);
   }
 
-  console.log(`Found ${hits.rows.length} chunk(s) referencing ${symbol}:`);
-  for (const row of hits.rows) {
-    console.log(`  page ${row.page_number}, chunk ${row.chunk_index}: ${row.preview.replace(/\s+/g, " ").slice(0, 120)}...`);
-  }
+  console.log("All PP2-049 feeder verification checks passed.");
 }
 
 main().catch((err) => {

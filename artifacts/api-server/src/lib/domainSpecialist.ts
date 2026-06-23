@@ -234,6 +234,75 @@ export function getDomainPolicy(domain: TechnicalDomain): DomainSpecialistPolicy
   return DOMAIN_POLICIES[domain];
 }
 
+const PARTIAL_CIRCUIT_QUESTION_RE =
+  /\b(function of|what conditions cause|what happens when|describe the .* path|e[-\s]?stop|emergency stop|energise|energize|relay|contactor|indicator lamp|\bHL\d+)\b/i;
+
+const FAULT_DIAGNOSIS_QUESTION_RE =
+  /\b(stopped|not working|check first|in what order|list the (?:components|parts)|diagnos|troubleshoot|no fault|has tripped)\b/i;
+
+/** Symbol-targeted or circuit-topology questions tolerate incomplete stage coverage (Q2, Q8). */
+export function isPartialCircuitQuestion(question: string): boolean {
+  return (
+    containsDomainIdentifier(question) ||
+    PARTIAL_CIRCUIT_QUESTION_RE.test(question)
+  );
+}
+
+export function isFaultDiagnosisQuestion(question: string): boolean {
+  return FAULT_DIAGNOSIS_QUESTION_RE.test(question);
+}
+
+/** Adjust required stages for question shape — keeps engineering_strict for numeric claims. */
+export function getEffectiveDomainPolicy(
+  domain: TechnicalDomain,
+  question: string,
+): DomainSpecialistPolicy {
+  const base = getDomainPolicy(domain);
+
+  if (domain === "electrical_control" && isFaultDiagnosisQuestion(question)) {
+    return {
+      ...base,
+      requiredStages: ["symptom identified", "diagnostic sequence"],
+      optionalStages: [
+        ...base.optionalStages,
+        "supply source",
+        "control path",
+        "coil or actuator energised",
+        "load identified",
+        "return path",
+      ],
+    };
+  }
+
+  if (domain === "electrical_control" && isPartialCircuitQuestion(question)) {
+    return {
+      ...base,
+      requiredStages: ["control path", "coil or actuator energised"],
+      optionalStages: [
+        ...base.optionalStages,
+        "supply source",
+        "load identified",
+        "return path",
+        "holding or interlock path",
+      ],
+    };
+  }
+
+  return base;
+}
+
+/** True when specialist missing_items are all optional-stage labels for this policy. */
+export function missingOnlyOptionalStages(
+  policy: DomainSpecialistPolicy,
+  missingItems: string[],
+): boolean {
+  if (missingItems.length === 0) return false;
+  const optional = new Set(policy.optionalStages.map((s) => s.toLowerCase()));
+  return missingItems.every((item) =>
+    [...optional].some((opt) => item.toLowerCase().includes(opt)),
+  );
+}
+
 export function containsDomainIdentifier(text: string): boolean {
   return DOMAIN_IDENTIFIER_PATTERNS.some((pattern) => pattern.test(text));
 }
@@ -287,7 +356,7 @@ export function detectDomain(question: string, ragContext: string): TechnicalDom
 export async function runDomainSpecialist(
   input: DomainSpecialistInput
 ): Promise<DomainSpecialistResult> {
-  const policy = getDomainPolicy(input.domain);
+  const policy = getEffectiveDomainPolicy(input.domain, input.question);
   const hasEvidence = input.evidence.chunksFound > 0 || input.evidence.entitiesFound > 0;
   const hasValidQuote = !!input.quote && input.quote.toUpperCase() !== "NOT IN EXCERPTS";
 

@@ -55,6 +55,8 @@ function FailedResetButton({ manualId, onReset }: { manualId: number; onReset: (
 
 // ─── Live processing ticker ─────────────────────────────────────────────────
 
+import { formatStageProgress, stageProgressPercent } from "@/lib/pipelineStages";
+
 const STALL_SECONDS = 90;
 
 function ProcessingTicker({
@@ -62,7 +64,7 @@ function ProcessingTicker({
   manualId,
   onReset,
 }: {
-  manual: { processingPass?: number | null; currentActivity?: string | null; updatedAt: string };
+  manual: { processingPass?: number | null; pipelineStageVersion?: number | null; currentActivity?: string | null; updatedAt: string; status?: string };
   manualId: number;
   onReset: () => void;
 }) {
@@ -102,10 +104,10 @@ function ProcessingTicker({
   }
 
   const pass = manual.processingPass ?? 0;
+  const stageVersion = manual.pipelineStageVersion ?? 1;
   const activity = manual.currentActivity ?? "Initialising...";
 
-  const PASS_PROGRESS: Record<number, number> = { 0: 5, 1: 15, 2: 28, 3: 40, 4: 58, 5: 72, 6: 86 };
-  const progressPct = PASS_PROGRESS[pass] ?? (pass >= 7 ? 100 : 5);
+  const progressPct = stageProgressPercent(pass, stageVersion, manual.status);
 
   return (
     <Card className="h-full flex items-center justify-center bg-card/50 border-dashed">
@@ -137,7 +139,7 @@ function ProcessingTicker({
             {isStalled ? "Processing appears stalled" : "Processing Manual"}
           </h3>
           <p className="text-sm text-muted-foreground font-mono mt-0.5">
-            Pass {pass} · all passes run automatically
+            {formatStageProgress(pass, stageVersion, manual.status)} · pipeline runs automatically
           </p>
         </div>
 

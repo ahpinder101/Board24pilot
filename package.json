@@ -12,6 +12,7 @@
     "db:push": "sh ./scripts/db-push.sh",
     "benchmark:agent-chat": "corepack pnpm --filter @workspace/scripts run benchmark:agent-chat",
     "verify:manual-symbol": "corepack pnpm --filter @workspace/scripts run verify:manual-symbol",
+    "validate:pp2-049": "bash scripts/validate-pp2-049.sh",
     "sync:status": "sh ./scripts/sync-status.sh",
     "sync:publish": "sh ./scripts/sync-publish.sh",
     "build": "corepack pnpm run typecheck && corepack pnpm -r --if-present run build",

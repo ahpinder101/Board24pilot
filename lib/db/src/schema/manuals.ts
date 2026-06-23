@@ -15,6 +15,8 @@ export const manualsTable = pgTable("manuals", {
   objectPath: text("object_path").notNull(),
   status: text("status").notNull().default("pending"), // pending | processing | completed | failed
   processingPass: integer("processing_pass"),
+  /** 1 = legacy pass numbering; 2 = stages 0–9 (execution order). */
+  pipelineStageVersion: integer("pipeline_stage_version").notNull().default(1),
   totalPages: integer("total_pages"),
   documentType: text("document_type"),
   structure: jsonb("structure").$type<{ overview: string; machines: string[]; sections: string[] }>(),
@@ -48,6 +50,8 @@ export const manualPagesTable = pgTable("manual_pages", {
   // page 16 of a manual whose first 9 pages are cover/TOC). Populated by Docling extraction;
   // NULL for manuals processed before Docling was integrated.
   printedPageNumber: text("printed_page_number"),
+  /** Vision-classified page type (e.g. ELECTRICAL_WIRING, PLC_IO_TABLE). */
+  pageType: text("page_type"),
   /** Number of picture/diagram elements on this page (from Docling). Null for pdf-parse fallback. */
   pictureCount: integer("picture_count").default(0),
   /** Pipe-separated captions of picture elements on this page (from Docling), if any. */

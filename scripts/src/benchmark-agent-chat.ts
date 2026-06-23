@@ -19,6 +19,7 @@ type BenchmarkQuestion = {
   id: string;
   question: string;
   expectedMode: "exact" | "partial" | "guided";
+  retrievalMode?: "fact_lookup" | "process_trace" | "troubleshooting_flow" | "relationship_trace";
 };
 
 type AgentChatResponse = {
@@ -53,6 +54,7 @@ const QUESTIONS: BenchmarkQuestion[] = [
     id: "Q3",
     question: "The feeder unit has stopped feeding sheets and the HMI shows no fault. List the electrical components you would check first and in what order.",
     expectedMode: "partial",
+    retrievalMode: "troubleshooting_flow",
   },
   {
     id: "Q4",
@@ -78,6 +80,7 @@ const QUESTIONS: BenchmarkQuestion[] = [
     id: "Q8",
     question: "Describe the E-stop circuit path through the feeder unit. What happens to the feeder drive contactor when E-stop is pressed?",
     expectedMode: "partial",
+    retrievalMode: "relationship_trace",
   },
   {
     id: "Q9",
@@ -159,7 +162,7 @@ async function main() {
         question: benchmark.question,
         domain: "electrical_control",
         strictness: "engineering_strict",
-        retrievalMode: "fact_lookup",
+        retrievalMode: benchmark.retrievalMode ?? "fact_lookup",
         manualId: manualId ?? undefined,
         sessionId: `${sessionPrefix}-${index + 1}`,
       }),
