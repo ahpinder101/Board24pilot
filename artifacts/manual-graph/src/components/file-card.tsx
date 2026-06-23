@@ -153,6 +153,8 @@ function CompletedSection({
     disclaimer: string;
   } | null>(null);
   const [extractionSummary, setExtractionSummary] = useState<{
+    physicalPages: number;
+    storedPages: number;
     pagesWithDoclingElements: number;
     pagesAutoEscalatedToVision: number;
   } | null>(null);
@@ -175,7 +177,14 @@ function CompletedSection({
         ]);
         if (!cancelled && costRes.ok) setCostEstimate(await costRes.json());
         if (!cancelled && manualRes.ok) {
-          const data = await manualRes.json() as { extractionSummary?: { pagesWithDoclingElements: number; pagesAutoEscalatedToVision: number } };
+          const data = await manualRes.json() as {
+            extractionSummary?: {
+              physicalPages: number;
+              storedPages: number;
+              pagesWithDoclingElements: number;
+              pagesAutoEscalatedToVision: number;
+            }
+          };
           if (data.extractionSummary) setExtractionSummary(data.extractionSummary);
         }
       } catch { /* ignore */ }
@@ -299,26 +308,31 @@ function CompletedSection({
       )}
 
       {/* Page coverage bar */}
-      {extractionSummary && totalPages > 0 && (() => {
+      {extractionSummary && extractionSummary.physicalPages > 0 && (() => {
+        const physical = extractionSummary.physicalPages;
+        const stored = extractionSummary.storedPages;
         const docling = extractionSummary.pagesWithDoclingElements;
         const vision = extractionSummary.pagesAutoEscalatedToVision;
-        const extracted = docling + vision;
-        const skipped = Math.max(0, totalPages - extracted);
-        const doclingPct = (docling / totalPages) * 100;
-        const visionPct = (vision / totalPages) * 100;
-        const skippedPct = (skipped / totalPages) * 100;
+        const hasBreakdown = docling + vision > 0;
+        const skipped = Math.max(0, physical - stored);
+        // When breakdown flags aren't set (legacy rows), show stored as one block
+        const doclingPct = hasBreakdown ? (docling / physical) * 100 : (stored / physical) * 100;
+        const visionPct = hasBreakdown ? (vision / physical) * 100 : 0;
+        const skippedPct = (skipped / physical) * 100;
         return (
           <div className="space-y-1">
             <div className="flex items-center justify-between text-[11px] text-gray-500">
               <span className="font-medium">Page coverage</span>
               <span className="font-mono">
-                {extracted} / {totalPages} extracted
+                {stored} / {physical} extracted
                 {skipped > 0 && <span className="text-red-400 ml-1">· {skipped} skipped</span>}
               </span>
             </div>
             <div
               className="h-2 w-full rounded-full overflow-hidden flex bg-gray-100"
-              title={`Docling: ${docling} · Vision OCR: ${vision} · Skipped (CAD only): ${skipped}`}
+              title={hasBreakdown
+                ? `Docling: ${docling} · Vision OCR: ${vision} · Skipped (CAD only): ${skipped}`
+                : `Extracted: ${stored} · Skipped (CAD only): ${skipped}`}
             >
               {doclingPct > 0 && (
                 <div className="h-full bg-green-400 transition-all" style={{ width: `${doclingPct}%` }} />
@@ -331,8 +345,14 @@ function CompletedSection({
               )}
             </div>
             <div className="flex items-center gap-3 text-[10px] text-gray-400">
-              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-green-400 inline-block" />Docling ({docling})</span>
-              {vision > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Vision OCR ({vision})</span>}
+              {hasBreakdown ? (
+                <>
+                  <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-green-400 inline-block" />Docling ({docling})</span>
+                  {vision > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Vision OCR ({vision})</span>}
+                </>
+              ) : (
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-green-400 inline-block" />Extracted ({stored})</span>
+              )}
               {skipped > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-200 inline-block" />Skipped ({skipped})</span>}
             </div>
           </div>
