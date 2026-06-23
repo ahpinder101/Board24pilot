@@ -218,8 +218,15 @@ async def extract_pdf(file: UploadFile = File(...)):
 
         pages = sorted(pages_map.values(), key=lambda p: p["pageNumber"])
 
+        # Use the actual physical page count from the Docling document model.
+        # len(pages) only counts pages that had extractable text/table/picture
+        # elements — purely image-based or blank pages are skipped by
+        # iterate_items() and never added to pages_map, so they'd be undercounted.
+        # doc.pages is populated for every physical page in the PDF.
+        physical_page_count = len(doc.pages) if doc.pages else len(pages)
+
         return JSONResponse(
-            {"pages": pages, "fullText": doc.export_to_text(), "totalPages": len(pages)}
+            {"pages": pages, "fullText": doc.export_to_text(), "totalPages": physical_page_count}
         )
 
     except Exception as exc:
