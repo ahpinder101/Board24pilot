@@ -269,6 +269,90 @@ function buildEvidenceSummary(
   };
 }
 
+function parsePinnedManualId(raw: unknown): number | null {
+  const id = typeof raw === "number" ? raw : Number(raw);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function filterChunksToManualIds(chunks: ChunkRow[], manualIds: number[]): ChunkRow[] {
+  if (manualIds.length === 0) return chunks;
+  const allowed = new Set(manualIds);
+  return chunks.filter((c) => allowed.has(c.manual_id));
+}
+
+async function fetchElectricalSymbolChunks(
+  scopedManualArray: string,
+  symbols: string[],
+  question: string,
+): Promise<ChunkRow[]> {
+  if (symbols.length === 0) return [];
+
+  const symbolConditions = symbols.map((symbol) =>
+    sql`(c.content ILIKE ${"%" + symbol + "%"} OR COALESCE(c.page_context, '') ILIKE ${"%" + symbol + "%"})`
+  );
+  const symbolHits = await db.execute<ChunkRow>(sql`
+    SELECT c.id, c.manual_id, m.name AS manual_name,
+           c.page_number, c.chunk_index, c.content,
+           c.section_path, c.element_type, c.page_context,
+           (
+             CASE WHEN c.element_type = 'table' THEN 0.35 ELSE 0 END +
+             CASE WHEN c.page_context IS NOT NULL THEN 0.15 ELSE 0 END +
+             CASE WHEN ${containsDomainIdentifier(question)} THEN 0.1 ELSE 0 END
+           )::float AS rank
+    FROM chunks c JOIN manuals m ON m.id = c.manual_id
+    WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+      AND (${sql.join(symbolConditions, sql` OR `)})
+    ORDER BY rank DESC, c.page_number, c.chunk_index
+    LIMIT 20
+  `);
+
+  if (symbolHits.rows.length === 0) return [];
+
+  const merged = [...symbolHits.rows];
+  const existingIds = new Set(merged.map((row) => row.id));
+  const pageKeys = new Set<string>();
+  const pageContextValues = new Set<string>();
+  for (const row of symbolHits.rows) {
+    pageKeys.add(`${row.manual_id}:${row.page_number}`);
+    if (row.page_context) pageContextValues.add(row.page_context);
+  }
+
+  if (pageKeys.size > 0 || pageContextValues.size > 0) {
+    const pageClauses = [...pageKeys].map((key) => {
+      const [mid, pg] = key.split(":").map(Number);
+      return sql`(c.manual_id = ${mid} AND c.page_number = ${pg})`;
+    });
+    const pageContextClauses = [...pageContextValues].map((pageContext) =>
+      sql`c.page_context = ${pageContext}`
+    );
+    const expansionClauses = [...pageClauses, ...pageContextClauses];
+    if (expansionClauses.length > 0) {
+      const expandedHits = await db.execute<ChunkRow>(sql`
+        SELECT c.id, c.manual_id, m.name AS manual_name,
+               c.page_number, c.chunk_index, c.content,
+               c.section_path, c.element_type, c.page_context,
+               (
+                 CASE WHEN c.element_type = 'table' THEN 0.2 ELSE 0 END +
+                 CASE WHEN c.page_context IS NOT NULL THEN 0.05 ELSE 0 END
+               )::float AS rank
+        FROM chunks c JOIN manuals m ON m.id = c.manual_id
+        WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+          AND (${sql.join(expansionClauses, sql` OR `)})
+        ORDER BY c.page_number, c.chunk_index
+        LIMIT 40
+      `);
+      for (const row of expandedHits.rows) {
+        if (!existingIds.has(row.id)) {
+          merged.push(row);
+          existingIds.add(row.id);
+        }
+      }
+    }
+  }
+
+  return merged;
+}
+
 function buildRagContext(chunks: ChunkRow[], printedPgMap: Map<string, string>): string {
   if (chunks.length === 0) return "No relevant manual excerpts found.";
   return chunks
@@ -339,7 +423,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     fromPage?: number;
     toPage?: number;
     minConfidence?: string;
-    manualId?: number;
+    manualId?: number | string;
   };
 
   if (!question || typeof question !== "string" || question.trim().length === 0) {
@@ -416,6 +500,14 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     const topK = isProceduralQuery ? TOP_K_PROCEDURAL : TOP_K_CHUNKS;
     const topKScoped = isProceduralQuery ? TOP_K_PROCEDURAL * 2 : TOP_K_SCOPED;
 
+    const pinnedManualId = parsePinnedManualId(requestedManualId);
+    const manualScopeSql =
+      pinnedManualId !== null ? sql`AND c.manual_id = ${pinnedManualId}` : sql``;
+
+    if (pinnedManualId !== null) {
+      req.log.info({ pinnedManualId }, "agent-chat: manual scope pinned");
+    }
+
     // ── 1. FTS retrieval ─────────────────────────────────────────────────────
     const searchTerms = searchText
       .replace(/[^a-zA-Z0-9 ]/g, " ")
@@ -440,6 +532,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
             ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
+            ${manualScopeSql}
           ORDER BY rank DESC
           LIMIT 50
         ) ranked
@@ -458,6 +551,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
                  ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
+            ${manualScopeSql}
           ORDER BY rank DESC
           LIMIT ${topK}
         `);
@@ -509,6 +603,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
                  COUNT(*) OVER () AS total_matches
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ phraseto_tsquery('english', ${text})
+            ${manualScopeSql}
           ORDER BY rank DESC
           LIMIT 6
         `);
@@ -554,6 +649,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
                  ts_rank(c.fts_vector, to_tsquery('english', ${andQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${andQuery})
+            ${manualScopeSql}
           ORDER BY rank DESC
           LIMIT 5
         `);
@@ -571,7 +667,8 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         SELECT c.id, c.manual_id, m.name AS manual_name,
                c.page_number, c.chunk_index, c.content, 0::float AS rank
         FROM chunks c JOIN manuals m ON m.id = c.manual_id
-        ORDER BY c.manual_id DESC, c.page_number ASC
+        WHERE 1=1 ${manualScopeSql}
+        ORDER BY c.page_number ASC, c.chunk_index ASC
         LIMIT ${topK}
       `);
       ragChunks = fallback.rows;
@@ -581,13 +678,14 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     const identifierTokens = extractIdentifierTokens(searchText);
     if (identifierTokens.length > 0) {
       const ilikeConditions = identifierTokens.map(
-        (tok) => sql`c.content ILIKE ${"%" + tok + "%"}`
+        (tok) => sql`(c.content ILIKE ${"%" + tok + "%"} OR COALESCE(c.page_context, '') ILIKE ${"%" + tok + "%"})`
       );
       const identResult = await db.execute<ChunkRow>(sql`
         SELECT c.id, c.manual_id, m.name AS manual_name,
                c.page_number, c.chunk_index, c.content, 0.3::float AS rank
         FROM chunks c JOIN manuals m ON m.id = c.manual_id
-        WHERE ${sql.join(ilikeConditions, sql` OR `)}
+        WHERE (${sql.join(ilikeConditions, sql` OR `)})
+          ${manualScopeSql}
         LIMIT ${topK}
       `);
       const existing = new Set(ragChunks.map((c) => c.id));
@@ -629,9 +727,6 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
 
     // ── 2b. Domain classification ────────────────────────────────────────────
     // If the caller pinned a specific manual, bypass classifyDomain entirely.
-    const pinnedManualId = typeof requestedManualId === "number" && requestedManualId > 0
-      ? requestedManualId
-      : null;
     const scopedManualIds = pinnedManualId
       ? [pinnedManualId]
       : classifyDomain(searchText, allManuals, ragChunks, machineEntities);
@@ -752,6 +847,44 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
           for (const row of crossPageResult.rows) {
             if (!existingIds3.has(row.id)) { ragChunks.push(row); existingIds3.add(row.id); }
           }
+        }
+      }
+    }
+
+    // ── 2c-b. Early electrical symbol retrieval (pinned manual) ─────────────
+    // Fetch schematic symbol pages before scratchpad when the user pinned a manual
+    // and the question names a relay/contactor-style designation (e.g. RL1).
+    if (pinnedManualId !== null) {
+      const earlySymbols = extractElectricalSymbols(trimmedQuestion);
+      if (earlySymbols.length > 0) {
+        try {
+          const symbolChunks = await fetchElectricalSymbolChunks(
+            scopedManualArray,
+            earlySymbols,
+            trimmedQuestion,
+          );
+          if (symbolChunks.length > 0) {
+            const existingIds = new Set(ragChunks.map((c) => c.id));
+            let added = 0;
+            for (const row of symbolChunks) {
+              if (!existingIds.has(row.id)) {
+                ragChunks.push(row);
+                existingIds.add(row.id);
+                added++;
+              }
+            }
+            if (added > 0) {
+              ragChunks.sort((a, b) =>
+                b.rank - a.rank || a.page_number - b.page_number || a.chunk_index - b.chunk_index
+              );
+              req.log.info(
+                { pinnedManualId, earlySymbols, symbolChunksAdded: added },
+                "agent-chat: early symbol retrieval added chunks"
+              );
+            }
+          }
+        } catch (earlySymbolErr) {
+          req.log.warn({ err: earlySymbolErr }, "agent-chat: early symbol retrieval failed — continuing");
         }
       }
     }
@@ -1328,10 +1461,8 @@ Analyse the evidence and output your scratchpad JSON.`;
     // termExpansions: genuine engineering-vocabulary alternatives for the user's
     // phrasing (e.g. "inner hex bolt" → ["HEX BOLT NUT", "HEX CAP SCREW", …]).
     // Fan those terms out through FTS and merge any new chunks before the answer
-    // pass. When evidenceQuality is "none" (initial retrieval hit the wrong
-    // manual or nothing at all) we search ALL manuals so the scope mis-match
-    // cannot hide the answer. If expansion finds chunks and the scratchpad had
-    // decided "cannot_answer", we override to "answer" so those chunks are used.
+    // pass. When evidenceQuality is "none" and no manual is pinned, search ALL
+    // manuals so a wrong-manual classification cannot hide the answer.
     let domainRetrievalMetadata: DomainRetrievalMetadata = {
       detectedSymbols: [],
       retrievalLane: "none",
@@ -1349,11 +1480,13 @@ Analyse the evidence and output your scratchpad JSON.`;
         .slice(0, 30);
       const expansionTsQuery = expansionTerms.join(" | ");
 
-      // When there's no evidence at all the original scope is unreliable —
-      // search all manuals so a wrong-manual classification can't block the hit.
-      const expansionScope = scratchpad.evidenceQuality === "none"
-        ? `{${allManuals.map((m) => m.id).join(",")}}`
-        : scopedManualArray;
+      // Respect manual pin: never broaden to all manuals when the caller scoped retrieval.
+      const expansionScope =
+        pinnedManualId !== null
+          ? scopedManualArray
+          : scratchpad.evidenceQuality === "none"
+            ? `{${allManuals.map((m) => m.id).join(",")}}`
+            : scopedManualArray;
 
       if (expansionTsQuery.length > 0 && expansionScope !== "{}") {
         try {
@@ -1411,75 +1544,19 @@ Analyse the evidence and output your scratchpad JSON.`;
       if (electricalSymbols.length > 0) {
         try {
           const policy = getDomainPolicy(scratchpad.domain);
-          const symbolConditions = electricalSymbols.map((symbol) =>
-            sql`(c.content ILIKE ${"%" + symbol + "%"} OR COALESCE(c.page_context, '') ILIKE ${"%" + symbol + "%"})`
+          const symbolChunks = await fetchElectricalSymbolChunks(
+            scopedManualArray,
+            electricalSymbols,
+            trimmedQuestion,
           );
-          const symbolHits = await db.execute<ChunkRow>(sql`
-            SELECT c.id, c.manual_id, m.name AS manual_name,
-                   c.page_number, c.chunk_index, c.content,
-                   c.section_path, c.element_type, c.page_context,
-                   (
-                     CASE WHEN c.element_type = 'table' THEN 0.35 ELSE 0 END +
-                     CASE WHEN c.page_context IS NOT NULL THEN 0.15 ELSE 0 END +
-                     CASE WHEN ${containsDomainIdentifier(trimmedQuestion)} THEN 0.1 ELSE 0 END
-                   )::float AS rank
-            FROM chunks c JOIN manuals m ON m.id = c.manual_id
-            WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
-              AND (${sql.join(symbolConditions, sql` OR `)})
-            ORDER BY rank DESC, c.page_number, c.chunk_index
-            LIMIT 20
-          `);
 
-          if (symbolHits.rows.length > 0) {
+          if (symbolChunks.length > 0) {
             domainRetrievalMetadata.retrievalLane = "electrical_control";
             domainRetrievalMetadata.rescueStageUsed = "symbol_hit";
-            domainRetrievalMetadata.relevantChunkIds = symbolHits.rows.map((row) => row.id);
+            domainRetrievalMetadata.relevantChunkIds = symbolChunks.map((row) => row.id);
 
             const existingIds = new Set(ragChunks.map((c) => c.id));
-            const newDomainChunks: ChunkRow[] = [];
-            const pageKeys = new Set<string>();
-            const pageContextValues = new Set<string>();
-            for (const row of symbolHits.rows) {
-              if (!existingIds.has(row.id)) {
-                newDomainChunks.push(row);
-                existingIds.add(row.id);
-              }
-              pageKeys.add(`${row.manual_id}:${row.page_number}`);
-              if (row.page_context) pageContextValues.add(row.page_context);
-            }
-
-            if (pageKeys.size > 0 || pageContextValues.size > 0) {
-              const pageClauses = [...pageKeys].map((key) => {
-                const [mid, pg] = key.split(":").map(Number);
-                return sql`(c.manual_id = ${mid} AND c.page_number = ${pg})`;
-              });
-              const pageContextClauses = [...pageContextValues].map((pageContext) =>
-                sql`c.page_context = ${pageContext}`
-              );
-              const expansionClauses = [...pageClauses, ...pageContextClauses];
-              if (expansionClauses.length > 0) {
-                const expandedHits = await db.execute<ChunkRow>(sql`
-                  SELECT c.id, c.manual_id, m.name AS manual_name,
-                         c.page_number, c.chunk_index, c.content,
-                         c.section_path, c.element_type, c.page_context,
-                         (
-                           CASE WHEN c.element_type = 'table' THEN 0.2 ELSE 0 END +
-                           CASE WHEN c.page_context IS NOT NULL THEN 0.05 ELSE 0 END
-                         )::float AS rank
-                  FROM chunks c JOIN manuals m ON m.id = c.manual_id
-                  WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
-                    AND (${sql.join(expansionClauses, sql` OR `)})
-                  ORDER BY c.page_number, c.chunk_index
-                  LIMIT 40
-                `);
-                for (const row of expandedHits.rows) {
-                  if (!existingIds.has(row.id)) {
-                    newDomainChunks.push(row);
-                    existingIds.add(row.id);
-                  }
-                }
-              }
-            }
+            const newDomainChunks = symbolChunks.filter((row) => !existingIds.has(row.id));
 
             if (newDomainChunks.length > 0) {
               ragChunks.push(...newDomainChunks);
@@ -1502,6 +1579,11 @@ Analyse the evidence and output your scratchpad JSON.`;
           req.log.warn({ err: domainErr }, "agent-chat: domain-aware retrieval failed — continuing");
         }
       }
+    }
+
+    ragChunks = filterChunksToManualIds(ragChunks, scopedManualIds);
+    if (pinnedManualId !== null && ragChunks.length > 0) {
+      ragContext = buildRagContext(ragChunks, printedPgMap);
     }
 
     evidenceSummary = buildEvidenceSummary(ragChunks, graphEntities, graphPaths);
