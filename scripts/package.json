@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
+    "backfill-pass8": "tsx ./src/backfill-pass8.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
@@ -12,6 +13,8 @@
     "tsx": "catalog:"
   },
   "dependencies": {
+    "@workspace/db": "workspace:*",
+    "drizzle-orm": "catalog:",
     "openai": "^6.42.0",
     "pg": "^8.20.0"
   }
