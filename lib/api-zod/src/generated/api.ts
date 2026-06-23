@@ -25,7 +25,8 @@ export const SendChatMessageResponse = zod.object({
   "pageNumber": zod.number().optional(),
   "excerpt": zod.string(),
   "entityNames": zod.array(zod.string()).optional(),
-  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback')
+  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback'),
+  "pageContext": zod.string().optional().describe('Pass 8 page context — drawing number, spec sheet name, or section title (e.g. \"PP2 049 Feed Section Schematics — ORDER SPEC SHEET\")')
 })),
   "sessionId": zod.string(),
   "graphEntities": zod.array(zod.string()).optional()
@@ -55,7 +56,8 @@ export const SendAgentChatMessageResponse = zod.object({
   "pageNumber": zod.number().optional(),
   "excerpt": zod.string(),
   "entityNames": zod.array(zod.string()).optional(),
-  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback')
+  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback'),
+  "pageContext": zod.string().optional().describe('Pass 8 page context — drawing number, spec sheet name, or section title (e.g. \"PP2 049 Feed Section Schematics — ORDER SPEC SHEET\")')
 })),
   "sessionId": zod.string(),
   "graphEntities": zod.array(zod.string()).optional(),
@@ -110,7 +112,8 @@ export const GetChatHistoryResponseItem = zod.object({
   "pageNumber": zod.number().optional(),
   "excerpt": zod.string(),
   "entityNames": zod.array(zod.string()).optional(),
-  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback')
+  "citationQuality": zod.enum(['strong', 'partial', 'weak', 'unverified']).optional().describe('How strongly this citation supports the answer — strong=phrase\/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback'),
+  "pageContext": zod.string().optional().describe('Pass 8 page context — drawing number, spec sheet name, or section title (e.g. \"PP2 049 Feed Section Schematics — ORDER SPEC SHEET\")')
 })).optional(),
   "createdAt": zod.string()
 })

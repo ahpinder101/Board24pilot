@@ -15,4 +15,6 @@ export interface ChatCitation {
   entityNames?: string[];
   /** How strongly this citation supports the answer — strong=phrase/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback */
   citationQuality?: ChatCitationCitationQuality;
+  /** Pass 8 page context — drawing number, spec sheet name, or section title (e.g. "PP2 049 Feed Section Schematics — ORDER SPEC SHEET") */
+  pageContext?: string;
 }

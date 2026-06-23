@@ -679,6 +679,9 @@ components:
           type: string
           enum: [strong, partial, weak, unverified]
           description: How strongly this citation supports the answer — strong=phrase/quote match, partial=AND-query match, weak=keyword-only, unverified=fallback
+        pageContext:
+          type: string
+          description: Pass 8 page context — drawing number, spec sheet name, or section title (e.g. "PP2 049 Feed Section Schematics — ORDER SPEC SHEET")
 
     ChatRequest:
       type: object

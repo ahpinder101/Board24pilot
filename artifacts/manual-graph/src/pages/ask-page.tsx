@@ -46,6 +46,7 @@ interface Citation {
   excerpt: string;
   entityNames?: string[];
   citationQuality?: "strong" | "partial" | "weak" | "unverified";
+  pageContext?: string;
 }
 
 type ConfidenceLevel = "high" | "medium" | "low" | "unverified";
@@ -403,6 +404,11 @@ function CitationChip({ citation, index }: { citation: Citation; index: number }
           )}
           <ExternalLink className="w-2.5 h-2.5 text-gray-300 group-hover:text-blue-400 shrink-0 ml-auto" />
         </div>
+        {citation.pageContext && (
+          <p className="text-[10px] text-blue-600 mt-0.5 font-medium truncate" title={citation.pageContext}>
+            {citation.pageContext}
+          </p>
+        )}
         <p className="text-[11px] text-gray-400 mt-0.5 line-clamp-2 leading-relaxed">{citation.excerpt}</p>
       </div>
     </button>

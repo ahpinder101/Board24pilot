@@ -189,6 +189,8 @@ type ChunkRow = {
   // Optional so all queries (including window-expansion ones) work without change.
   section_path?: string | null;
   element_type?: string | null;
+  /** Pass 8 page context — drawing/spec sheet name for this chunk. */
+  page_context?: string | null;
 };
 
 type EntityRow = {
@@ -329,7 +331,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
           SELECT
             c.id, c.manual_id, m.name AS manual_name,
             c.page_number, c.chunk_index, c.content,
-            c.section_path, c.element_type,
+            c.section_path, c.element_type, c.page_context,
             ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
@@ -347,7 +349,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         const fallback = await db.execute<ChunkRow>(sql`
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
-                 c.section_path, c.element_type,
+                 c.section_path, c.element_type, c.page_context,
                  ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
@@ -397,7 +399,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         const r = await db.execute<PhraseRow>(sql`
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
-                 c.section_path, c.element_type,
+                 c.section_path, c.element_type, c.page_context,
                  ts_rank(c.fts_vector, phraseto_tsquery('english', ${text})) AS rank,
                  COUNT(*) OVER () AS total_matches
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
@@ -443,7 +445,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         const andResult = await db.execute<ChunkRow>(sql`
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
-                 c.section_path, c.element_type,
+                 c.section_path, c.element_type, c.page_context,
                  ts_rank(c.fts_vector, to_tsquery('english', ${andQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${andQuery})
@@ -534,7 +536,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
         SELECT * FROM (
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
-                 c.section_path, c.element_type,
+                 c.section_path, c.element_type, c.page_context,
                  ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
@@ -1086,7 +1088,7 @@ Analyse the evidence and output your scratchpad JSON.`;
         const sectionFts = await db.execute<ChunkRow>(sql`
           SELECT c.id, c.manual_id, m.name AS manual_name,
                  c.page_number, c.chunk_index, c.content,
-                 c.section_path, c.element_type,
+                 c.section_path, c.element_type, c.page_context,
                  0.05::float AS rank
           FROM chunks c JOIN manuals m ON m.id = c.manual_id
           WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
@@ -1160,7 +1162,7 @@ Analyse the evidence and output your scratchpad JSON.`;
           const gapFts = await db.execute<ChunkRow>(sql`
             SELECT c.id, c.manual_id, m.name AS manual_name,
                    c.page_number, c.chunk_index, c.content,
-                   c.section_path, c.element_type,
+                   c.section_path, c.element_type, c.page_context,
                    ts_rank(c.fts_vector, to_tsquery('english', ${gapTsQuery})) AS rank
             FROM chunks c JOIN manuals m ON m.id = c.manual_id
             WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
@@ -1728,13 +1730,14 @@ Please answer based on the above information.`;
         pageNumber: chunk.page_number,
         excerpt: chunk.content.slice(0, 200) + (chunk.content.length > 200 ? "…" : ""),
         entityNames: entityNames.length > 0 ? entityNames : undefined,
-        citationQuality: phraseChunkIds.has(chunk.id)
+        citationQuality: phraseChunkIds.has(chunk.id) || chunk.element_type === "semantic_expansion"
           ? "strong"
           : andQueryChunkIds.has(chunk.id)
           ? "partial"
           : chunk.rank > 0.01
           ? "weak"
           : "unverified",
+        pageContext: chunk.page_context ?? undefined,
       });
     }
 

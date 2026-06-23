@@ -9,6 +9,8 @@ export interface ChatCitation {
   excerpt: string;
   entityNames?: string[];
   citationQuality?: CitationQuality;
+  /** Pass 8 page context — drawing number, spec sheet name, or section title for this chunk (e.g. "PP2 049 Feed Section Schematics — ORDER SPEC SHEET"). */
+  pageContext?: string;
 }
 
 export const chatMessagesTable = pgTable("chat_messages", {

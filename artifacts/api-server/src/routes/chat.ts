@@ -246,6 +246,8 @@ router.post("/chat", async (req: Request, res: Response) => {
       chunk_index: number;
       content: string;
       rank: number;
+      page_context: string | null;
+      element_type: string | null;
     };
 
     let ragChunks: ChunkRow[] = [];
@@ -266,6 +268,8 @@ router.post("/chat", async (req: Request, res: Response) => {
             c.page_number,
             c.chunk_index,
             c.content,
+            c.page_context,
+            c.element_type,
             ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
@@ -290,6 +294,8 @@ router.post("/chat", async (req: Request, res: Response) => {
             c.page_number,
             c.chunk_index,
             c.content,
+            c.page_context,
+            c.element_type,
             ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
@@ -374,6 +380,8 @@ router.post("/chat", async (req: Request, res: Response) => {
             c.page_number,
             c.chunk_index,
             c.content,
+            c.page_context,
+            c.element_type,
             ts_rank(c.fts_vector, phraseto_tsquery('english', ${text})) AS rank,
             COUNT(*) OVER () AS total_matches
           FROM chunks c
@@ -455,6 +463,8 @@ router.post("/chat", async (req: Request, res: Response) => {
             c.page_number,
             c.chunk_index,
             c.content,
+            c.page_context,
+            c.element_type,
             ts_rank(c.fts_vector, to_tsquery('english', ${andQuery})) AS rank
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
@@ -491,6 +501,8 @@ router.post("/chat", async (req: Request, res: Response) => {
           c.page_number,
           c.chunk_index,
           c.content,
+          c.page_context,
+          c.element_type,
           0::float AS rank
         FROM chunks c
         JOIN manuals m ON m.id = c.manual_id
@@ -520,6 +532,8 @@ router.post("/chat", async (req: Request, res: Response) => {
           c.page_number,
           c.chunk_index,
           c.content,
+          c.page_context,
+          c.element_type,
           0.3::float AS rank
         FROM chunks c
         JOIN manuals m ON m.id = c.manual_id
@@ -565,6 +579,8 @@ router.post("/chat", async (req: Request, res: Response) => {
             c.page_number,
             c.chunk_index,
             c.content,
+            c.page_context,
+            c.element_type,
             0::float AS rank
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
@@ -621,6 +637,8 @@ router.post("/chat", async (req: Request, res: Response) => {
             c.page_number,
             c.chunk_index,
             c.content,
+            c.page_context,
+            c.element_type,
             ts_rank(c.fts_vector, to_tsquery('english', ${tsQuery})) AS rank
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
@@ -659,7 +677,8 @@ router.post("/chat", async (req: Request, res: Response) => {
           });
           const scopedAdjResult = await db.execute<ChunkRow>(sql`
             SELECT c.id, c.manual_id, m.name AS manual_name,
-                   c.page_number, c.chunk_index, c.content, 0::float AS rank
+                   c.page_number, c.chunk_index, c.content,
+                   c.page_context, c.element_type, 0::float AS rank
             FROM chunks c JOIN manuals m ON m.id = c.manual_id
             WHERE ${sql.join(adjConditions, sql` OR `)}
           `);
@@ -690,7 +709,8 @@ router.post("/chat", async (req: Request, res: Response) => {
       // always in context when the user asks about dimensions, weights, or specs.
       const specTagQuery = await db.execute<ChunkRow>(sql`
         SELECT c.id, c.manual_id, m.name AS manual_name,
-               c.page_number, c.chunk_index, c.content, 0::float AS rank
+               c.page_number, c.chunk_index, c.content,
+               c.page_context, c.element_type, 0::float AS rank
         FROM chunks c JOIN manuals m ON m.id = c.manual_id
         WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
           AND c.content LIKE '%[Specification table%'
@@ -1257,13 +1277,14 @@ Please answer the question based on the above information from the engineering m
           (chunk.content.length > 200 ? "…" : ""),
         entityNames:
           entityNamesOnPage.length > 0 ? entityNamesOnPage : undefined,
-        citationQuality: phraseChunkIds.has(chunk.id)
+        citationQuality: phraseChunkIds.has(chunk.id) || chunk.element_type === "semantic_expansion"
           ? "strong"
           : andQueryChunkIds.has(chunk.id)
           ? "partial"
           : chunk.rank > 0.01
           ? "weak"
           : "unverified",
+        pageContext: chunk.page_context ?? undefined,
       });
     }
 
