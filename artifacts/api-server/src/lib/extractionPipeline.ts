@@ -885,6 +885,14 @@ async function pass7EmbedChunks(
     // useElementChunker → Docling elements available + no text-override applied.
     // Produces section-boundary typed chunks (element_type + section_path stored).
     // Otherwise: semantic text chunker (element_type="text", section_path=null).
+    //
+    // Fallback: electrical/schematic pages often produce Docling elements that are
+    // all short wire labels or component codes (< 15 chars each), so the element
+    // chunker filters all of them out and the page ends up with zero chunks.
+    // When that happens we fall through to a semantic chunk of the stored raw_text
+    // from manual_pages — which may contain vision-enriched structured content
+    // (PAGE_TYPE: ELECTRICAL_WIRING …) that is far more useful for RAG retrieval.
+    const chunksBeforePage = totalChunks;
     if (useElementChunker) {
       const typedChunks = chunkFromElements(page.elements!);
       for (let ci = 0; ci < typedChunks.length; ci++) {
@@ -906,6 +914,40 @@ async function pass7EmbedChunks(
             { err, manualId, pageNumber: page.pageNumber, chunkIndex: ci },
             "Chunk insert (typed) failed"
           );
+        }
+      }
+
+      // If element chunker produced nothing, fall back to the stored raw_text so
+      // schematic/wiring pages with short Docling labels still get indexed.
+      if (totalChunks === chunksBeforePage) {
+        const storedRows = await db
+          .select({ rawText: manualPagesTable.rawText })
+          .from(manualPagesTable)
+          .where(and(eq(manualPagesTable.manualId, manualId), eq(manualPagesTable.pageNumber, page.pageNumber)))
+          .limit(1);
+        const fallbackText = storedRows[0]?.rawText?.trim() ?? "";
+        if (fallbackText.length >= 15) {
+          const fallbackChunks = chunkPageSemantically(fallbackText);
+          for (let ci = 0; ci < fallbackChunks.length; ci++) {
+            const content = sanitizeText(fallbackChunks[ci]!.trim());
+            if (content.length < 15) continue;
+            try {
+              await db.insert(chunksTable).values({
+                manualId,
+                pageNumber: page.pageNumber,
+                chunkIndex: ci,
+                content,
+                elementType: "text",
+                sectionPath: null,
+              });
+              totalChunks++;
+            } catch (err) {
+              logger.warn({ err, manualId, pageNumber: page.pageNumber, chunkIndex: ci }, "Chunk insert (element fallback) failed");
+            }
+          }
+          if (totalChunks > chunksBeforePage) {
+            logger.info({ manualId, pageNumber: page.pageNumber, chunks: totalChunks - chunksBeforePage }, "Pass 7: element fallback — used stored raw_text for schematic page");
+          }
         }
       }
     } else {

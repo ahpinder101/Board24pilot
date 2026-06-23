@@ -130,6 +130,7 @@ function CompletedSection({
   onStarted: () => void;
 }) {
   const [pdfLoading, setPdfLoading] = useState(false);
+  const [rechunking, setRechunking] = useState(false);
   const [reExtractOpen, setReExtractOpen] = useState(false);
   const reEnrich = useReEnrichManual({
     mutation: {
@@ -172,6 +173,25 @@ function CompletedSection({
     stats && totalPages > 0
       ? (stats.totalEntities / totalPages).toFixed(1)
       : null;
+
+  async function rechunkPages() {
+    setRechunking(true);
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/manuals/${manualId}/rechunk`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const data = await res.json() as { chunks: number };
+      toast.success(`Re-chunked — ${data.chunks} chunks indexed`);
+      onStarted();
+    } catch {
+      toast.error("Re-chunk failed — please try again");
+    } finally {
+      setRechunking(false);
+    }
+  }
 
   async function openPdf() {
     setPdfLoading(true);
@@ -268,6 +288,15 @@ function CompletedSection({
             {reEnrich.isPending ? "Enriching…" : "Re-enrich chunks"}
           </button>
         )}
+        <button
+          onClick={rechunkPages}
+          disabled={rechunking}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 text-xs font-medium transition-all disabled:opacity-50"
+          title="Re-index all page text as searchable chunks — use after the pipeline runs to fix missing content"
+        >
+          <Database className={cn("w-3.5 h-3.5", rechunking && "animate-spin")} />
+          {rechunking ? "Re-chunking…" : "Re-chunk"}
+        </button>
         <button
           onClick={() => setReExtractOpen((v) => !v)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-gray-500 hover:text-gray-800 hover:border-gray-400 text-xs font-medium transition-all ml-auto"
