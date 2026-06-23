@@ -131,6 +131,7 @@ function CompletedSection({
 }) {
   const [pdfLoading, setPdfLoading] = useState(false);
   const [rechunking, setRechunking] = useState(false);
+  const [repairingDiagrams, setRepairingDiagrams] = useState(false);
   const [reExtractOpen, setReExtractOpen] = useState(false);
   const reEnrich = useReEnrichManual({
     mutation: {
@@ -173,6 +174,29 @@ function CompletedSection({
     stats && totalPages > 0
       ? (stats.totalEntities / totalPages).toFixed(1)
       : null;
+
+  async function repairDiagramPages() {
+    setRepairingDiagrams(true);
+    try {
+      const token = await getToken();
+      const res = await fetch(`/api/manuals/${manualId}/repair-diagram-pages`, {
+        method: "POST",
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const data = await res.json() as { repairedPages: number; message: string };
+      if (data.repairedPages === 0) {
+        toast.info("No diagram pages needed repair");
+      } else {
+        toast.success(`Repairing ${data.repairedPages} diagram pages with Vision OCR — this may take a few minutes`);
+        onStarted();
+      }
+    } catch {
+      toast.error("Diagram repair failed — please try again");
+    } finally {
+      setRepairingDiagrams(false);
+    }
+  }
 
   async function rechunkPages() {
     setRechunking(true);
@@ -296,6 +320,15 @@ function CompletedSection({
         >
           <Database className={cn("w-3.5 h-3.5", rechunking && "animate-spin")} />
           {rechunking ? "Re-chunking…" : "Re-chunk"}
+        </button>
+        <button
+          onClick={repairDiagramPages}
+          disabled={repairingDiagrams}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 text-xs font-medium transition-all disabled:opacity-50"
+          title="Run Vision OCR on weak or skipped diagram pages — recovers schematic content Docling couldn't extract"
+        >
+          <Activity className={cn("w-3.5 h-3.5", repairingDiagrams && "animate-spin")} />
+          {repairingDiagrams ? "Repairing…" : "Repair diagrams"}
         </button>
         <button
           onClick={() => setReExtractOpen((v) => !v)}
