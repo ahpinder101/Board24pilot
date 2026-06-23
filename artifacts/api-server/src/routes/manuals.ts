@@ -921,7 +921,7 @@ router.post("/manuals/:id/re-enrich", expensiveOpLimiter, async (req: Request, r
   }
 
   try {
-    const result = await pass8EnrichChunks(manualId);
+    const result = await pass8EnrichChunks(manualId, { forceReset: true });
     await db
       .update(manualsTable)
       .set({ processingPass: 8, updatedAt: new Date() })

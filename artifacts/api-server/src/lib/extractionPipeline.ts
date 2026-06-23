@@ -2185,8 +2185,9 @@ export async function reprocessCompoundPages(
 // and (for tables) WHAT parts or specs are present.
 //
 // Three sub-passes run per page:
-//   8a. Detect the most specific page identifier (page_context) and write it
-//       to the page_context column on every chunk for that page.
+//   8a. Detect the most specific page identifier (page_context) and prepend
+//       it into every existing chunk's content as "[anchor]\n..." so FTS
+//       queries benefit without any schema changes.  Also writes page_context.
 //   8b. Stitch consecutive short text chunks (≤250 chars each) into a single
 //       semantic_expansion chunk prefixed with the page context, so that
 //       FTS-ranked retrieval can find scattered spec lines as a whole.
@@ -2196,13 +2197,12 @@ export async function reprocessCompoundPages(
 
 /**
  * Determine the most specific available identifier for a page from its chunks.
- * Cascade: section_header element → anchor-label keyword → drawing-ref pattern
- *          → fall back to manualName.
+ * Cascade: section_header → anchor-label keyword → drawing-ref → LLM → manualName.
  */
-function detectPageAnchor(
+async function detectPageAnchor(
   chunks: Array<{ content: string; elementType: string | null }>,
   manualName: string
-): string {
+): Promise<string> {
   const GENERIC_RE = /^(\d{4}[.\-/]\d{2}[.\-/]\d{2}|\d+\.?\d*)$/;
 
   // Labels that strongly indicate a specific page identity.
@@ -2227,11 +2227,12 @@ function detectPageAnchor(
     return false;
   }
 
-  // Gather the first 6 lines of a chunk's content.
-  // For markdown table rows (contain multiple "|"), extract only the first cell so
-  // the anchor is not polluted with repeated column values.
+  // Gather the first 6 lines of a chunk's content, stripping any existing
+  // [anchor]\n prefix so re-runs don't compound the prefix.
+  // For markdown table rows (contain multiple "|"), extract only the first cell.
   function headLines(content: string, n = 6): string[] {
-    return content.split("\n").slice(0, n).map(l => {
+    const cleaned = content.replace(/^\[[^\]]+\]\n/, "");
+    return cleaned.split("\n").slice(0, n).map(l => {
       const stripped = l.replace(/^\|?\s*|\s*\|?\s*$/g, "").trim();
       const pipeIdx = stripped.indexOf("|");
       return pipeIdx > 0 ? stripped.slice(0, pipeIdx).trim() : stripped;
@@ -2241,7 +2242,7 @@ function detectPageAnchor(
   // 1. section_header element type — most reliable structural anchor
   const headerChunk = chunks.find(c => c.elementType === "section_header");
   if (headerChunk) {
-    const text = headerChunk.content.split("\n")[0].trim();
+    const text = headerChunk.content.replace(/^\[[^\]]+\]\n/, "").split("\n")[0].trim();
     if (!isGeneric(text)) return `${manualName} — ${text}`;
   }
 
@@ -2267,32 +2268,73 @@ function detectPageAnchor(
     }
   }
 
-  // 4. Fall back to manual name alone
+  // 4. LLM fallback — ask GPT to identify the page from its opening content.
+  //    Used for unstructured pages where none of the heuristics fire.
+  const sampleText = chunks
+    .slice(0, 3)
+    .map(c => c.content.replace(/^\[[^\]]+\]\n/, "").slice(0, 300))
+    .join("\n---\n");
+  try {
+    const llmResp = await openai.chat.completions.create({
+      model: MODEL,
+      max_completion_tokens: 80,
+      temperature: 0,
+      messages: [
+        {
+          role: "user",
+          content:
+            `You are an engineering document analyst. The text below is the beginning of a page from the engineering manual "${manualName}". ` +
+            `Identify the single most specific label for this page — such as a drawing number, section name, spec sheet title, or parts list reference. ` +
+            `Output ONLY the label text (no quotes, no explanation). ` +
+            `If you cannot identify a specific label, output exactly: ${manualName}\n\nPAGE CONTENT:\n${sampleText}`,
+        },
+      ],
+    });
+    const label = (llmResp.choices[0]?.message?.content ?? "").trim().slice(0, 120);
+    if (label && !isGeneric(label) && label.length >= 5 && label !== manualName) {
+      return `${manualName} — ${label}`;
+    }
+  } catch (err) {
+    logger.warn({ err }, "pass8: LLM anchor fallback failed — using manual name");
+  }
+
+  // 5. Ultimate fallback: manual name only
   return manualName;
+}
+
+interface StitchedChunkResult {
+  content: string;
+  sectionPath: string | null;
 }
 
 /**
  * Merge consecutive short (≤ SHORT chars) text/list chunks into compound
  * semantic_expansion chunks prefixed with the page anchor.  Groups of < 2
  * chunks are skipped (single short chunk is fine as-is after context prefix).
+ * Each stitched group inherits the sectionPath of its first member.
  */
 function buildStitchedChunks(
-  chunks: Array<{ content: string; elementType: string | null }>,
+  chunks: Array<{ content: string; elementType: string | null; sectionPath: string | null }>,
   anchor: string
-): string[] {
+): StitchedChunkResult[] {
   const SHORT = 250;
   const MAX_STITCHED = 1400;
   const MIN_GROUP = 2;
 
-  const results: string[] = [];
-  let group: string[] = [];
+  const results: StitchedChunkResult[] = [];
+  let group: Array<{ content: string; sectionPath: string | null }> = [];
+  let firstSectionPath: string | null = null;
   let groupLen = 0;
 
   function flushGroup() {
     if (group.length >= MIN_GROUP) {
-      results.push(`[${anchor}]\n${group.join("\n")}`);
+      results.push({
+        content: `[${anchor}]\n${group.map(c => c.content).join("\n")}`,
+        sectionPath: firstSectionPath,
+      });
     }
     group = [];
+    firstSectionPath = null;
     groupLen = 0;
   }
 
@@ -2302,7 +2344,8 @@ function buildStitchedChunks(
       continue;
     }
     if (c.content.length <= SHORT) {
-      group.push(c.content);
+      if (group.length === 0) firstSectionPath = c.sectionPath;
+      group.push(c);
       groupLen += c.content.length + 1;
       if (groupLen >= MAX_STITCHED) flushGroup();
     } else {
@@ -2376,21 +2419,31 @@ export interface Pass8Result {
 /**
  * Pass 8 — Self-Contained Chunk Enrichment.
  *
- * Idempotent: always deletes existing semantic_expansion chunks for this
- * manual and nulls page_context before re-running, so calling this a second
- * time (via the re-enrich endpoint) produces a clean result.
+ * @param forceReset - When true (re-enrich endpoint), strips existing [anchor]
+ *   prefixes and deletes all semantic_expansion chunks before re-running, giving
+ *   a fully clean result.  When false (default, main pipeline), skips pages
+ *   where page_context is already set so a crashed pipeline can safely resume.
  */
-export async function pass8EnrichChunks(manualId: number): Promise<Pass8Result> {
-  logger.info({ manualId }, "pass8: starting chunk enrichment");
+export async function pass8EnrichChunks(
+  manualId: number,
+  { forceReset = false }: { forceReset?: boolean } = {}
+): Promise<Pass8Result> {
+  logger.info({ manualId, forceReset }, "pass8: starting chunk enrichment");
 
-  // Idempotency: clear previous Pass 8 output
-  await db
-    .delete(chunksTable)
-    .where(and(eq(chunksTable.manualId, manualId), eq(chunksTable.elementType, "semantic_expansion")));
-  await db
-    .update(chunksTable)
-    .set({ pageContext: null })
-    .where(eq(chunksTable.manualId, manualId));
+  if (forceReset) {
+    // Strip any existing [anchor]\n prefix that a prior run may have prepended,
+    // then clear page_context and delete old expansion chunks.
+    await db.execute(
+      sql`UPDATE chunks
+          SET content     = regexp_replace(content, E'^\\[[^\\]]+\\]\\n', ''),
+              page_context = NULL
+          WHERE manual_id = ${manualId}
+            AND element_type != 'semantic_expansion'`
+    );
+    await db
+      .delete(chunksTable)
+      .where(and(eq(chunksTable.manualId, manualId), eq(chunksTable.elementType, "semantic_expansion")));
+  }
 
   const [manualRow] = await db
     .select({ name: manualsTable.name })
@@ -2398,7 +2451,7 @@ export async function pass8EnrichChunks(manualId: number): Promise<Pass8Result> 
     .where(eq(manualsTable.id, manualId));
   const manualName = manualRow?.name ?? `Manual ${manualId}`;
 
-  // Get ordered list of distinct page numbers that have chunks
+  // Ordered list of distinct page numbers that have non-expansion chunks
   const pageRows = await db
     .selectDistinct({ pageNumber: chunksTable.pageNumber })
     .from(chunksTable)
@@ -2417,6 +2470,7 @@ export async function pass8EnrichChunks(manualId: number): Promise<Pass8Result> 
         elementType: chunksTable.elementType,
         sectionPath: chunksTable.sectionPath,
         chunkIndex: chunksTable.chunkIndex,
+        pageContext: chunksTable.pageContext,
       })
       .from(chunksTable)
       .where(
@@ -2430,46 +2484,56 @@ export async function pass8EnrichChunks(manualId: number): Promise<Pass8Result> 
 
     if (pageChunks.length === 0) continue;
 
-    // ── 8a. Detect page anchor ───────────────────────────────────────────────
-    const anchor = detectPageAnchor(pageChunks, manualName);
+    // Resumability: skip pages already fully enriched (non-forceReset runs only)
+    if (!forceReset && pageChunks.every(c => c.pageContext !== null)) {
+      enriched += pageChunks.length;
+      continue;
+    }
 
-    // Write page_context to every existing chunk on this page
-    await db
-      .update(chunksTable)
-      .set({ pageContext: anchor })
-      .where(
-        and(
-          eq(chunksTable.manualId, manualId),
-          eq(chunksTable.pageNumber, pageNumber)
-        )
+    // ── 8a. Detect page anchor ────────────────────────────────────────────────
+    const anchor = await detectPageAnchor(pageChunks, manualName);
+
+    // Prepend [anchor]\n into every original chunk's content AND set page_context.
+    // Using raw SQL to batch the update efficiently.
+    const pageChunkIds = pageChunks.map(c => c.id);
+    if (pageChunkIds.length > 0) {
+      const idList = pageChunkIds.map(id => String(id)).join(",");
+      await db.execute(
+        sql`UPDATE chunks
+            SET content      = '[' || ${anchor} || E']\n' || content,
+                page_context = ${anchor}
+            WHERE id IN (${sql.raw(idList)})`
       );
+    }
     enriched += pageChunks.length;
 
     // Max existing chunkIndex on this page (new expansion chunks slot after)
     const maxIdx = Math.max(...pageChunks.map(c => c.chunkIndex), 0);
     let expansionOffset = 100; // leave a gap from real chunks
 
-    // ── 8b. Stitch short text/list chunks ────────────────────────────────────
+    // ── 8b. Stitch short text/list chunks ─────────────────────────────────────
+    // Note: pageChunks still holds the pre-prefix content, which is what we want
+    // for stitching — buildStitchedChunks adds its own [anchor]\n prefix.
     const textLikeChunks = pageChunks.filter(
       c => c.elementType === "text" || c.elementType === "list_item" || c.elementType === "mixed"
     );
-    const stitchedTexts = buildStitchedChunks(textLikeChunks, anchor);
+    const stitchedResults = buildStitchedChunks(textLikeChunks, anchor);
 
-    for (const stitchedContent of stitchedTexts) {
+    for (const { content: stitchedContent, sectionPath: stitchedSectionPath } of stitchedResults) {
       await db.insert(chunksTable).values({
         manualId,
         pageNumber,
         chunkIndex: maxIdx + expansionOffset,
         content: stitchedContent,
         elementType: "semantic_expansion",
-        sectionPath: textLikeChunks[0]?.sectionPath ?? null,
+        sectionPath: stitchedSectionPath,
         pageContext: anchor,
       });
       expansionOffset++;
       stitched++;
     }
 
-    // ── 8c. Expand BOM table rows ─────────────────────────────────────────────
+    // ── 8c. Expand BOM table rows ──────────────────────────────────────────────
     const tableChunks = pageChunks.filter(c => c.elementType === "table");
     for (const tc of tableChunks) {
       const sentences = await expandTableToBomSentences(tc.content, anchor);
