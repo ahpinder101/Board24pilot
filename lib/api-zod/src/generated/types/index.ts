@@ -23,6 +23,7 @@ export * from './costEstimate';
 export * from './costEstimateStep';
 export * from './domainCoverageReport';
 export * from './domainScore';
+export * from './enrichResult';
 export * from './entityDetail';
 export * from './evidenceSummary';
 export * from './extractionPlan';

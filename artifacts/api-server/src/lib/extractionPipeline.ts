@@ -7,6 +7,8 @@
  * Pass 5: Relationship extraction (connects-to, part-of, contains, sequence, etc.)
  * Pass 6: Ordering & hierarchy (sequences, procedures, dependency order)
  * Pass 7: RAG chunking — element-aware chunks + vision descriptions for diagram pages
+ * Pass 8: Self-contained chunk enrichment — page context annotation, short-chunk stitching,
+ *          and LLM-powered BOM table row expansion into natural-language sentences.
  */
 
 import { openai } from "./openai.js";
@@ -24,7 +26,7 @@ import {
   type InsertEntity,
   type InsertRelationship,
 } from "@workspace/db";
-import { eq, and, count, sql, isNotNull, gte, lte } from "drizzle-orm";
+import { eq, and, count, sql, isNotNull, gte, lte, ne } from "drizzle-orm";
 import { extractPdfText, extractWithDocling, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, chunkFromElements, type PdfContent, type DoclingElement, type TypedChunk } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
@@ -1977,7 +1979,17 @@ export async function runExtractionPipeline(
     // setting status → "completed" when done.
     await setActivity(manualId, "Text and chunks complete — starting entity & relationship extraction...");
     await extractGraphFromExistingText(manualId, { startPage: opts?.startPage, endPage: opts?.endPage });
-    logger.info({ manualId }, "Full pipeline complete");
+
+    // ── Pass 8: Self-Contained Chunk Enrichment ───────────────────────────────
+    // Runs after extraction completes (status is already "completed").
+    // Sets processingPass=8 to signal enrichment is done; status stays completed.
+    await setActivity(manualId, "Pass 8 — enriching chunks with page context and expanding BOM tables...");
+    const enrichResult = await pass8EnrichChunks(manualId);
+    await db
+      .update(manualsTable)
+      .set({ processingPass: 8, updatedAt: new Date() })
+      .where(eq(manualsTable.id, manualId));
+    logger.info({ manualId, ...enrichResult }, "Full pipeline complete (Pass 8 done)");
   } catch (err) {
     logger.error({ err, manualId }, "Extraction pipeline failed");
     await setManualStatus(manualId, "failed", {
@@ -2164,4 +2176,319 @@ export async function reprocessCompoundPages(
 
   logger.info({ manualId, processed, errors }, "Compound re-process complete");
   return { processed, errors, pages: results };
+}
+
+// ─── PASS 8: SELF-CONTAINED CHUNK ENRICHMENT ─────────────────────────────────
+//
+// Purpose: every chunk must be retrievable in isolation — a reader with no
+// surrounding context must be able to tell WHAT manual, WHAT drawing/section,
+// and (for tables) WHAT parts or specs are present.
+//
+// Three sub-passes run per page:
+//   8a. Detect the most specific page identifier (page_context) and write it
+//       to the page_context column on every chunk for that page.
+//   8b. Stitch consecutive short text chunks (≤250 chars each) into a single
+//       semantic_expansion chunk prefixed with the page context, so that
+//       FTS-ranked retrieval can find scattered spec lines as a whole.
+//   8c. Expand BOM/parts-list tables into natural-language sentences via
+//       GPT-4o — one sentence per part row — prefixed with the page context.
+//       Each sentence becomes a separate semantic_expansion chunk.
+
+/**
+ * Determine the most specific available identifier for a page from its chunks.
+ * Cascade: section_header element → anchor-label keyword → drawing-ref pattern
+ *          → fall back to manualName.
+ */
+function detectPageAnchor(
+  chunks: Array<{ content: string; elementType: string | null }>,
+  manualName: string
+): string {
+  const GENERIC_RE = /^(\d{4}[.\-/]\d{2}[.\-/]\d{2}|\d+\.?\d*)$/;
+
+  // Labels that strongly indicate a specific page identity.
+  // NOTE: "page_type" / "PAGE_TYPE:" lines are internal AI extraction markers — excluded
+  // so that we look past them to more meaningful anchors like "ORDER SPEC SHEET".
+  const ANCHOR_LABEL_RE =
+    /(?:parts\s+list|drawing\s+(?:no|nr|number|title)|dwg\.?\s*(?:no|nr)?|order\s+(?:no|nr)|order\s+spec|spec\s+sheet|doc(?:ument)?\s+(?:no|nr|number)|assembly\s+(?:no|nr)|schematic|wiring\s+diagram|circuit\s+diagram|parameter\s+(?:list|table)|electrical\s+wiring|pneumatic|hydraulic)/i;
+
+  // Internal extraction markers to skip (never use as anchors)
+  const INTERNAL_MARKER_RE = /^PAGE_TYPE\s*:/i;
+
+  // Drawing / part reference: letter+digit prefix + optional sep + 3–6 digits
+  // Handles: "PP2 049", "F2 9560", "F2UA 9585", "F2UA-9560", "F1693A"
+  const DRAW_REF_RE = /\b[A-Z][A-Z0-9]{0,3}[-_\s]\d{3,6}[A-Z0-9]{0,4}\b/;
+
+  const MEANINGLESS_RE = /^(page|rev|rev\.|revision|date|title|drawing)\s*:?\s*$/i;
+
+  function isGeneric(text: string): boolean {
+    if (text.length < 5) return true;
+    if (GENERIC_RE.test(text.trim())) return true;
+    if (MEANINGLESS_RE.test(text.trim())) return true;
+    return false;
+  }
+
+  // Gather the first 6 lines of a chunk's content.
+  // For markdown table rows (contain multiple "|"), extract only the first cell so
+  // the anchor is not polluted with repeated column values.
+  function headLines(content: string, n = 6): string[] {
+    return content.split("\n").slice(0, n).map(l => {
+      const stripped = l.replace(/^\|?\s*|\s*\|?\s*$/g, "").trim();
+      const pipeIdx = stripped.indexOf("|");
+      return pipeIdx > 0 ? stripped.slice(0, pipeIdx).trim() : stripped;
+    }).filter(Boolean);
+  }
+
+  // 1. section_header element type — most reliable structural anchor
+  const headerChunk = chunks.find(c => c.elementType === "section_header");
+  if (headerChunk) {
+    const text = headerChunk.content.split("\n")[0].trim();
+    if (!isGeneric(text)) return `${manualName} — ${text}`;
+  }
+
+  // 2. Keyword-anchored lines within the first 6 lines of any chunk.
+  //    Skip internal extraction markers (PAGE_TYPE: ...) — look past them.
+  for (const chunk of chunks) {
+    for (const line of headLines(chunk.content)) {
+      if (INTERNAL_MARKER_RE.test(line)) continue;
+      if (ANCHOR_LABEL_RE.test(line) && !isGeneric(line)) {
+        const abbreviated = line.length > 120 ? line.slice(0, 120) : line;
+        return `${manualName} — ${abbreviated}`;
+      }
+    }
+  }
+
+  // 3. Drawing/doc reference in first 6 lines of the first chunk
+  const firstChunk = chunks[0];
+  if (firstChunk) {
+    for (const line of headLines(firstChunk.content)) {
+      if (DRAW_REF_RE.test(line) && !isGeneric(line) && line.length >= 5 && line.length < 100) {
+        return `${manualName} — ${line}`;
+      }
+    }
+  }
+
+  // 4. Fall back to manual name alone
+  return manualName;
+}
+
+/**
+ * Merge consecutive short (≤ SHORT chars) text/list chunks into compound
+ * semantic_expansion chunks prefixed with the page anchor.  Groups of < 2
+ * chunks are skipped (single short chunk is fine as-is after context prefix).
+ */
+function buildStitchedChunks(
+  chunks: Array<{ content: string; elementType: string | null }>,
+  anchor: string
+): string[] {
+  const SHORT = 250;
+  const MAX_STITCHED = 1400;
+  const MIN_GROUP = 2;
+
+  const results: string[] = [];
+  let group: string[] = [];
+  let groupLen = 0;
+
+  function flushGroup() {
+    if (group.length >= MIN_GROUP) {
+      results.push(`[${anchor}]\n${group.join("\n")}`);
+    }
+    group = [];
+    groupLen = 0;
+  }
+
+  for (const c of chunks) {
+    if (c.elementType === "section_header") {
+      flushGroup();
+      continue;
+    }
+    if (c.content.length <= SHORT) {
+      group.push(c.content);
+      groupLen += c.content.length + 1;
+      if (groupLen >= MAX_STITCHED) flushGroup();
+    } else {
+      flushGroup();
+    }
+  }
+  flushGroup();
+
+  return results;
+}
+
+/**
+ * Call GPT-4o to convert a markdown BOM/parts-list table into an array of
+ * natural-language sentences (one per row).  Returns [] for non-BOM tables
+ * or on any error to keep Pass 8 resilient.
+ */
+async function expandTableToBomSentences(
+  tableMarkdown: string,
+  anchor: string
+): Promise<string[]> {
+  const BOM_RE =
+    /(?:part\s*(?:no|nr|number|#)|q'?ty|quantity|name\s+of\s+part|component\s+name|item\s+(?:no|nr|description)|material\s+(?:no|number)|spare\s+part)/i;
+  if (!BOM_RE.test(tableMarkdown)) return [];
+  if (tableMarkdown.length < 60 || tableMarkdown.length > 4000) return [];
+
+  const prompt = `You are an engineering data extractor. Below is a parts-list or BOM table in markdown format.
+
+Convert it into natural-language sentences — one per unique part/item row. Each sentence must include:
+- Part name
+- Part number (if present)
+- Quantity (if present)
+- Any remarks or specifications
+
+Prefix EVERY sentence with: "${anchor}"
+
+Rules:
+- Output ONLY a JSON array of strings.  No preamble or explanation.
+- Omit header rows and blank rows.
+- Maximum 50 sentences.
+- Keep each sentence concise (≤ 120 chars).
+
+TABLE:
+${tableMarkdown}`;
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: MODEL,
+      max_completion_tokens: 1500,
+      temperature: 0,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const raw = (response.choices[0]?.message?.content ?? "").trim();
+    const match = raw.match(/\[[\s\S]*\]/);
+    if (!match) return [];
+    const parsed = JSON.parse(match[0]) as unknown[];
+    return parsed
+      .filter((s): s is string => typeof s === "string" && s.length > 10)
+      .slice(0, 50);
+  } catch (err) {
+    logger.warn({ err }, "pass8: table BOM expansion failed — skipping table");
+    return [];
+  }
+}
+
+export interface Pass8Result {
+  enriched: number;
+  stitched: number;
+  expansions: number;
+}
+
+/**
+ * Pass 8 — Self-Contained Chunk Enrichment.
+ *
+ * Idempotent: always deletes existing semantic_expansion chunks for this
+ * manual and nulls page_context before re-running, so calling this a second
+ * time (via the re-enrich endpoint) produces a clean result.
+ */
+export async function pass8EnrichChunks(manualId: number): Promise<Pass8Result> {
+  logger.info({ manualId }, "pass8: starting chunk enrichment");
+
+  // Idempotency: clear previous Pass 8 output
+  await db
+    .delete(chunksTable)
+    .where(and(eq(chunksTable.manualId, manualId), eq(chunksTable.elementType, "semantic_expansion")));
+  await db
+    .update(chunksTable)
+    .set({ pageContext: null })
+    .where(eq(chunksTable.manualId, manualId));
+
+  const [manualRow] = await db
+    .select({ name: manualsTable.name })
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId));
+  const manualName = manualRow?.name ?? `Manual ${manualId}`;
+
+  // Get ordered list of distinct page numbers that have chunks
+  const pageRows = await db
+    .selectDistinct({ pageNumber: chunksTable.pageNumber })
+    .from(chunksTable)
+    .where(and(eq(chunksTable.manualId, manualId), ne(chunksTable.elementType, "semantic_expansion")))
+    .orderBy(chunksTable.pageNumber);
+
+  let enriched = 0;
+  let stitched = 0;
+  let expansions = 0;
+
+  for (const { pageNumber } of pageRows) {
+    const pageChunks = await db
+      .select({
+        id: chunksTable.id,
+        content: chunksTable.content,
+        elementType: chunksTable.elementType,
+        sectionPath: chunksTable.sectionPath,
+        chunkIndex: chunksTable.chunkIndex,
+      })
+      .from(chunksTable)
+      .where(
+        and(
+          eq(chunksTable.manualId, manualId),
+          eq(chunksTable.pageNumber, pageNumber),
+          ne(chunksTable.elementType, "semantic_expansion")
+        )
+      )
+      .orderBy(chunksTable.chunkIndex);
+
+    if (pageChunks.length === 0) continue;
+
+    // ── 8a. Detect page anchor ───────────────────────────────────────────────
+    const anchor = detectPageAnchor(pageChunks, manualName);
+
+    // Write page_context to every existing chunk on this page
+    await db
+      .update(chunksTable)
+      .set({ pageContext: anchor })
+      .where(
+        and(
+          eq(chunksTable.manualId, manualId),
+          eq(chunksTable.pageNumber, pageNumber)
+        )
+      );
+    enriched += pageChunks.length;
+
+    // Max existing chunkIndex on this page (new expansion chunks slot after)
+    const maxIdx = Math.max(...pageChunks.map(c => c.chunkIndex), 0);
+    let expansionOffset = 100; // leave a gap from real chunks
+
+    // ── 8b. Stitch short text/list chunks ────────────────────────────────────
+    const textLikeChunks = pageChunks.filter(
+      c => c.elementType === "text" || c.elementType === "list_item" || c.elementType === "mixed"
+    );
+    const stitchedTexts = buildStitchedChunks(textLikeChunks, anchor);
+
+    for (const stitchedContent of stitchedTexts) {
+      await db.insert(chunksTable).values({
+        manualId,
+        pageNumber,
+        chunkIndex: maxIdx + expansionOffset,
+        content: stitchedContent,
+        elementType: "semantic_expansion",
+        sectionPath: textLikeChunks[0]?.sectionPath ?? null,
+        pageContext: anchor,
+      });
+      expansionOffset++;
+      stitched++;
+    }
+
+    // ── 8c. Expand BOM table rows ─────────────────────────────────────────────
+    const tableChunks = pageChunks.filter(c => c.elementType === "table");
+    for (const tc of tableChunks) {
+      const sentences = await expandTableToBomSentences(tc.content, anchor);
+      for (const sentence of sentences) {
+        await db.insert(chunksTable).values({
+          manualId,
+          pageNumber,
+          chunkIndex: maxIdx + expansionOffset,
+          content: sentence,
+          elementType: "semantic_expansion",
+          sectionPath: tc.sectionPath,
+          pageContext: anchor,
+        });
+        expansionOffset++;
+        expansions++;
+      }
+    }
+  }
+
+  logger.info({ manualId, enriched, stitched, expansions }, "pass8: enrichment complete");
+  return { enriched, stitched, expansions };
 }

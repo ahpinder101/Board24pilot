@@ -22,7 +22,7 @@ import {
   GetManualGraphParams,
 } from "@workspace/api-zod";
 import { ObjectStorageService } from "../lib/objectStorage.js";
-import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText, reprocessCompoundPages, repairGraphPasses } from "../lib/extractionPipeline.js";
+import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText, reprocessCompoundPages, repairGraphPasses, pass8EnrichChunks } from "../lib/extractionPipeline.js";
 import { logger } from "../lib/logger.js";
 import { expensiveOpLimiter } from "../middlewares/rateLimit.js";
 
@@ -897,6 +897,40 @@ router.post("/manuals/:id/reset-processing", async (req: Request, res: Response)
 
   req.log.info({ manualId, from: manual.status, to: resumeStatus }, "Processing reset by user");
   res.json(updated);
+});
+
+// POST /manuals/:id/re-enrich — Pass 8: annotate page_context, stitch short chunks,
+// expand BOM tables.  Does NOT re-run OCR or entity/relationship extraction.
+// Safe to call repeatedly — idempotent (deletes previous semantic_expansion chunks first).
+router.post("/manuals/:id/re-enrich", expensiveOpLimiter, async (req: Request, res: Response) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
+  if (isNaN(manualId)) {
+    res.status(400).json({ error: "Invalid manual id" });
+    return;
+  }
+
+  const [manual] = await db.select(manualCols).from(manualsTable).where(eq(manualsTable.id, manualId));
+  if (!manual) {
+    res.status(404).json({ error: "Manual not found" });
+    return;
+  }
+
+  if (manual.status === "processing") {
+    res.status(409).json({ error: "Manual is currently processing — wait for it to finish before re-enriching" });
+    return;
+  }
+
+  try {
+    const result = await pass8EnrichChunks(manualId);
+    await db
+      .update(manualsTable)
+      .set({ processingPass: 8, updatedAt: new Date() })
+      .where(eq(manualsTable.id, manualId));
+    res.json({ ok: true, manualId, ...result });
+  } catch (err) {
+    req.log.error({ err, manualId }, "Re-enrich (Pass 8) failed");
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 // POST /manuals/:id/rechunk — admin: re-apply semantic chunker without full pipeline

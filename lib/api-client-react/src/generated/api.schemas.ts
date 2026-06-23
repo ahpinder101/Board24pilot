@@ -190,6 +190,17 @@ export interface DomainCoverageReport {
   scannedAt: string;
 }
 
+export interface EnrichResult {
+  ok: boolean;
+  manualId: number;
+  /** Number of existing chunks that received a page_context value */
+  enriched: number;
+  /** Number of stitched semantic_expansion chunks created from short consecutive text chunks */
+  stitched: number;
+  /** Number of semantic_expansion chunks created from BOM table rows */
+  expansions: number;
+}
+
 export type GlobalStatsEntitiesByType = { [key: string]: unknown };
 
 export type GlobalStatsRelationshipsByType = { [key: string]: unknown };

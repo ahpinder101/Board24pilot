@@ -417,6 +417,22 @@ export const GetExtractionPlanResponse = zod.object({
 
 
 /**
+ * @summary Re-run Pass 8 chunk enrichment (page context + table expansion) without full re-extraction
+ */
+export const ReEnrichManualParams = zod.object({
+  "id": zod.coerce.number()
+})
+
+export const ReEnrichManualResponse = zod.object({
+  "ok": zod.boolean(),
+  "manualId": zod.number(),
+  "enriched": zod.number().describe('Number of existing chunks that received a page_context value'),
+  "stitched": zod.number().describe('Number of stitched semantic_expansion chunks created from short consecutive text chunks'),
+  "expansions": zod.number().describe('Number of semantic_expansion chunks created from BOM table rows')
+})
+
+
+/**
  * @summary Get the combined knowledge graph across all manuals
  */
 export const GetGlobalGraphResponse = zod.object({

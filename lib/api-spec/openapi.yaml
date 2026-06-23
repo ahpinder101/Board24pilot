@@ -328,6 +328,29 @@ paths:
         "404":
           description: Not found
 
+  /manuals/{id}/re-enrich:
+    post:
+      operationId: reEnrichManual
+      tags: [manuals]
+      summary: Re-run Pass 8 chunk enrichment (page context + table expansion) without full re-extraction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Enrichment complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrichResult"
+        "404":
+          description: Not found
+        "409":
+          description: Manual is already processing
+
   /graph:
     get:
       operationId: getGlobalGraph
@@ -598,6 +621,24 @@ components:
           type: integer
         scannedAt:
           type: string
+
+    EnrichResult:
+      type: object
+      required: [ok, manualId, enriched, stitched, expansions]
+      properties:
+        ok:
+          type: boolean
+        manualId:
+          type: integer
+        enriched:
+          type: integer
+          description: Number of existing chunks that received a page_context value
+        stitched:
+          type: integer
+          description: Number of stitched semantic_expansion chunks created from short consecutive text chunks
+        expansions:
+          type: integer
+          description: Number of semantic_expansion chunks created from BOM table rows
 
     GlobalStats:
       type: object

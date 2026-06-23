@@ -27,6 +27,7 @@ import type {
   ChatResponse,
   CostEstimate,
   DomainCoverageReport,
+  EnrichResult,
   EntityDetail,
   ExtractionPlan,
   GetManualCostEstimateParams,
@@ -1251,6 +1252,76 @@ export function useGetExtractionPlan<TData = Awaited<ReturnType<typeof getExtrac
 
 
 
+
+export const getReEnrichManualUrl = (id: number,) => {
+
+
+
+
+  return `/api/manuals/${id}/re-enrich`
+}
+
+/**
+ * @summary Re-run Pass 8 chunk enrichment (page context + table expansion) without full re-extraction
+ */
+export const reEnrichManual = async (id: number, options?: RequestInit): Promise<EnrichResult> => {
+
+  return customFetch<EnrichResult>(getReEnrichManualUrl(id),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+export const getReEnrichManualMutationOptions = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof reEnrichManual>>, TError,{id: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof reEnrichManual>>, TError,{id: number}, TContext> => {
+
+const mutationKey = ['reEnrichManual'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof reEnrichManual>>, {id: number}> = (props) => {
+          const {id} = props ?? {};
+
+          return  reEnrichManual(id,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ReEnrichManualMutationResult = NonNullable<Awaited<ReturnType<typeof reEnrichManual>>>
+
+    export type ReEnrichManualMutationError = ErrorType<void>
+
+    /**
+ * @summary Re-run Pass 8 chunk enrichment (page context + table expansion) without full re-extraction
+ */
+export const useReEnrichManual = <TError = ErrorType<void>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof reEnrichManual>>, TError,{id: number}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof reEnrichManual>>,
+        TError,
+        {id: number},
+        TContext
+      > => {
+      return useMutation(getReEnrichManualMutationOptions(options));
+    }
 
 export const getGetGlobalGraphUrl = () => {
 
