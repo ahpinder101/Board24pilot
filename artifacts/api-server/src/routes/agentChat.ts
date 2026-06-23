@@ -10,6 +10,10 @@ import { openai } from "../lib/openai.js";
 import { sql, or, and, eq } from "drizzle-orm";
 import { randomUUID } from "crypto";
 import {
+  filterChunksToManualIds,
+  parsePinnedManualId,
+} from "../lib/retrievalScope.js";
+import {
   detectDomain,
   runDomainSpecialist,
   buildGuidedNoAnswer,
@@ -267,17 +271,6 @@ function buildEvidenceSummary(
     hasGraphContext: graphPaths.length > 0 || graphEntities.length > 0,
     manualsSearched: [...new Set(ragChunks.map((c) => c.manual_name))],
   };
-}
-
-function parsePinnedManualId(raw: unknown): number | null {
-  const id = typeof raw === "number" ? raw : Number(raw);
-  return Number.isInteger(id) && id > 0 ? id : null;
-}
-
-function filterChunksToManualIds(chunks: ChunkRow[], manualIds: number[]): ChunkRow[] {
-  if (manualIds.length === 0) return chunks;
-  const allowed = new Set(manualIds);
-  return chunks.filter((c) => allowed.has(c.manual_id));
 }
 
 async function fetchElectricalSymbolChunks(

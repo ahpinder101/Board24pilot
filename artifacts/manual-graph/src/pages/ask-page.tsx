@@ -20,6 +20,19 @@ import { saveRecentQuestion } from "@/hooks/use-recent-questions";
 const PROCEDURAL_QUERY_RE =
   /\b(walk\s+me\s+through|step[-\s]by[-\s]step|steps?\s+to\s+\w|how\s+(do\s+I|to)\s+(replace|remove|install|disassemble|assemble|adjust|clean|set\s+up|change|perform|fix)|procedure\s+for|guide\s+me|show\s+me\s+(how|the\s+steps?)|all\s+steps?|sequence\s+for|process\s+of)\b/i;
 
+const MANUAL_SCOPE_STORAGE_KEY = "ask-selected-manual-id";
+
+function readStoredManualId(): number | null {
+  try {
+    const stored = localStorage.getItem(MANUAL_SCOPE_STORAGE_KEY);
+    if (!stored) return null;
+    const id = Number(stored);
+    return Number.isInteger(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Languages ────────────────────────────────────────────────────────────────
 
 const LANGUAGES = [
@@ -632,9 +645,13 @@ export default function AskPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [agentMode, setAgentMode] = useState(true);
   const [strictness, setStrictness] = useState<"normal" | "engineering_strict" | "safety_critical">("normal");
-  const [selectedManualId, setSelectedManualId] = useState<number | null>(null);
+  const [selectedManualId, setSelectedManualId] = useState<number | null>(() => readStoredManualId());
   const { data: allManuals } = useListManuals();
   const completedManuals = (allManuals ?? []).filter((m: Manual) => m.status === "completed");
+  const selectedManualName =
+    selectedManualId !== null
+      ? completedManuals.find((m: Manual) => m.id === selectedManualId)?.name
+      : undefined;
   const [expandedPanels, setExpandedPanels] = useState<Record<string, { evidence?: boolean; validation?: boolean }>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -650,6 +667,21 @@ export default function AskPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (selectedManualId === null) {
+      localStorage.removeItem(MANUAL_SCOPE_STORAGE_KEY);
+      return;
+    }
+    localStorage.setItem(MANUAL_SCOPE_STORAGE_KEY, String(selectedManualId));
+  }, [selectedManualId]);
+
+  useEffect(() => {
+    if (selectedManualId === null || completedManuals.length === 0) return;
+    if (!completedManuals.some((m: Manual) => m.id === selectedManualId)) {
+      setSelectedManualId(null);
+    }
+  }, [completedManuals, selectedManualId]);
 
   // ── Translation ─────────────────────────────────────────────────────────────
 
@@ -890,6 +922,7 @@ export default function AskPage() {
               <select
                 value={selectedManualId ?? ""}
                 onChange={(e) => setSelectedManualId(e.target.value === "" ? null : Number(e.target.value))}
+                title={selectedManualName ? `Scoped to: ${selectedManualName}` : "Search all completed manuals"}
                 className="text-[11px] border border-gray-200 rounded px-1.5 py-0.5 bg-white text-gray-700 flex-1 min-w-0 truncate"
               >
                 <option value="">All manuals</option>

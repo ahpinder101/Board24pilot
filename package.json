@@ -4,9 +4,19 @@
   "license": "MIT",
   "scripts": {
     "preinstall": "sh -c 'rm -f package-lock.json yarn.lock; case \"$npm_config_user_agent\" in pnpm/*) ;; *) echo \"Use pnpm instead\" >&2; exit 1 ;; esac'",
-    "build": "pnpm run typecheck && pnpm -r --if-present run build",
+    "dev:api": "sh ./scripts/dev-api.sh",
+    "dev:web": "sh ./scripts/dev-web.sh",
+    "dev:docling": "sh ./scripts/dev-docling.sh",
+    "db:start": "docker compose up -d postgres",
+    "db:stop": "docker compose stop postgres",
+    "db:push": "sh ./scripts/db-push.sh",
+    "benchmark:agent-chat": "corepack pnpm --filter @workspace/scripts run benchmark:agent-chat",
+    "verify:manual-symbol": "corepack pnpm --filter @workspace/scripts run verify:manual-symbol",
+    "sync:status": "sh ./scripts/sync-status.sh",
+    "sync:publish": "sh ./scripts/sync-publish.sh",
+    "build": "corepack pnpm run typecheck && corepack pnpm -r --if-present run build",
     "typecheck:libs": "tsc --build",
-    "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
+    "typecheck": "corepack pnpm run typecheck:libs && corepack pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --if-present run typecheck"
   },
   "private": true,
   "devDependencies": {

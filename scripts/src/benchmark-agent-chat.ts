@@ -32,6 +32,10 @@ type AgentChatResponse = {
   }>;
   isGuided?: boolean;
   domain?: string;
+  evidenceSummary?: {
+    manualsSearched?: string[];
+    chunksFound?: number;
+  };
 };
 
 const QUESTIONS: BenchmarkQuestion[] = [
@@ -144,6 +148,7 @@ async function main() {
     answerability?: string;
     citations: string[];
     answer: string;
+    manualsSearched: string[];
   }> = [];
 
   for (const [index, benchmark] of QUESTIONS.entries()) {
@@ -180,7 +185,20 @@ async function main() {
       answerability: result.answerability,
       citations,
       answer: result.answer.trim(),
+      manualsSearched: result.evidenceSummary?.manualsSearched ?? [],
     });
+  }
+
+  let scopeViolations = 0;
+  if (manualId !== null) {
+    for (const result of results) {
+      if (result.manualsSearched.length > 1) {
+        scopeViolations++;
+        console.warn(
+          `[${result.id}] manual scope violation: searched ${result.manualsSearched.join(", ")}`
+        );
+      }
+    }
   }
 
   for (const result of results) {
@@ -189,6 +207,9 @@ async function main() {
     console.log(`observed: ${result.observedMode}`);
     console.log(`confidence: ${result.confidence ?? "n/a"}`);
     console.log(`answerability: ${result.answerability ?? "n/a"}`);
+    if (result.manualsSearched.length > 0) {
+      console.log(`manualsSearched: ${result.manualsSearched.join(", ")}`);
+    }
     console.log(`citations: ${result.citations.length > 0 ? result.citations.join(" | ") : "none"}`);
     console.log(result.answer);
     console.log("");
@@ -205,8 +226,9 @@ async function main() {
   console.log(`exact-ish: ${exactishCount}`);
   console.log(`guided: ${guidedCount}`);
   console.log(`unexpected guided: ${unexpectedGuided}`);
+  console.log(`manual scope violations: ${scopeViolations}`);
 
-  if (unexpectedGuided > 0) {
+  if (unexpectedGuided > 0 || scopeViolations > 0) {
     process.exitCode = 1;
   }
 }

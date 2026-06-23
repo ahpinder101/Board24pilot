@@ -7,6 +7,7 @@
     "hello": "tsx ./src/hello.ts",
     "backfill-pass8": "tsx ./src/backfill-pass8.ts",
     "benchmark:agent-chat": "tsx ./src/benchmark-agent-chat.ts",
+    "verify:manual-symbol": "tsx ./src/verify-manual-symbol.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

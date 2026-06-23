@@ -13,6 +13,10 @@ import {
 import { openai } from "../lib/openai.js";
 import { eq, sql, or, and } from "drizzle-orm";
 import { randomUUID } from "crypto";
+import {
+  filterChunksToManualIds,
+  parsePinnedManualId,
+} from "../lib/retrievalScope.js";
 
 const router = Router();
 
@@ -163,10 +167,11 @@ function classifyDomain(
 
 // POST /chat
 router.post("/chat", async (req: Request, res: Response) => {
-  const { question, sessionId: incomingSession, imageDataUrl } = req.body as {
+  const { question, sessionId: incomingSession, imageDataUrl, manualId: requestedManualId } = req.body as {
     question?: string;
     sessionId?: string;
     imageDataUrl?: string;
+    manualId?: number | string;
   };
 
   if (!question || typeof question !== "string" || question.trim().length === 0) {
@@ -217,6 +222,14 @@ router.post("/chat", async (req: Request, res: Response) => {
       visionKeywords.length > 0
         ? `${trimmedQuestion} ${visionKeywords.replace(/,/g, " ")}`
         : trimmedQuestion;
+
+    const pinnedManualId = parsePinnedManualId(requestedManualId);
+    const manualScopeSql =
+      pinnedManualId !== null ? sql`AND c.manual_id = ${pinnedManualId}` : sql``;
+
+    if (pinnedManualId !== null) {
+      req.log.info({ pinnedManualId }, "chat: manual scope pinned");
+    }
 
     // ── 1. RAG: full-text search over chunks ─────────────────────────────────
     // Include 2-char tokens (Sq, mm, LH, RH …) — critical abbreviations in
@@ -274,6 +287,7 @@ router.post("/chat", async (req: Request, res: Response) => {
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
+            ${manualScopeSql}
           ORDER BY rank DESC
           LIMIT 50
         ) ranked
@@ -300,6 +314,7 @@ router.post("/chat", async (req: Request, res: Response) => {
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${tsQuery})
+            ${manualScopeSql}
           ORDER BY rank DESC
           LIMIT ${TOP_K_CHUNKS}
         `);
@@ -387,6 +402,7 @@ router.post("/chat", async (req: Request, res: Response) => {
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ phraseto_tsquery('english', ${text})
+            ${manualScopeSql}
           ORDER BY rank DESC
           LIMIT 6
         `);
@@ -469,6 +485,7 @@ router.post("/chat", async (req: Request, res: Response) => {
           FROM chunks c
           JOIN manuals m ON m.id = c.manual_id
           WHERE c.fts_vector @@ to_tsquery('english', ${andQuery})
+            ${manualScopeSql}
           ORDER BY rank DESC
           LIMIT 5
         `);
@@ -506,7 +523,8 @@ router.post("/chat", async (req: Request, res: Response) => {
           0::float AS rank
         FROM chunks c
         JOIN manuals m ON m.id = c.manual_id
-        ORDER BY c.manual_id DESC, c.page_number ASC
+        WHERE 1=1 ${manualScopeSql}
+        ORDER BY c.page_number ASC, c.chunk_index ASC
         LIMIT ${TOP_K_CHUNKS}
       `);
       ragChunks = fallback.rows;
@@ -522,7 +540,7 @@ router.post("/chat", async (req: Request, res: Response) => {
     const identifierTokens = extractIdentifierTokens(searchText);
     if (identifierTokens.length > 0) {
       const ilikeConditions = identifierTokens.map(
-        (tok) => sql`c.content ILIKE ${"%" + tok + "%"}`
+        (tok) => sql`(c.content ILIKE ${"%" + tok + "%"} OR COALESCE(c.page_context, '') ILIKE ${"%" + tok + "%"})`
       );
       const identResult = await db.execute<ChunkRow>(sql`
         SELECT
@@ -537,7 +555,8 @@ router.post("/chat", async (req: Request, res: Response) => {
           0.3::float AS rank
         FROM chunks c
         JOIN manuals m ON m.id = c.manual_id
-        WHERE ${sql.join(ilikeConditions, sql` OR `)}
+        WHERE (${sql.join(ilikeConditions, sql` OR `)})
+          ${manualScopeSql}
         LIMIT ${TOP_K_CHUNKS}
       `);
       const existingIds = new Set(ragChunks.map((c) => c.id));
@@ -612,7 +631,9 @@ router.post("/chat", async (req: Request, res: Response) => {
     //   A2. Explicit manual name keywords appear in the question text.
     //   B.  Which manuals produced the top-ranked FTS chunk hits.
     // All graph/entity retrieval below is scoped to these manual IDs.
-    const scopedManualIds = classifyDomain(searchText, allManuals, ragChunks, machineEntities);
+    const scopedManualIds = pinnedManualId
+      ? [pinnedManualId]
+      : classifyDomain(searchText, allManuals, ragChunks, machineEntities);
     const scopedManualArray = `{${scopedManualIds.join(",")}}`;
 
     // Filter out cross-manual noise: the initial FTS ran before domain
