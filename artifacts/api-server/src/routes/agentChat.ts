@@ -56,7 +56,15 @@ STEP 4 — Choose a strategy
 
 BIAS HEAVILY toward "answer". A partial answer is acceptable and useful. Reserve "cannot_answer" for truly empty, irrelevant evidence.
 
-STEP 5
+STEP 5 — Expand search terms if evidence is thin
+If evidenceQuality is "weak" or "none" AND questionType is "fact", populate termExpansions with 3-5 alternative phrasings the manual might use for the same concept. Draw on your engineering vocabulary — component aliases, standard part-name conventions, abbreviations, directional variants (inner/outer/upper/lower stripped), and BOM label styles. Do NOT simply repeat the user's words. Leave termExpansions empty for all other cases (procedures, strong evidence, non-fact questions).
+
+Examples:
+• "inner hex bolt" → ["hex bolt nut", "socket head bolt", "hex cap screw", "allen bolt", "hexagon bolt"]
+• "supply voltage" → ["input voltage", "power voltage", "voltage rating", "mains voltage", "V AC"]
+• "main drive motor" → ["drive motor", "primary motor", "motor assembly", "main motor"]
+
+STEP 6
 If strategy is "answer": write brief planNotes for the answer agent — which sources cover which steps, how to order a procedure, what to synthesise. Note any [TABLE] or [LIST] sources that contain structured data relevant to the answer.
 If strategy is "clarify": write one focused clarifying question in clarifyingQuestion.
 If strategy is "cannot_answer": leave planNotes empty.
@@ -71,7 +79,8 @@ Respond with valid JSON only, no other text:
   "strategy": "answer" | "clarify" | "cannot_answer",
   "clarifyingQuestion": "single focused question or null",
   "planNotes": "brief synthesis plan for the answer agent",
-  "sectionHint": "most specific section path fragment common to majority of relevant evidence, or null"
+  "sectionHint": "most specific section path fragment common to majority of relevant evidence, or null",
+  "termExpansions": ["alternative phrasings for FTS re-retrieval, or empty array"]
 }`;
 
 const GENERIC_NAME_WORDS = new Set([
@@ -959,6 +968,8 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
       planNotes: string;
       /** Docling section breadcrumb fragment observed in evidence — drives section-targeted re-retrieval. Null when not applicable. */
       sectionHint: string | null;
+      /** Alternative phrasings for FTS re-retrieval when evidence is thin on a fact question. Empty otherwise. */
+      termExpansions: string[];
     };
 
     const historySnippet = conversationHistory.length > 0
@@ -1017,6 +1028,9 @@ Analyse the evidence and output your scratchpad JSON.`;
         sectionHint: typeof sp.sectionHint === "string" && sp.sectionHint.trim().length > 0
           ? sp.sectionHint.trim()
           : null,
+        termExpansions: Array.isArray(sp.termExpansions)
+          ? (sp.termExpansions as unknown[]).filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+          : [],
       };
       req.log.info(
         {
@@ -1025,6 +1039,7 @@ Analyse the evidence and output your scratchpad JSON.`;
           strategy: scratchpad.strategy,
           evidenceQuality: scratchpad.evidenceQuality,
           sectionHint: scratchpad.sectionHint,
+          termExpansions: scratchpad.termExpansions,
         },
         "agent-chat: scratchpad"
       );
@@ -1040,6 +1055,7 @@ Analyse the evidence and output your scratchpad JSON.`;
         clarifyingQuestion: null,
         planNotes: "",
         sectionHint: null,
+        termExpansions: [],
       };
     }
 
@@ -1234,6 +1250,71 @@ Analyse the evidence and output your scratchpad JSON.`;
           }
         } catch (gapErr) {
           req.log.warn({ err: gapErr }, "agent-chat: gap re-retrieval failed — continuing with existing context");
+        }
+      }
+    }
+
+    // ── 4.66. Term-expansion retrieval pass ───────────────────────────────────
+    // When the scratchpad judges evidence weak/none on a fact question it emits
+    // termExpansions: alternative phrasings the manual may use for the same
+    // concept (e.g. "inner hex bolt" → ["hex bolt nut", "socket head bolt", …]).
+    // Fan those terms out through a single unioned FTS query and merge any new
+    // chunks found into ragChunks before the answer pass. No hardcoded synonyms.
+    if (scratchpad.termExpansions.length > 0 && scopedManualIds.length > 0) {
+      const expansionTerms = scratchpad.termExpansions
+        .join(" ")
+        .replace(/[^a-zA-Z0-9 ]/g, " ")
+        .trim()
+        .split(/\s+/)
+        .filter((w) => w.length >= 2)
+        .slice(0, 30);
+      const expansionTsQuery = expansionTerms.join(" | ");
+
+      if (expansionTsQuery.length > 0) {
+        try {
+          const expansionFts = await db.execute<ChunkRow>(sql`
+            SELECT c.id, c.manual_id, m.name AS manual_name,
+                   c.page_number, c.chunk_index, c.content,
+                   c.section_path, c.element_type, c.page_context,
+                   ts_rank(c.fts_vector, to_tsquery('english', ${expansionTsQuery})) AS rank
+            FROM chunks c JOIN manuals m ON m.id = c.manual_id
+            WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+              AND c.fts_vector @@ to_tsquery('english', ${expansionTsQuery})
+            ORDER BY rank DESC
+            LIMIT 20
+          `);
+
+          if (expansionFts.rows.length > 0) {
+            const existingExpIds = new Set(ragChunks.map((c) => c.id));
+            const newExpChunks: ChunkRow[] = [];
+            for (const row of expansionFts.rows) {
+              if (!existingExpIds.has(row.id)) {
+                newExpChunks.push(row);
+                existingExpIds.add(row.id);
+              }
+            }
+
+            if (newExpChunks.length > 0) {
+              ragChunks.push(...newExpChunks);
+              ragChunks.sort((a, b) => a.page_number - b.page_number || a.chunk_index - b.chunk_index);
+              ragContext = ragChunks.map((c, i) => {
+                const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
+                const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
+                const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
+                const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
+                const typeHint =
+                  c.element_type === "table" ? "[TABLE] " :
+                  c.element_type === "list_item" ? "[LIST] " : "";
+                return `${header}\n${typeHint}${c.content}`;
+              }).join("\n\n---\n\n");
+              req.log.info(
+                { expansionChunksAdded: newExpChunks.length, termExpansions: scratchpad.termExpansions },
+                "agent-chat: term-expansion retrieval added chunks"
+              );
+            }
+          }
+        } catch (expErr) {
+          req.log.warn({ err: expErr }, "agent-chat: term-expansion retrieval failed — continuing with existing context");
         }
       }
     }
