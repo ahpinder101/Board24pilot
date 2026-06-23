@@ -8,7 +8,7 @@ import {
   Activity, WifiOff, Network as GraphIcon, RotateCcw,
   ChevronDown, ChevronUp, Wrench, Info,
 } from "lucide-react";
-import { useGetManualStats, getGetManualStatsQueryKey, type Manual } from "@workspace/api-client-react";
+import { useGetManualStats, getGetManualStatsQueryKey, useReEnrichManual, type Manual } from "@workspace/api-client-react";
 import { ScopeSelector } from "@/components/scope-selector";
 import { cn } from "@/lib/utils";
 
@@ -119,16 +119,29 @@ function ProcessingSection({
 function CompletedSection({
   manualId,
   totalPages,
+  processingPass,
   getToken,
   onStarted,
 }: {
   manualId: number;
   totalPages: number;
+  processingPass: number;
   getToken: () => Promise<string | null>;
   onStarted: () => void;
 }) {
   const [pdfLoading, setPdfLoading] = useState(false);
   const [reExtractOpen, setReExtractOpen] = useState(false);
+  const reEnrich = useReEnrichManual({
+    mutation: {
+      onSuccess: () => {
+        toast.success("Re-enrichment started — chunk page context and BOM tables are being updated");
+        onStarted();
+      },
+      onError: () => {
+        toast.error("Failed to start re-enrichment — please try again");
+      },
+    },
+  });
   const [costEstimate, setCostEstimate] = useState<{
     estimatedCostUsd: number;
     modelLabel: string;
@@ -238,6 +251,17 @@ function CompletedSection({
           <ExternalLink className="w-3.5 h-3.5" />
           {pdfLoading ? "Opening…" : "Open PDF"}
         </button>
+        {processingPass < 8 && (
+          <button
+            onClick={() => reEnrich.mutate({ id: manualId })}
+            disabled={reEnrich.isPending}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-violet-200 bg-violet-50 text-violet-700 hover:bg-violet-100 text-xs font-medium transition-all disabled:opacity-50"
+            title="Re-run Pass 8: backfill page context labels and expand BOM tables for all chunks"
+          >
+            <Wrench className={cn("w-3.5 h-3.5", reEnrich.isPending && "animate-spin")} />
+            {reEnrich.isPending ? "Enriching…" : "Re-enrich chunks"}
+          </button>
+        )}
         <button
           onClick={() => setReExtractOpen((v) => !v)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 text-gray-500 hover:text-gray-800 hover:border-gray-400 text-xs font-medium transition-all ml-auto"
@@ -458,6 +482,7 @@ export function FileCard({ manual, onDelete, onStarted, getToken, highlight = fa
         <CompletedSection
           manualId={manual.id}
           totalPages={manual.totalPages ?? 0}
+          processingPass={manual.processingPass ?? 0}
           getToken={getToken}
           onStarted={onStarted}
         />
