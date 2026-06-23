@@ -228,6 +228,10 @@ export interface PageContent {
   text: string;
   hasImages: boolean;
   hasTables: boolean;
+  /** True when Docling extracted at least one structural element for this page. */
+  doclingExtracted?: boolean;
+  /** Count of structural elements returned by Docling for this page. */
+  doclingElementCount?: number;
   /**
    * Human-readable page number extracted from the page header/footer by Docling
    * (e.g. "7" for PDF page 16 whose first 9 pages are cover/TOC).
@@ -256,6 +260,8 @@ interface DoclingApiPage {
   elements: DoclingElement[];
   hasImages: boolean;
   hasTables: boolean;
+  doclingExtracted?: boolean;
+  doclingElementCount?: number;
 }
 
 interface DoclingApiResponse {
@@ -312,6 +318,8 @@ export async function extractWithDocling(pdfBuffer: Buffer): Promise<PdfContent 
         text:              p.text,
         hasImages:         p.hasImages,
         hasTables:         p.hasTables,
+        doclingExtracted:  p.doclingExtracted ?? ((p.elements?.length ?? 0) > 0),
+        doclingElementCount: p.doclingElementCount ?? (p.elements?.length ?? 0),
         elements:          p.elements,
       })),
     };

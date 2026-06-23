@@ -37,6 +37,12 @@ export const manualPagesTable = pgTable("manual_pages", {
   imageObjectPath: text("image_object_path"),
   hasImages: integer("has_images").notNull().default(0), // 0 or 1
   hasTables: integer("has_tables").notNull().default(0), // 0 or 1
+  /** 1 when Docling returned at least one structural element for this page. */
+  doclingExtracted: integer("docling_extracted").notNull().default(0),
+  /** Number of Docling structural elements returned for this page. */
+  doclingElementCount: integer("docling_element_count").notNull().default(0),
+  /** 1 when Vision OCR was explicitly run to repair or enrich this page. */
+  visionEscalated: integer("vision_escalated").notNull().default(0),
   description: text("description"),
   // Printed page number as it appears in the document header/footer (e.g. "7" for PDF
   // page 16 of a manual whose first 9 pages are cover/TOC). Populated by Docling extraction;

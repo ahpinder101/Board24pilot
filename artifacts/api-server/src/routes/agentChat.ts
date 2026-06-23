@@ -285,6 +285,37 @@ function buildRagContext(chunks: ChunkRow[], printedPgMap: Map<string, string>):
     .join("\n\n---\n\n");
 }
 
+function buildAssistantDebugMetadata(args: {
+  domain: TechnicalDomain;
+  evidenceSummary: EvidenceSummary;
+  detectedSymbols?: string[];
+  retrievalLanes?: string[];
+  rescueStages?: string[];
+  guidedReason?: string | null;
+  confidence?: string;
+  answerability?: string;
+  missingItems?: string[];
+}) {
+  return {
+    domain: args.domain,
+    manualsSearched: args.evidenceSummary.manualsSearched,
+    evidenceSummary: {
+      chunksFound: args.evidenceSummary.chunksFound,
+      entitiesFound: args.evidenceSummary.entitiesFound,
+      pathsFound: args.evidenceSummary.pathsFound,
+    },
+    detectedSymbols: args.detectedSymbols ?? [],
+    retrievalLanes: args.retrievalLanes ?? [],
+    rescueStages: args.rescueStages ?? [],
+    guidedReason: args.guidedReason ?? null,
+    validation: {
+      confidence: args.confidence,
+      answerability: args.answerability,
+      missingItems: args.missingItems ?? [],
+    },
+  };
+}
+
 // POST /chat/agent
 router.post("/chat/agent", async (req: Request, res: Response) => {
   const {
@@ -1120,6 +1151,13 @@ Analyse the evidence and output your scratchpad JSON.`;
       });
       await db.insert(chatMessagesTable).values({
         sessionId, role: "assistant", content: clarifyText, citations: null,
+        debugMetadata: buildAssistantDebugMetadata({
+          domain: scratchpad.domain,
+          evidenceSummary,
+          guidedReason: "clarifying_question",
+          answerability: "partially_answerable",
+          missingItems: scratchpad.uncoveredAspects,
+        }),
       });
       res.json({
         answer: clarifyText,
@@ -1489,7 +1527,27 @@ Analyse the evidence and output your scratchpad JSON.`;
         sessionId, role: "user", content: trimmedQuestion, citations: null,
       });
       await db.insert(chatMessagesTable).values({
-        sessionId, role: "assistant", content: guidedText, citations: null,
+        sessionId,
+        role: "assistant",
+        content: guidedText,
+        citations: null,
+        debugMetadata: buildAssistantDebugMetadata({
+          domain: scratchpad.domain,
+          evidenceSummary,
+          detectedSymbols: domainRetrievalMetadata.detectedSymbols,
+          retrievalLanes: [
+            domainRetrievalMetadata.retrievalLane,
+            ...(expansionRescued ? ["term_expansion"] : []),
+          ].filter((lane) => lane && lane !== "none"),
+          rescueStages: [
+            domainRetrievalMetadata.rescueStageUsed,
+            ...(expansionRescued ? ["term_expansion"] : []),
+          ].filter((stage) => stage && stage !== "none"),
+          guidedReason: "scratchpad_cannot_answer",
+          confidence: "unverified",
+          answerability: "not_answerable",
+          missingItems: scratchpad.uncoveredAspects,
+        }),
       });
       res.json({
         answer: guidedText,
@@ -2003,6 +2061,10 @@ Please answer based on the above information.`;
       });
     }
 
+    const finalConfidence = isGuided
+      ? ("unverified" as const)
+      : finalSpecialistResult.confidence;
+
     // ── 10. Persist to chat_messages ──────────────────────────────────────────
     await db.insert(chatMessagesTable).values({
       sessionId,
@@ -2016,6 +2078,26 @@ Please answer based on the above information.`;
       role: "assistant",
       content: finalAnswer,
       citations,
+      debugMetadata: buildAssistantDebugMetadata({
+        domain: technicalDomain,
+        evidenceSummary,
+        detectedSymbols: domainRetrievalMetadata.detectedSymbols,
+        retrievalLanes: [
+          domainRetrievalMetadata.retrievalLane,
+          ...(phraseChunkIds.size > 0 ? ["phrase"] : []),
+          ...(andQueryChunkIds.size > 0 ? ["and_query"] : []),
+          ...(expansionRescued ? ["term_expansion"] : []),
+        ].filter((lane) => lane && lane !== "none"),
+        rescueStages: [
+          domainRetrievalMetadata.rescueStageUsed,
+          ...(expansionRescued ? ["term_expansion"] : []),
+          ...(isGuided ? ["guided_response"] : []),
+        ].filter((stage) => stage && stage !== "none"),
+        guidedReason: isGuided ? "specialist_guided_response" : null,
+        confidence: finalConfidence,
+        answerability: finalSpecialistResult.answerability,
+        missingItems: finalSpecialistResult.validationSummary.missingItems,
+      }),
     });
 
     const finalValidationStatus =
@@ -2041,10 +2123,6 @@ Please answer based on the above information.`;
         issue: "conflicting" as const,
       })),
     ];
-
-    const finalConfidence = isGuided
-      ? ("unverified" as const)
-      : finalSpecialistResult.confidence;
 
     res.json({
       answer: finalAnswer,

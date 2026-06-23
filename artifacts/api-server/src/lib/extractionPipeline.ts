@@ -68,6 +68,36 @@ async function setManualStatus(
     .where(eq(manualsTable.id, manualId));
 }
 
+async function saveVisionPageText(
+  manualId: number,
+  pageNumber: number,
+  text: string
+) {
+  const updated = await db
+    .update(manualPagesTable)
+    .set({ rawText: sanitizeText(text), visionEscalated: 1 })
+    .where(
+      and(
+        eq(manualPagesTable.manualId, manualId),
+        eq(manualPagesTable.pageNumber, pageNumber)
+      )
+    )
+    .returning({ id: manualPagesTable.id });
+
+  if (updated.length > 0) return;
+
+  await db.insert(manualPagesTable).values({
+    manualId,
+    pageNumber,
+    rawText: sanitizeText(text),
+    hasImages: 0,
+    hasTables: 0,
+    doclingExtracted: 0,
+    doclingElementCount: 0,
+    visionEscalated: 1,
+  });
+}
+
 // ─── PASS 1: Document structure ────────────────────────────────────────────
 
 async function pass1DocumentStructure(
@@ -117,7 +147,16 @@ Analyze the document and return a JSON object with:
 
 async function pass2PageContent(
   manualId: number,
-  pages: Array<{ pageNumber: number; text: string; hasImages: boolean; hasTables: boolean; printedPageNumber?: string | null }>
+  pages: Array<{
+    pageNumber: number;
+    text: string;
+    hasImages: boolean;
+    hasTables: boolean;
+    printedPageNumber?: string | null;
+    doclingExtracted?: boolean;
+    doclingElementCount?: number;
+    elements?: DoclingElement[];
+  }>
 ) {
   // Check which page numbers are already in the DB so we can skip them on resume.
   const existingRows = await db
@@ -147,6 +186,8 @@ async function pass2PageContent(
     rawText: sanitizeText(p.text),
     hasImages: p.hasImages ? 1 : 0,
     hasTables: p.hasTables ? 1 : 0,
+    doclingExtracted: p.doclingExtracted ? 1 : 0,
+    doclingElementCount: p.doclingElementCount ?? p.elements?.length ?? 0,
     // Store the human-readable page number from Docling header extraction
     // (e.g. "7" for PDF page 16 whose first 9 pages are cover/TOC).
     // Omit entirely for pdf-parse fallback (avoids storing null explicitly).
@@ -156,6 +197,73 @@ async function pass2PageContent(
   for (let i = 0; i < pageRecords.length; i += 20) {
     await db.insert(manualPagesTable).values(pageRecords.slice(i, i + 20));
   }
+}
+
+function isElectricalLikeDocument(documentType: string | null | undefined): boolean {
+  const text = (documentType ?? "").toLowerCase();
+  return (
+    text.includes("electrical") ||
+    text.includes("wiring") ||
+    text.includes("schematic") ||
+    text.includes("control")
+  );
+}
+
+function countSymbolishTokens(text: string): number {
+  const matches = text.match(/\b(?:RL|KM|FR|HL|TB|XT|SQ|SV|KA|FU|PS|PLC|M)\d+[A-Z]?\b|\b(?:X|Y|Q|I|O)\d+(?:[.:]\d{1,2})\b|\bQ\d+:\d{1,2}\b/gi);
+  return matches?.length ?? 0;
+}
+
+function hasLowValueDiagramText(
+  page: {
+    text: string;
+    elements?: DoclingElement[];
+    doclingExtracted?: boolean;
+    doclingElementCount?: number;
+  },
+  documentType: string | null | undefined
+): boolean {
+  if (!isElectricalLikeDocument(documentType)) return false;
+
+  const text = (page.text ?? "").trim();
+  const textLength = text.length;
+  const symbolCount = countSymbolishTokens(text);
+  const uppercaseLabelLines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && line.length <= 20 && /[A-Z0-9]/.test(line))
+    .length;
+  const sentenceCount = (text.match(/[.!?]/g)?.length ?? 0) + (text.match(/\b(power rails|loads|switching elements|circuit traces|parameter table)\b/gi)?.length ?? 0);
+  const elementCount = page.doclingElementCount ?? page.elements?.length ?? 0;
+  const shortElementCount = (page.elements ?? []).filter((element) => (element.text ?? "").trim().length > 0 && (element.text ?? "").trim().length <= 20).length;
+
+  let score = 0;
+  if (!page.doclingExtracted || elementCount === 0) score += 2;
+  if (textLength < 80) score += 2;
+  else if (textLength < 160) score += 1;
+  if (symbolCount >= 3) score += 1;
+  if (uppercaseLabelLines >= 4) score += 1;
+  if (sentenceCount === 0) score += 1;
+  if (elementCount > 0 && shortElementCount / elementCount >= 0.7) score += 1;
+
+  return score >= 4;
+}
+
+function needsVisionEscalation(
+  page: {
+    pageNumber: number;
+    text: string;
+    elements?: DoclingElement[];
+    doclingExtracted?: boolean;
+    doclingElementCount?: number;
+  },
+  documentType: string | null | undefined
+): boolean {
+  const text = (page.text ?? "").trim();
+  if (!page.doclingExtracted || (page.doclingElementCount ?? page.elements?.length ?? 0) === 0) return true;
+  if (text.length < 20) return true;
+  if (text.length < 60 && countSymbolishTokens(text) >= 2) return true;
+  return hasLowValueDiagramText(page, documentType);
 }
 
 // ─── PASS 4: Entity extraction ──────────────────────────────────────────────
@@ -1087,11 +1195,13 @@ If the page is blank or contains only unlabelled artwork with no text, output ex
 async function passVisionOcr(
   manualId: number,
   pdfBuffer: Buffer,
-  pageNumbers: number[]
+  pageNumbers: number[],
+  opts?: { forcePages?: number[] }
 ): Promise<Array<{ pageNumber: number; text: string }>> {
   const results: Array<{ pageNumber: number; text: string }> = [];
   const CONCURRENCY = 5;
   const totalPages = pageNumbers.length;
+  const forcePages = new Set(opts?.forcePages ?? []);
 
   // Load already-OCR'd pages from DB (only for the requested pages) so we can skip them on resume.
   const existingRows = await db
@@ -1100,7 +1210,12 @@ async function passVisionOcr(
     .where(eq(manualPagesTable.manualId, manualId));
   const alreadyOcrd = new Map<number, string>();
   for (const row of existingRows) {
-    if (row.rawText && row.rawText.trim().length > 0 && pageNumbers.includes(row.pageNumber)) {
+    if (
+      !forcePages.has(row.pageNumber) &&
+      row.rawText &&
+      row.rawText.trim().length > 0 &&
+      pageNumbers.includes(row.pageNumber)
+    ) {
       alreadyOcrd.set(row.pageNumber, row.rawText);
     }
   }
@@ -1163,15 +1278,7 @@ async function passVisionOcr(
 
     // Persist OCR text to manual_pages immediately so progress is saved
     for (const { pageNumber, text } of batchResults) {
-      await db
-        .update(manualPagesTable)
-        .set({ rawText: sanitizeText(text) })
-        .where(
-          and(
-            eq(manualPagesTable.manualId, manualId),
-            eq(manualPagesTable.pageNumber, pageNumber)
-          )
-        );
+      await saveVisionPageText(manualId, pageNumber, text);
     }
 
     logger.info(
@@ -1216,7 +1323,7 @@ export async function reprocessManualWithVision(
     // Vision OCR — populate rawText for every page
     await updateManualPass(manualId, 2);
     const allPageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
-    const ocrPages = await passVisionOcr(manualId, pdfBuffer, allPageNumbers);
+    const ocrPages = await passVisionOcr(manualId, pdfBuffer, allPageNumbers, { forcePages: allPageNumbers });
     const fullText = ocrPages.map((p) => p.text).join("\n\n");
 
     // Pass 1: Document structure (from OCR text)
@@ -1380,15 +1487,7 @@ export async function reprocessPageRangeWithVision(
     ocrPages.push(...batchResults);
 
     for (const { pageNumber, text } of batchResults) {
-      await db
-        .update(manualPagesTable)
-        .set({ rawText: sanitizeText(text) })
-        .where(
-          and(
-            eq(manualPagesTable.manualId, manualId),
-            eq(manualPagesTable.pageNumber, pageNumber)
-          )
-        );
+      await saveVisionPageText(manualId, pageNumber, text);
     }
   }
 
@@ -1962,49 +2061,69 @@ export async function runExtractionPipeline(
     // pass2PageContent already checks which pages exist and only inserts new ones.
     await pass2PageContent(manualId, pdfContent.pages);
 
-    // ── Sparse-page Vision OCR ────────────────────────────────────────────────
-    // Run Vision OCR on every page where pdf-parse returned < 20 chars —
-    // these are either scanned pages or blank pages.  We decide per-page rather
-    // than using a whole-document ratio so mixed-format PDFs (part text, part
-    // scanned wiring diagrams) get correct OCR on their image pages without
-    // flooding fully-text pages through the vision pipeline.
-    const sparsePages = pdfContent.pages.filter((p) => !p.text || p.text.trim().length < 20);
-    const sparsePageNums = sparsePages.map((p) => p.pageNumber);
+    // ── Auto-escalated Vision OCR ─────────────────────────────────────────────
+    // Docling remains the first parser, but it no longer decides whether a page
+    // exists or whether diagram-heavy pages get OCR help. Any page with missing,
+    // empty, or low-value diagram extraction is escalated automatically.
+    const pagesNeedingVision = pdfContent.pages.filter((p) => needsVisionEscalation(p, structure.documentType));
+    const pagesNeedingVisionNums = pagesNeedingVision.map((p) => p.pageNumber);
 
-    if (sparsePageNums.length > 0) {
-      // Check whether vision OCR was already fully (or partially) completed
-      // for the sparse pages (resume-safe: passVisionOcr skips already-written rows).
-      const ocrRows = await db
-        .select({ pageNumber: manualPagesTable.pageNumber, rawText: manualPagesTable.rawText })
+    if (pagesNeedingVisionNums.length > 0) {
+      const existingRows = await db
+        .select({
+          pageNumber: manualPagesTable.pageNumber,
+          rawText: manualPagesTable.rawText,
+          description: manualPagesTable.description,
+        })
         .from(manualPagesTable)
-        .where(and(eq(manualPagesTable.manualId, manualId), isNotNull(manualPagesTable.rawText)));
-      // Only count rows with substantial text — pdf-parse fills even blank pages
-      // with a few whitespace chars which must not be treated as real OCR output.
-      const ocrSavedPages = new Map(
-        ocrRows
-          .filter((r) => (r.rawText ?? "").trim().length >= 20 && sparsePageNums.includes(r.pageNumber))
-          .map((r) => [r.pageNumber, r.rawText!])
-      );
+        .where(eq(manualPagesTable.manualId, manualId));
 
-      if (ocrSavedPages.size >= sparsePageNums.length * 0.8) {
-        // OCR already done for the sparse pages — patch in-memory from DB
-        logger.info({ manualId, saved: ocrSavedPages.size, sparsePages: sparsePageNums.length }, "Vision OCR: skipping — rawText already in DB");
-        await setActivity(manualId, `Vision OCR ✓ — ${ocrSavedPages.size} sparse pages already OCR'd, loading from database`);
+      const reusableStoredText = new Map<number, string>();
+      for (const row of existingRows) {
+        if (!pagesNeedingVisionNums.includes(row.pageNumber)) continue;
+        const rawText = (row.rawText ?? "").trim();
+        const description = (row.description ?? "").trim();
+        const currentPage = pagesNeedingVision.find((page) => page.pageNumber === row.pageNumber);
+        const currentText = (currentPage?.text ?? "").trim();
+        const reusable = description.length >= 60
+          ? description
+          : rawText.length >= 120 && rawText.length > currentText.length + 40
+          ? rawText
+          : "";
+        if (reusable) reusableStoredText.set(row.pageNumber, reusable);
+      }
+
+      if (reusableStoredText.size > 0) {
         for (const page of pdfContent.pages) {
-          const saved = ocrSavedPages.get(page.pageNumber);
+          const saved = reusableStoredText.get(page.pageNumber);
           if (saved) page.text = saved;
         }
-      } else {
-        // Run/resume vision OCR only for sparse pages (passVisionOcr saves
-        // rawText per-page so a resume skips pages already written).
-        logger.info({ manualId, sparsePages: sparsePageNums.length }, "Sparse pages detected — running Vision OCR");
-        await setActivity(manualId, `Vision OCR — scanning ${sparsePageNums.length} sparse/scanned pages (pages: ${sparsePageNums.join(", ")})`);
-        const ocrPages = await passVisionOcr(manualId, pdfBuffer, sparsePageNums);
+      }
+
+      const forceVisionPages = pagesNeedingVisionNums.filter((pageNumber) => !reusableStoredText.has(pageNumber));
+
+      if (forceVisionPages.length > 0) {
+        logger.info(
+          { manualId, pages: forceVisionPages.length, pageNumbers: forceVisionPages },
+          "Auto-escalated Vision OCR: running on placeholder/low-value pages"
+        );
+        await setActivity(
+          manualId,
+          `Vision OCR — auto-escalating ${forceVisionPages.length} page(s) with missing or low-value extraction`
+        );
+        const ocrPages = await passVisionOcr(manualId, pdfBuffer, forceVisionPages, { forcePages: forceVisionPages });
         for (const ocrPage of ocrPages) {
           const page = pdfContent.pages.find((p) => p.pageNumber === ocrPage.pageNumber);
           if (page) page.text = ocrPage.text;
         }
+      } else {
+        logger.info(
+          { manualId, reused: reusableStoredText.size, pagesNeedingVision: pagesNeedingVisionNums.length },
+          "Auto-escalated Vision OCR: reused stored OCR text"
+        );
+        await setActivity(manualId, `Vision OCR ✓ — reused stored OCR on ${reusableStoredText.size} page(s)`);
       }
+
       pdfContent.fullText = pdfContent.pages.map((p) => p.text).join("\n\n");
     }
 

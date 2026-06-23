@@ -13,12 +13,32 @@ export interface ChatCitation {
   pageContext?: string;
 }
 
+export interface AssistantDebugMetadata {
+  domain?: string;
+  manualsSearched?: string[];
+  evidenceSummary?: {
+    chunksFound: number;
+    entitiesFound: number;
+    pathsFound: number;
+  };
+  detectedSymbols?: string[];
+  retrievalLanes?: string[];
+  rescueStages?: string[];
+  guidedReason?: string | null;
+  validation?: {
+    confidence?: string;
+    answerability?: string;
+    missingItems?: string[];
+  };
+}
+
 export const chatMessagesTable = pgTable("chat_messages", {
   id: serial("id").primaryKey(),
   sessionId: text("session_id").notNull(),
   role: text("role").notNull(),
   content: text("content").notNull(),
   citations: jsonb("citations").$type<ChatCitation[]>(),
+  debugMetadata: jsonb("debug_metadata").$type<AssistantDebugMetadata | null>(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

@@ -21,7 +21,6 @@ import {
   GetManualStatsParams,
   GetManualGraphParams,
 } from "@workspace/api-zod";
-import { ObjectStorageService } from "../lib/objectStorage.js";
 import { runExtractionPipeline, rechunkManual, reprocessManualWithVision, reprocessPageRangeWithVision, extractGraphFromExistingText, reprocessCompoundPages, repairGraphPasses, pass8EnrichChunks } from "../lib/extractionPipeline.js";
 import { logger } from "../lib/logger.js";
 import { expensiveOpLimiter } from "../middlewares/rateLimit.js";
@@ -45,7 +44,6 @@ const upload = multer({
 });
 
 const router = Router();
-const storage = new ObjectStorageService();
 
 // Columns to select when returning manuals to clients (excludes the large pdf_data blob)
 const manualCols = {
@@ -62,6 +60,76 @@ const manualCols = {
   createdAt: manualsTable.createdAt,
   updatedAt: manualsTable.updatedAt,
 };
+
+function buildContiguousRanges(pageNumbers: number[]): Array<{ startPage: number; endPage: number }> {
+  const sorted = [...new Set(pageNumbers)].sort((a, b) => a - b);
+  if (sorted.length === 0) return [];
+  const ranges: Array<{ startPage: number; endPage: number }> = [];
+  let startPage = sorted[0]!;
+  let endPage = startPage;
+  for (let i = 1; i < sorted.length; i++) {
+    const page = sorted[i]!;
+    if (page === endPage + 1) {
+      endPage = page;
+      continue;
+    }
+    ranges.push({ startPage, endPage });
+    startPage = page;
+    endPage = page;
+  }
+  ranges.push({ startPage, endPage });
+  return ranges;
+}
+
+function countSymbolishTokens(text: string): number {
+  const matches = text.match(/\b(?:RL|KM|FR|HL|TB|XT|SQ|SV|KA|FU|PS|PLC|M)\d+[A-Z]?\b|\b(?:X|Y|Q|I|O)\d+(?:[.:]\d{1,2})\b|\bQ\d+:\d{1,2}\b/gi);
+  return matches?.length ?? 0;
+}
+
+function isElectricalLikeDocument(documentType: string | null | undefined): boolean {
+  const text = (documentType ?? "").toLowerCase();
+  return (
+    text.includes("electrical") ||
+    text.includes("wiring") ||
+    text.includes("schematic") ||
+    text.includes("control")
+  );
+}
+
+async function getManualExtractionSummary(manualId: number, totalPages: number | null | undefined) {
+  const pageSummaryResult = await db.execute<{
+    stored_pages: number;
+    docling_pages: number;
+    placeholder_pages: number;
+    vision_pages: number;
+  }>(sql`
+    SELECT
+      COUNT(*)::int AS stored_pages,
+      COUNT(*) FILTER (WHERE mp.docling_extracted = 1)::int AS docling_pages,
+      COUNT(*) FILTER (
+        WHERE COALESCE(mp.docling_extracted, 0) = 0
+          AND COALESCE(NULLIF(BTRIM(mp.raw_text), ''), NULLIF(BTRIM(mp.description), '')) IS NULL
+      )::int AS placeholder_pages,
+      COUNT(*) FILTER (WHERE mp.vision_escalated = 1)::int AS vision_pages
+    FROM manual_pages mp
+    WHERE mp.manual_id = ${manualId}
+  `);
+  const [pageSummary] = pageSummaryResult.rows;
+
+  const [chunkSummary] = await db
+    .select({ cnt: count() })
+    .from(chunksTable)
+    .where(eq(chunksTable.manualId, manualId));
+
+  return {
+    physicalPages: totalPages ?? 0,
+    storedPages: pageSummary?.stored_pages ?? 0,
+    pagesWithDoclingElements: pageSummary?.docling_pages ?? 0,
+    placeholderPages: pageSummary?.placeholder_pages ?? 0,
+    pagesAutoEscalatedToVision: pageSummary?.vision_pages ?? 0,
+    finalChunkCount: chunkSummary?.cnt ?? 0,
+  };
+}
 
 function getPdfBuffer(manual: { pdfData?: Buffer | null }): Buffer {
   if (!manual.pdfData) throw new Error("PDF not stored in database — please re-upload this manual");
@@ -346,7 +414,8 @@ router.get("/manuals/:id", async (req, res) => {
     return;
   }
 
-  res.json(manual);
+  const extractionSummary = await getManualExtractionSummary(manual.id, manual.totalPages);
+  res.json({ ...manual, extractionSummary });
 });
 
 // DELETE /manuals/:id
@@ -539,6 +608,138 @@ router.post("/manuals/:id/reprocess-vision", expensiveOpLimiter, async (req, res
   });
 
   res.json({ ok: true, manualId, message: "Vision reprocess started" });
+});
+
+// POST /manuals/:id/repair-diagram-pages — detect placeholder/weak diagram pages and repair them
+router.post("/manuals/:id/repair-diagram-pages", expensiveOpLimiter, async (req, res) => {
+  const manualId = parseInt(String(req.params.id ?? ""), 10);
+  if (isNaN(manualId)) {
+    res.status(400).json({ error: "Invalid manual id" });
+    return;
+  }
+
+  const [manual] = await db
+    .select()
+    .from(manualsTable)
+    .where(eq(manualsTable.id, manualId));
+
+  if (!manual) {
+    res.status(404).json({ error: "Manual not found" });
+    return;
+  }
+
+  let pdfBuffer: Buffer;
+  try {
+    pdfBuffer = getPdfBuffer(manual);
+  } catch (err) {
+    req.log.error({ err, manualId }, "Failed to read PDF from database for diagram repair");
+    res.status(500).json({ error: String(err) });
+    return;
+  }
+
+  const pageRows = await db.execute<{
+    page_number: number;
+    raw_text: string | null;
+    description: string | null;
+    docling_extracted: number | null;
+    vision_escalated: number | null;
+    chunk_count: number;
+  }>(sql`
+    SELECT
+      mp.page_number,
+      mp.raw_text,
+      mp.description,
+      mp.docling_extracted,
+      mp.vision_escalated,
+      COUNT(c.id)::int AS chunk_count
+    FROM manual_pages mp
+    LEFT JOIN chunks c
+      ON c.manual_id = mp.manual_id
+     AND c.page_number = mp.page_number
+    WHERE mp.manual_id = ${manualId}
+    GROUP BY
+      mp.page_number,
+      mp.raw_text,
+      mp.description,
+      mp.docling_extracted,
+      mp.vision_escalated
+    ORDER BY mp.page_number
+  `);
+
+  const existingPages = new Set(pageRows.rows.map((row) => row.page_number));
+  const totalPages = manual.totalPages ?? 0;
+  const missingPages: number[] = [];
+  for (let pageNumber = 1; pageNumber <= totalPages; pageNumber++) {
+    if (!existingPages.has(pageNumber)) missingPages.push(pageNumber);
+  }
+
+  const candidatePages = pageRows.rows
+    .filter((row) => {
+      const rawText = (row.raw_text ?? "").trim();
+      const description = (row.description ?? "").trim();
+      const effectiveText = description.length > rawText.length ? description : rawText;
+      const isPlaceholder =
+        (row.docling_extracted ?? 0) === 0 &&
+        effectiveText.length === 0;
+      const weakElectricalPage =
+        isElectricalLikeDocument(manual.documentType) &&
+        effectiveText.length < 180 &&
+        row.chunk_count === 0 &&
+        countSymbolishTokens(effectiveText) >= 1;
+      const emptyUnrepairedPage =
+        effectiveText.length < 20 &&
+        (row.vision_escalated ?? 0) === 0;
+      return isPlaceholder || weakElectricalPage || emptyUnrepairedPage;
+    })
+    .map((row) => row.page_number);
+
+  const allRepairPages = [...new Set([...missingPages, ...candidatePages])].sort((a, b) => a - b);
+  if (allRepairPages.length === 0) {
+    res.json({ ok: true, manualId, mode: "none", repairedPages: 0, message: "No diagram repair candidates found" });
+    return;
+  }
+
+  const useFullReprocess =
+    missingPages.length > 0 ||
+    (totalPages > 0 && allRepairPages.length / totalPages >= 0.25);
+
+  if (useFullReprocess) {
+    if (!(await claimForProcessing(manualId))) {
+      res.status(409).json({ error: "Manual is already processing" });
+      return;
+    }
+
+    reprocessManualWithVision(manualId, pdfBuffer).catch((err) => {
+      req.log.error({ err, manualId }, "Diagram repair full vision reprocess failed");
+    });
+
+    res.json({
+      ok: true,
+      manualId,
+      mode: "full_reprocess",
+      missingPages,
+      candidatePages,
+      repairedPages: allRepairPages.length,
+      message: "Diagram repair started with full vision reprocess",
+    });
+    return;
+  }
+
+  const ranges = buildContiguousRanges(allRepairPages);
+  for (const range of ranges) {
+    await reprocessPageRangeWithVision(manualId, pdfBuffer, range.startPage, range.endPage);
+    await extractGraphFromExistingText(manualId, { startPage: range.startPage, endPage: range.endPage });
+  }
+
+  res.json({
+    ok: true,
+    manualId,
+    mode: "page_ranges",
+    missingPages,
+    candidatePages,
+    ranges,
+    repairedPages: allRepairPages.length,
+  });
 });
 
 // POST /manuals/:id/reprocess-vision-pages — OCR a specific page range only
