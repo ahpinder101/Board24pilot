@@ -2201,7 +2201,8 @@ export async function reprocessCompoundPages(
  */
 async function detectPageAnchor(
   chunks: Array<{ content: string; elementType: string | null }>,
-  manualName: string
+  manualName: string,
+  rejectedLabels: ReadonlySet<string> = new Set()
 ): Promise<string> {
   const GENERIC_RE = /^(\d{4}[.\-/]\d{2}[.\-/]\d{2}|\d+\.?\d*)$/;
 
@@ -2243,15 +2244,16 @@ async function detectPageAnchor(
   const headerChunk = chunks.find(c => c.elementType === "section_header");
   if (headerChunk) {
     const text = headerChunk.content.replace(/^\[[^\]]+\]\n/, "").split("\n")[0].trim();
-    if (!isGeneric(text)) return `${manualName} — ${text}`;
+    if (!isGeneric(text) && !rejectedLabels.has(text)) return `${manualName} — ${text}`;
   }
 
   // 2. Keyword-anchored lines within the first 6 lines of any chunk.
   //    Skip internal extraction markers (PAGE_TYPE: ...) — look past them.
+  //    Skip labels rejected as document-wide repeated strings.
   for (const chunk of chunks) {
     for (const line of headLines(chunk.content)) {
       if (INTERNAL_MARKER_RE.test(line)) continue;
-      if (ANCHOR_LABEL_RE.test(line) && !isGeneric(line)) {
+      if (ANCHOR_LABEL_RE.test(line) && !isGeneric(line) && !rejectedLabels.has(line)) {
         const abbreviated = line.length > 120 ? line.slice(0, 120) : line;
         return `${manualName} — ${abbreviated}`;
       }
@@ -2262,7 +2264,13 @@ async function detectPageAnchor(
   const firstChunk = chunks[0];
   if (firstChunk) {
     for (const line of headLines(firstChunk.content)) {
-      if (DRAW_REF_RE.test(line) && !isGeneric(line) && line.length >= 5 && line.length < 100) {
+      if (
+        DRAW_REF_RE.test(line) &&
+        !isGeneric(line) &&
+        line.length >= 5 &&
+        line.length < 100 &&
+        !rejectedLabels.has(line)
+      ) {
         return `${manualName} — ${line}`;
       }
     }
@@ -2358,34 +2366,38 @@ function buildStitchedChunks(
 }
 
 /**
- * Call GPT-4o to convert a markdown BOM/parts-list table into an array of
- * natural-language sentences (one per row).  Returns [] for non-BOM tables
- * or on any error to keep Pass 8 resilient.
+ * Call GPT-4o to convert any engineering table into an array of natural-language
+ * sentences (one per data row).  Handles parts lists, BOMs, parameter/spec tables,
+ * fault-code tables, wiring schedules, and other structured engineering data.
+ * Returns [] for tables with too few rows or on any error to keep Pass 8 resilient.
  */
-async function expandTableToBomSentences(
+async function expandTableToSentences(
   tableMarkdown: string,
   anchor: string
 ): Promise<string[]> {
-  const BOM_RE =
-    /(?:part\s*(?:no|nr|number|#)|q'?ty|quantity|name\s+of\s+part|component\s+name|item\s+(?:no|nr|description)|material\s+(?:no|number)|spare\s+part)/i;
-  if (!BOM_RE.test(tableMarkdown)) return [];
-  if (tableMarkdown.length < 60 || tableMarkdown.length > 4000) return [];
+  if (tableMarkdown.length < 40 || tableMarkdown.length > 4000) return [];
+  // Need at least header row + separator + 1 data row
+  const dataRows = tableMarkdown
+    .split("\n")
+    .filter(l => l.includes("|") && !/^[\|\s\-:]+$/.test(l));
+  if (dataRows.length < 2) return [];
 
-  const prompt = `You are an engineering data extractor. Below is a parts-list or BOM table in markdown format.
+  const prompt = `You are an engineering data extractor. Below is a table from a technical manual.
 
-Convert it into natural-language sentences — one per unique part/item row. Each sentence must include:
-- Part name
-- Part number (if present)
-- Quantity (if present)
-- Any remarks or specifications
+Step 1 — Identify the table type: parts list / BOM, parameter specifications, fault/error codes, wiring schedule, material properties, or other.
+Step 2 — Convert each data row into a natural-language sentence that includes ALL column values.
+  • Parts/BOM: include part name, part number, quantity, and any remarks.
+  • Parameter/spec: include parameter name, value, and units.
+  • Fault/code: include the code and its description.
+  • Other: include every non-empty column.
 
 Prefix EVERY sentence with: "${anchor}"
 
 Rules:
-- Output ONLY a JSON array of strings.  No preamble or explanation.
-- Omit header rows and blank rows.
-- Maximum 50 sentences.
-- Keep each sentence concise (≤ 120 chars).
+- Output ONLY a JSON array of strings.  No preamble, no type label, no explanation.
+- Omit header rows, separator rows, and fully blank rows.
+- Maximum 60 sentences.
+- Keep each sentence concise (≤ 140 chars).
 
 TABLE:
 ${tableMarkdown}`;
@@ -2393,7 +2405,7 @@ ${tableMarkdown}`;
   try {
     const response = await openai.chat.completions.create({
       model: MODEL,
-      max_completion_tokens: 1500,
+      max_completion_tokens: 2000,
       temperature: 0,
       messages: [{ role: "user", content: prompt }],
     });
@@ -2403,9 +2415,9 @@ ${tableMarkdown}`;
     const parsed = JSON.parse(match[0]) as unknown[];
     return parsed
       .filter((s): s is string => typeof s === "string" && s.length > 10)
-      .slice(0, 50);
+      .slice(0, 60);
   } catch (err) {
-    logger.warn({ err }, "pass8: table BOM expansion failed — skipping table");
+    logger.warn({ err }, "pass8: table expansion failed — skipping table");
     return [];
   }
 }
@@ -2419,10 +2431,10 @@ export interface Pass8Result {
 /**
  * Pass 8 — Self-Contained Chunk Enrichment.
  *
- * @param forceReset - When true (re-enrich endpoint), strips existing [anchor]
- *   prefixes and deletes all semantic_expansion chunks before re-running, giving
- *   a fully clean result.  When false (default, main pipeline), skips pages
- *   where page_context is already set so a crashed pipeline can safely resume.
+ * @param forceReset - When true (re-enrich endpoint), clears page_context,
+ *   deletes expansion chunks, and re-runs from scratch.  When false (default,
+ *   main pipeline), skips pages where page_context is already set — safe to
+ *   call after a crash since page_context is written LAST as a completion marker.
  */
 export async function pass8EnrichChunks(
   manualId: number,
@@ -2431,11 +2443,11 @@ export async function pass8EnrichChunks(
   logger.info({ manualId, forceReset }, "pass8: starting chunk enrichment");
 
   if (forceReset) {
-    // Strip any existing [anchor]\n prefix that a prior run may have prepended,
-    // then clear page_context and delete old expansion chunks.
+    // Clear all pass-8 output: strip existing [anchor]\n prefixes, null
+    // page_context, and delete old expansion chunks so a clean re-run can start.
     await db.execute(
       sql`UPDATE chunks
-          SET content     = regexp_replace(content, E'^\\[[^\\]]+\\]\\n', ''),
+          SET content      = regexp_replace(content, E'^\\[[^\\]]+\\]\\n', ''),
               page_context = NULL
           WHERE manual_id = ${manualId}
             AND element_type != 'semantic_expansion'`
@@ -2450,6 +2462,41 @@ export async function pass8EnrichChunks(
     .from(manualsTable)
     .where(eq(manualsTable.id, manualId));
   const manualName = manualRow?.name ?? `Manual ${manualId}`;
+
+  // ── Frequency pre-pass: detect document-wide repeated labels ─────────────────
+  // Any section_header first-line appearing on more than MAX_REPEATED distinct
+  // pages is a document-wide header (e.g. repeated cover title), not a specific
+  // page identifier.  Collect these into rejectedLabels so detectPageAnchor skips
+  // them and falls through to a more specific heuristic or LLM fallback.
+  const MAX_REPEATED = 2;
+  const allHeaderChunks = await db
+    .select({ content: chunksTable.content, pageNumber: chunksTable.pageNumber })
+    .from(chunksTable)
+    .where(
+      and(
+        eq(chunksTable.manualId, manualId),
+        eq(chunksTable.elementType, "section_header")
+      )
+    );
+  const labelPageSets = new Map<string, Set<number>>();
+  for (const { content, pageNumber } of allHeaderChunks) {
+    const firstLine = content
+      .replace(/^\[[^\]]+\]\n/, "")
+      .split("\n")[0]
+      .trim()
+      .slice(0, 120);
+    if (!firstLine) continue;
+    if (!labelPageSets.has(firstLine)) labelPageSets.set(firstLine, new Set());
+    labelPageSets.get(firstLine)!.add(pageNumber);
+  }
+  const rejectedLabels = new Set<string>(
+    [...labelPageSets.entries()]
+      .filter(([, pages]) => pages.size > MAX_REPEATED)
+      .map(([text]) => text)
+  );
+  if (rejectedLabels.size > 0) {
+    logger.info({ manualId, rejectedLabels: [...rejectedLabels] }, "pass8: ignoring repeated document-wide labels");
+  }
 
   // Ordered list of distinct page numbers that have non-expansion chunks
   const pageRows = await db
@@ -2484,36 +2531,38 @@ export async function pass8EnrichChunks(
 
     if (pageChunks.length === 0) continue;
 
-    // Resumability: skip pages already fully enriched (non-forceReset runs only)
+    // Resumability: page_context is written LAST as a completion marker.
+    // If all chunks on this page already have page_context, the page was fully
+    // processed in a prior run — skip it safely.
     if (!forceReset && pageChunks.every(c => c.pageContext !== null)) {
       enriched += pageChunks.length;
       continue;
     }
 
-    // ── 8a. Detect page anchor ────────────────────────────────────────────────
-    const anchor = await detectPageAnchor(pageChunks, manualName);
+    // ── 8a. Detect page anchor ─────────────────────────────────────────────────
+    const anchor = await detectPageAnchor(pageChunks, manualName, rejectedLabels);
 
-    // Prepend [anchor]\n into every original chunk's content AND set page_context.
-    // Using raw SQL to batch the update efficiently.
+    // Idempotent content prefix: strip any existing [anchor]\n then re-prepend.
+    // Does NOT write page_context yet — that is the crash-safe completion marker
+    // written only after all expansions for this page succeed (see end of loop).
     const pageChunkIds = pageChunks.map(c => c.id);
     if (pageChunkIds.length > 0) {
       const idList = pageChunkIds.map(id => String(id)).join(",");
       await db.execute(
         sql`UPDATE chunks
-            SET content      = '[' || ${anchor} || E']\n' || content,
-                page_context = ${anchor}
+            SET content = '[' || ${anchor} || E']\n' ||
+                          regexp_replace(content, E'^\\[[^\\]]+\\]\\n', '')
             WHERE id IN (${sql.raw(idList)})`
       );
     }
-    enriched += pageChunks.length;
 
     // Max existing chunkIndex on this page (new expansion chunks slot after)
     const maxIdx = Math.max(...pageChunks.map(c => c.chunkIndex), 0);
     let expansionOffset = 100; // leave a gap from real chunks
 
-    // ── 8b. Stitch short text/list chunks ─────────────────────────────────────
-    // Note: pageChunks still holds the pre-prefix content, which is what we want
-    // for stitching — buildStitchedChunks adds its own [anchor]\n prefix.
+    // ── 8b. Stitch short text/list chunks ──────────────────────────────────────
+    // pageChunks still holds pre-prefix content (fetched above before the SQL
+    // UPDATE) — buildStitchedChunks adds its own [anchor]\n prefix to the group.
     const textLikeChunks = pageChunks.filter(
       c => c.elementType === "text" || c.elementType === "list_item" || c.elementType === "mixed"
     );
@@ -2533,10 +2582,10 @@ export async function pass8EnrichChunks(
       stitched++;
     }
 
-    // ── 8c. Expand BOM table rows ──────────────────────────────────────────────
+    // ── 8c. Expand all tables into natural-language sentences ──────────────────
     const tableChunks = pageChunks.filter(c => c.elementType === "table");
     for (const tc of tableChunks) {
-      const sentences = await expandTableToBomSentences(tc.content, anchor);
+      const sentences = await expandTableToSentences(tc.content, anchor);
       for (const sentence of sentences) {
         await db.insert(chunksTable).values({
           manualId,
@@ -2551,6 +2600,21 @@ export async function pass8EnrichChunks(
         expansions++;
       }
     }
+
+    // ── Completion marker: write page_context LAST ─────────────────────────────
+    // Crash-safe: if the process dies before this point the page_context stays
+    // NULL on original chunks, so a resume re-processes this page cleanly.
+    await db
+      .update(chunksTable)
+      .set({ pageContext: anchor })
+      .where(
+        and(
+          eq(chunksTable.manualId, manualId),
+          eq(chunksTable.pageNumber, pageNumber),
+          ne(chunksTable.elementType, "semantic_expansion")
+        )
+      );
+    enriched += pageChunks.length;
   }
 
   logger.info({ manualId, enriched, stitched, expansions }, "pass8: enrichment complete");
