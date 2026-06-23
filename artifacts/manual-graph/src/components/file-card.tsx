@@ -152,6 +152,10 @@ function CompletedSection({
     isActual: boolean;
     disclaimer: string;
   } | null>(null);
+  const [extractionSummary, setExtractionSummary] = useState<{
+    pagesWithDoclingElements: number;
+    pagesAutoEscalatedToVision: number;
+  } | null>(null);
   const { data: stats } = useGetManualStats(manualId, {
     query: { queryKey: getGetManualStatsQueryKey(manualId) },
   });
@@ -161,10 +165,19 @@ function CompletedSection({
     (async () => {
       try {
         const token = await getToken();
-        const res = await fetch(`/api/manuals/${manualId}/cost-estimate`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        if (!cancelled && res.ok) setCostEstimate(await res.json());
+        const [costRes, manualRes] = await Promise.all([
+          fetch(`/api/manuals/${manualId}/cost-estimate`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          }),
+          fetch(`/api/manuals/${manualId}`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          }),
+        ]);
+        if (!cancelled && costRes.ok) setCostEstimate(await costRes.json());
+        if (!cancelled && manualRes.ok) {
+          const data = await manualRes.json() as { extractionSummary?: { pagesWithDoclingElements: number; pagesAutoEscalatedToVision: number } };
+          if (data.extractionSummary) setExtractionSummary(data.extractionSummary);
+        }
       } catch { /* ignore */ }
     })();
     return () => { cancelled = true; };
@@ -284,6 +297,47 @@ function CompletedSection({
           )}
         </div>
       )}
+
+      {/* Page coverage bar */}
+      {extractionSummary && totalPages > 0 && (() => {
+        const docling = extractionSummary.pagesWithDoclingElements;
+        const vision = extractionSummary.pagesAutoEscalatedToVision;
+        const extracted = docling + vision;
+        const skipped = Math.max(0, totalPages - extracted);
+        const doclingPct = (docling / totalPages) * 100;
+        const visionPct = (vision / totalPages) * 100;
+        const skippedPct = (skipped / totalPages) * 100;
+        return (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px] text-gray-500">
+              <span className="font-medium">Page coverage</span>
+              <span className="font-mono">
+                {extracted} / {totalPages} extracted
+                {skipped > 0 && <span className="text-red-400 ml-1">· {skipped} skipped</span>}
+              </span>
+            </div>
+            <div
+              className="h-2 w-full rounded-full overflow-hidden flex bg-gray-100"
+              title={`Docling: ${docling} · Vision OCR: ${vision} · Skipped (CAD only): ${skipped}`}
+            >
+              {doclingPct > 0 && (
+                <div className="h-full bg-green-400 transition-all" style={{ width: `${doclingPct}%` }} />
+              )}
+              {visionPct > 0 && (
+                <div className="h-full bg-amber-400 transition-all" style={{ width: `${visionPct}%` }} />
+              )}
+              {skippedPct > 0 && (
+                <div className="h-full bg-red-200 transition-all" style={{ width: `${skippedPct}%` }} />
+              )}
+            </div>
+            <div className="flex items-center gap-3 text-[10px] text-gray-400">
+              <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-green-400 inline-block" />Docling ({docling})</span>
+              {vision > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-400 inline-block" />Vision OCR ({vision})</span>}
+              {skipped > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-red-200 inline-block" />Skipped ({skipped})</span>}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Action buttons */}
       <div className="flex items-center gap-2 flex-wrap">
