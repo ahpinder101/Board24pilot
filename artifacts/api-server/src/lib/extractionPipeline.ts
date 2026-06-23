@@ -26,7 +26,7 @@ import {
   type InsertEntity,
   type InsertRelationship,
 } from "@workspace/db";
-import { eq, and, count, sql, isNotNull, gte, lte, ne } from "drizzle-orm";
+import { eq, and, count, sql, isNotNull, gte, lte, ne, isNull, or } from "drizzle-orm";
 import { extractPdfText, extractWithDocling, renderPdfPageToBase64, renderPdfPageToBase64FromPath, hasDiagramImage, hasDiagramImageFromPath, writePdfToTempFile, chunkText, chunkPageSemantically, chunkFromElements, type PdfContent, type DoclingElement, type TypedChunk } from "./pdfExtractor.js";
 import { Buffer } from "node:buffer";
 import { logger } from "./logger.js";
@@ -2316,10 +2316,15 @@ interface StitchedChunkResult {
 }
 
 /**
- * Merge consecutive short (≤ SHORT chars) text/list chunks into compound
- * semantic_expansion chunks prefixed with the page anchor.  Groups of < 2
- * chunks are skipped (single short chunk is fine as-is after context prefix).
- * Each stitched group inherits the sectionPath of its first member.
+ * Merge consecutive short (≤ SHORT chars) text-like chunks into compound
+ * semantic_expansion chunks prefixed with the page anchor.  Receives ALL page
+ * chunks in their original order so that "consecutive" is preserved exactly —
+ * any non-text-like chunk (table, section_header, etc.) acts as a group break.
+ * Groups of < MIN_GROUP chunks are skipped.
+ * Each stitched group inherits the sectionPath of its own first member.
+ *
+ * Text-like element types: "text", "list_item", "mixed", and NULL (fallback
+ * chunking path produces chunks with element_type = NULL).
  */
 function buildStitchedChunks(
   chunks: Array<{ content: string; elementType: string | null; sectionPath: string | null }>,
@@ -2328,6 +2333,15 @@ function buildStitchedChunks(
   const SHORT = 250;
   const MAX_STITCHED = 1400;
   const MIN_GROUP = 2;
+
+  function isTextLike(elementType: string | null): boolean {
+    return (
+      elementType === null ||
+      elementType === "text" ||
+      elementType === "list_item" ||
+      elementType === "mixed"
+    );
+  }
 
   const results: StitchedChunkResult[] = [];
   let group: Array<{ content: string; sectionPath: string | null }> = [];
@@ -2347,7 +2361,8 @@ function buildStitchedChunks(
   }
 
   for (const c of chunks) {
-    if (c.elementType === "section_header") {
+    // Any non-text-like chunk breaks the current group
+    if (!isTextLike(c.elementType)) {
       flushGroup();
       continue;
     }
@@ -2450,7 +2465,7 @@ export async function pass8EnrichChunks(
           SET content      = regexp_replace(content, E'^\\[[^\\]]+\\]\\n', ''),
               page_context = NULL
           WHERE manual_id = ${manualId}
-            AND element_type != 'semantic_expansion'`
+            AND (element_type IS NULL OR element_type != 'semantic_expansion')`
     );
     await db
       .delete(chunksTable)
@@ -2498,11 +2513,14 @@ export async function pass8EnrichChunks(
     logger.info({ manualId, rejectedLabels: [...rejectedLabels] }, "pass8: ignoring repeated document-wide labels");
   }
 
-  // Ordered list of distinct page numbers that have non-expansion chunks
+  // Ordered list of distinct page numbers that have non-expansion chunks.
+  // Use OR IS NULL because ne() excludes NULLs under SQL three-valued logic and
+  // some manuals produce chunks with element_type = NULL (fallback chunking path).
+  const notExpansion = or(isNull(chunksTable.elementType), ne(chunksTable.elementType, "semantic_expansion"))!;
   const pageRows = await db
     .selectDistinct({ pageNumber: chunksTable.pageNumber })
     .from(chunksTable)
-    .where(and(eq(chunksTable.manualId, manualId), ne(chunksTable.elementType, "semantic_expansion")))
+    .where(and(eq(chunksTable.manualId, manualId), notExpansion))
     .orderBy(chunksTable.pageNumber);
 
   let enriched = 0;
@@ -2524,7 +2542,7 @@ export async function pass8EnrichChunks(
         and(
           eq(chunksTable.manualId, manualId),
           eq(chunksTable.pageNumber, pageNumber),
-          ne(chunksTable.elementType, "semantic_expansion")
+          notExpansion
         )
       )
       .orderBy(chunksTable.chunkIndex);
@@ -2561,12 +2579,10 @@ export async function pass8EnrichChunks(
     let expansionOffset = 100; // leave a gap from real chunks
 
     // ── 8b. Stitch short text/list chunks ──────────────────────────────────────
-    // pageChunks still holds pre-prefix content (fetched above before the SQL
-    // UPDATE) — buildStitchedChunks adds its own [anchor]\n prefix to the group.
-    const textLikeChunks = pageChunks.filter(
-      c => c.elementType === "text" || c.elementType === "list_item" || c.elementType === "mixed"
-    );
-    const stitchedResults = buildStitchedChunks(textLikeChunks, anchor);
+    // Pass ALL pageChunks in original order so buildStitchedChunks can correctly
+    // identify consecutive text-like runs (tables / headers break groups in-situ).
+    // pageChunks holds pre-prefix content — buildStitchedChunks adds [anchor]\n.
+    const stitchedResults = buildStitchedChunks(pageChunks, anchor);
 
     for (const { content: stitchedContent, sectionPath: stitchedSectionPath } of stitchedResults) {
       await db.insert(chunksTable).values({
@@ -2611,7 +2627,7 @@ export async function pass8EnrichChunks(
         and(
           eq(chunksTable.manualId, manualId),
           eq(chunksTable.pageNumber, pageNumber),
-          ne(chunksTable.elementType, "semantic_expansion")
+          notExpansion
         )
       );
     enriched += pageChunks.length;
