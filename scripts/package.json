@@ -6,6 +6,7 @@
   "scripts": {
     "hello": "tsx ./src/hello.ts",
     "backfill-pass8": "tsx ./src/backfill-pass8.ts",
+    "benchmark:agent-chat": "tsx ./src/benchmark-agent-chat.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

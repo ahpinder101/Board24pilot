@@ -13,6 +13,9 @@ import {
   detectDomain,
   runDomainSpecialist,
   buildGuidedNoAnswer,
+  getDomainPolicy,
+  containsDomainIdentifier,
+  requiresSpecialistReview,
   type TechnicalDomain,
   type AnswerStrictness,
   type EvidenceSummary,
@@ -145,9 +148,18 @@ async function extractImageKeywords(
 
 function extractIdentifierTokens(text: string): string[] {
   const pattern = /\b([A-Z]{1,4}[-/][A-Z0-9]{1,10}[-/]?[A-Z0-9]{0,8})\b/g;
+  const compactSymbolPattern =
+    /\b(?:RL|KM|FR|HL|TB|XT|SQ|SV|KA|FU|PS|PLC|M)\d+[A-Z]?\b|\b(?:X|Y|Q|I|O)\d+(?:[.:]\d{1,2})\b|\bQ\d+:\d{1,2}\b/gi;
   const matches = [...text.matchAll(pattern)].map((m) => m[0]);
+  const compactSymbols = [...text.matchAll(compactSymbolPattern)].map((m) => m[0].toUpperCase());
   const numeric = [...text.matchAll(/\b\d{5,}\b/g)].map((m) => m[0]);
-  return [...new Set([...matches, ...numeric])].slice(0, 6);
+  return [...new Set([...matches, ...compactSymbols, ...numeric])].slice(0, 10);
+}
+
+function extractElectricalSymbols(text: string): string[] {
+  const symbolPattern =
+    /\b(?:RL|KM|FR|HL|TB|XT|SQ|SV|KA|FU|PS|PLC|M)\d+[A-Z]?\b|\b(?:X|Y|Q|I|O)\d+(?:[.:]\d{1,2})\b|\bQ\d+:\d{1,2}\b/gi;
+  return [...new Set([...text.matchAll(symbolPattern)].map((m) => m[0].toUpperCase()))].slice(0, 12);
 }
 
 function classifyDomain(
@@ -235,6 +247,43 @@ type PathRow = {
   plain_language: string;
   page_references: number[];
 };
+
+type DomainRetrievalMetadata = {
+  detectedSymbols: string[];
+  retrievalLane: "none" | "electrical_control";
+  rescueStageUsed: "none" | "symbol_hit";
+  relevantChunkIds: number[];
+};
+
+function buildEvidenceSummary(
+  ragChunks: ChunkRow[],
+  graphEntities: Array<{ id: number; name: string; type: string; description: string; properties: Record<string, unknown> | null; manualName: string }>,
+  graphPaths: PathRow[]
+): EvidenceSummary {
+  return {
+    chunksFound: ragChunks.length,
+    entitiesFound: graphEntities.length,
+    pathsFound: graphPaths.length,
+    hasGraphContext: graphPaths.length > 0 || graphEntities.length > 0,
+    manualsSearched: [...new Set(ragChunks.map((c) => c.manual_name))],
+  };
+}
+
+function buildRagContext(chunks: ChunkRow[], printedPgMap: Map<string, string>): string {
+  if (chunks.length === 0) return "No relevant manual excerpts found.";
+  return chunks
+    .map((c, i) => {
+      const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
+      const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
+      const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
+      const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
+      const typeHint =
+        c.element_type === "table" ? "[TABLE] " :
+        c.element_type === "list_item" ? "[LIST] " : "";
+      return `${header}\n${typeHint}${c.content}`;
+    })
+    .join("\n\n---\n\n");
+}
 
 // POST /chat/agent
 router.post("/chat/agent", async (req: Request, res: Response) => {
@@ -933,19 +982,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     //  - section_path: breadcrumb like "2. INSTALLATION > 2-3. Lubrication"
     //  - element_type: content-type hint (TABLE, LIST) so agents read them correctly
     //  - page_context: drawing/spec-sheet name for this chunk (e.g. "ORDER SPEC SHEET — PP2 049")
-    let ragContext = ragChunks.length > 0
-      ? ragChunks.map((c, i) => {
-          const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
-          const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
-          const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
-          const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
-          // Prefix table/list content so the answer agent knows how to read it
-          const typeHint =
-            c.element_type === "table" ? "[TABLE] " :
-            c.element_type === "list_item" ? "[LIST] " : "";
-          return `${header}\n${typeHint}${c.content}`;
-        }).join("\n\n---\n\n")
-      : "No relevant manual excerpts found.";
+    let ragContext = buildRagContext(ragChunks, printedPgMap);
 
     let feedbackContext = "";
     if (tsQuery.length > 0) {
@@ -969,14 +1006,7 @@ router.post("/chat/agent", async (req: Request, res: Response) => {
     }
 
     // ── 4.5. Evidence summary (needed for early returns) ─────────────────────
-    const manualsSearched = [...new Set(ragChunks.map((c) => c.manual_name))];
-    const evidenceSummary: EvidenceSummary = {
-      chunksFound: ragChunks.length,
-      entitiesFound: graphEntities.length,
-      pathsFound: graphPaths.length,
-      hasGraphContext: graphContext.length > 0,
-      manualsSearched,
-    };
+    let evidenceSummary: EvidenceSummary = buildEvidenceSummary(ragChunks, graphEntities, graphPaths);
 
     // ── 4.6. Scratchpad pass — reason before answering ────────────────────────
     type ScratchpadResult = {
@@ -1149,17 +1179,7 @@ Analyse the evidence and output your scratchpad JSON.`;
           }
           if (sectionAdded > 0) {
             ragChunks.sort((a, b) => a.page_number - b.page_number || a.chunk_index - b.chunk_index);
-            // Rebuild ragContext to include the new section chunks
-            ragContext = ragChunks.map((c, i) => {
-              const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
-              const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
-              const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
-              const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
-              const typeHint =
-                c.element_type === "table" ? "[TABLE] " :
-                c.element_type === "list_item" ? "[LIST] " : "";
-              return `${header}\n${typeHint}${c.content}`;
-            }).join("\n\n---\n\n");
+            ragContext = buildRagContext(ragChunks, printedPgMap);
             req.log.info(
               { sectionHint: scratchpad.sectionHint, added: sectionAdded },
               "agent-chat: section-hint retrieval added chunks"
@@ -1252,18 +1272,7 @@ Analyse the evidence and output your scratchpad JSON.`;
 
               ragChunks.push(...newGapChunks);
               ragChunks.sort((a, b) => a.page_number - b.page_number || a.chunk_index - b.chunk_index);
-              ragContext = ragChunks
-                .map((c, i) => {
-                  const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
-                  const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
-                  const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
-                  const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
-                  const typeHint =
-                    c.element_type === "table" ? "[TABLE] " :
-                    c.element_type === "list_item" ? "[LIST] " : "";
-                  return `${header}\n${typeHint}${c.content}`;
-                })
-                .join("\n\n---\n\n");
+              ragContext = buildRagContext(ragChunks, printedPgMap);
               req.log.info(
                 { gapChunksAdded: newGapChunks.length, uncoveredAspects: scratchpad.uncoveredAspects, sectionHint: scratchpad.sectionHint },
                 "agent-chat: gap re-retrieval added chunks"
@@ -1285,6 +1294,12 @@ Analyse the evidence and output your scratchpad JSON.`;
     // manual or nothing at all) we search ALL manuals so the scope mis-match
     // cannot hide the answer. If expansion finds chunks and the scratchpad had
     // decided "cannot_answer", we override to "answer" so those chunks are used.
+    let domainRetrievalMetadata: DomainRetrievalMetadata = {
+      detectedSymbols: [],
+      retrievalLane: "none",
+      rescueStageUsed: "none",
+      relevantChunkIds: [],
+    };
     let expansionRescued = false;
     if (scratchpad.termExpansions.length > 0) {
       const expansionTerms = scratchpad.termExpansions
@@ -1329,16 +1344,7 @@ Analyse the evidence and output your scratchpad JSON.`;
             if (newExpChunks.length > 0) {
               ragChunks.push(...newExpChunks);
               ragChunks.sort((a, b) => a.page_number - b.page_number || a.chunk_index - b.chunk_index);
-              ragContext = ragChunks.map((c, i) => {
-                const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
-                const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
-                const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
-                const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
-                const typeHint =
-                  c.element_type === "table" ? "[TABLE] " :
-                  c.element_type === "list_item" ? "[LIST] " : "";
-                return `${header}\n${typeHint}${c.content}`;
-              }).join("\n\n---\n\n");
+              ragContext = buildRagContext(ragChunks, printedPgMap);
               if (scratchpad.strategy === "cannot_answer") {
                 expansionRescued = true;
                 req.log.info(
@@ -1359,7 +1365,114 @@ Analyse the evidence and output your scratchpad JSON.`;
       }
     }
 
-    if (scratchpad.strategy === "cannot_answer" && !expansionRescued) {
+    if (scratchpad.domain === "electrical_control" && scopedManualIds.length > 0) {
+      const electricalSymbols = extractElectricalSymbols(
+        `${trimmedQuestion} ${scratchpad.uncoveredAspects.join(" ")} ${ragChunks.map((c) => c.page_context ?? "").join(" ")}`
+      );
+      domainRetrievalMetadata.detectedSymbols = electricalSymbols;
+      if (electricalSymbols.length > 0) {
+        try {
+          const policy = getDomainPolicy(scratchpad.domain);
+          const symbolConditions = electricalSymbols.map((symbol) =>
+            sql`(c.content ILIKE ${"%" + symbol + "%"} OR COALESCE(c.page_context, '') ILIKE ${"%" + symbol + "%"})`
+          );
+          const symbolHits = await db.execute<ChunkRow>(sql`
+            SELECT c.id, c.manual_id, m.name AS manual_name,
+                   c.page_number, c.chunk_index, c.content,
+                   c.section_path, c.element_type, c.page_context,
+                   (
+                     CASE WHEN c.element_type = 'table' THEN 0.35 ELSE 0 END +
+                     CASE WHEN c.page_context IS NOT NULL THEN 0.15 ELSE 0 END +
+                     CASE WHEN ${containsDomainIdentifier(trimmedQuestion)} THEN 0.1 ELSE 0 END
+                   )::float AS rank
+            FROM chunks c JOIN manuals m ON m.id = c.manual_id
+            WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+              AND (${sql.join(symbolConditions, sql` OR `)})
+            ORDER BY rank DESC, c.page_number, c.chunk_index
+            LIMIT 20
+          `);
+
+          if (symbolHits.rows.length > 0) {
+            domainRetrievalMetadata.retrievalLane = "electrical_control";
+            domainRetrievalMetadata.rescueStageUsed = "symbol_hit";
+            domainRetrievalMetadata.relevantChunkIds = symbolHits.rows.map((row) => row.id);
+
+            const existingIds = new Set(ragChunks.map((c) => c.id));
+            const newDomainChunks: ChunkRow[] = [];
+            const pageKeys = new Set<string>();
+            const pageContextValues = new Set<string>();
+            for (const row of symbolHits.rows) {
+              if (!existingIds.has(row.id)) {
+                newDomainChunks.push(row);
+                existingIds.add(row.id);
+              }
+              pageKeys.add(`${row.manual_id}:${row.page_number}`);
+              if (row.page_context) pageContextValues.add(row.page_context);
+            }
+
+            if (pageKeys.size > 0 || pageContextValues.size > 0) {
+              const pageClauses = [...pageKeys].map((key) => {
+                const [mid, pg] = key.split(":").map(Number);
+                return sql`(c.manual_id = ${mid} AND c.page_number = ${pg})`;
+              });
+              const pageContextClauses = [...pageContextValues].map((pageContext) =>
+                sql`c.page_context = ${pageContext}`
+              );
+              const expansionClauses = [...pageClauses, ...pageContextClauses];
+              if (expansionClauses.length > 0) {
+                const expandedHits = await db.execute<ChunkRow>(sql`
+                  SELECT c.id, c.manual_id, m.name AS manual_name,
+                         c.page_number, c.chunk_index, c.content,
+                         c.section_path, c.element_type, c.page_context,
+                         (
+                           CASE WHEN c.element_type = 'table' THEN 0.2 ELSE 0 END +
+                           CASE WHEN c.page_context IS NOT NULL THEN 0.05 ELSE 0 END
+                         )::float AS rank
+                  FROM chunks c JOIN manuals m ON m.id = c.manual_id
+                  WHERE c.manual_id = ANY(${scopedManualArray}::integer[])
+                    AND (${sql.join(expansionClauses, sql` OR `)})
+                  ORDER BY c.page_number, c.chunk_index
+                  LIMIT 40
+                `);
+                for (const row of expandedHits.rows) {
+                  if (!existingIds.has(row.id)) {
+                    newDomainChunks.push(row);
+                    existingIds.add(row.id);
+                  }
+                }
+              }
+            }
+
+            if (newDomainChunks.length > 0) {
+              ragChunks.push(...newDomainChunks);
+              ragChunks.sort((a, b) =>
+                b.rank - a.rank || a.page_number - b.page_number || a.chunk_index - b.chunk_index
+              );
+              ragContext = buildRagContext(ragChunks, printedPgMap);
+              req.log.info(
+                {
+                  domain: scratchpad.domain,
+                  policySignals: policy.preferredRetrievalSignals,
+                  detectedSymbols: electricalSymbols,
+                  domainChunksAdded: newDomainChunks.length,
+                },
+                "agent-chat: domain-aware retrieval added chunks"
+              );
+            }
+          }
+        } catch (domainErr) {
+          req.log.warn({ err: domainErr }, "agent-chat: domain-aware retrieval failed — continuing");
+        }
+      }
+    }
+
+    evidenceSummary = buildEvidenceSummary(ragChunks, graphEntities, graphPaths);
+
+    const hasRelevantDomainEvidence =
+      domainRetrievalMetadata.relevantChunkIds.length > 0 ||
+      (scratchpad.domain !== "generic_process" && ragChunks.length > 0 && scratchpad.evidenceQuality !== "none");
+
+    if (scratchpad.strategy === "cannot_answer" && !expansionRescued && !hasRelevantDomainEvidence && ragChunks.length === 0) {
       req.log.info("agent-chat: scratchpad cannot_answer — guided response");
       const guidedText = buildGuidedNoAnswer(trimmedQuestion, evidenceSummary, {
         status: "fail" as const,
@@ -1403,6 +1516,22 @@ Analyse the evidence and output your scratchpad JSON.`;
       return;
     }
 
+    if (scratchpad.strategy === "cannot_answer" && hasRelevantDomainEvidence) {
+      scratchpad.strategy = "answer";
+      scratchpad.planNotes =
+        scratchpad.planNotes ||
+        "Use the domain-retrieved drawing evidence to answer with confirmed details first, then state any unresolved parts explicitly.";
+      req.log.info(
+        {
+          domain: scratchpad.domain,
+          detectedSymbols: domainRetrievalMetadata.detectedSymbols,
+          retrievalLane: domainRetrievalMetadata.retrievalLane,
+          rescueStageUsed: domainRetrievalMetadata.rescueStageUsed,
+        },
+        "agent-chat: domain-aware retrieval upgraded cannot_answer to answer"
+      );
+    }
+
     // ── 5. Synthesise with GPT-4o ────────────────────────────────────────────
     const systemPrompt = `You are an expert engineering assistant. Engineers ask you questions about industrial machines, components, systems, and procedures described in their uploaded manuals.
 
@@ -1417,11 +1546,13 @@ Answer the question clearly and precisely using ONLY the information from the pr
 CRITICAL RULES:
 1. Scope labels: excerpts may begin with a scope qualifier like [Valid only for Sq machines]. Always respect these.
 2. Numeric tables: read values directly from tables present in the excerpts.
-3. Verbatim values — ABSOLUTE: for any specific value (number, measurement, part number, model code) copy it character-for-character from the excerpt. If the exact value does not appear literally, write "The manual does not specify this."
-4. Drawing and spec-sheet names: when a Source header includes a 'spec sheet:' label (e.g. 'spec sheet: "ORDER SPEC SHEET — PP2 049"'), reference that drawing or spec-sheet name explicitly in your answer text — for example "According to the ORDER SPEC SHEET for PP2 049..." or "As shown on the ORDER SPEC SHEET (PP2 049)...". Do not leave the drawing name only in the citation chip; name it inline so engineers immediately know which document the value comes from.
-5. Never fabricate technical details.
-6. Multi-step procedures: synthesise steps from ALL provided excerpts in sequence. No single sentence needs to cover the whole procedure — build it across multiple sources. Never say "the manual does not specify" for a procedure when the excerpts contain relevant steps.
-7. PROCEDURE STEPS section: when "PROCEDURE STEPS (verified from knowledge graph)" appears above the excerpts, list every step in full as the primary answer — do not summarise, skip, reorder, or paraphrase any step. Number them exactly as given.
+3. Verbatim values — ABSOLUTE: for any specific value (number, measurement, part number, model code, PLC address, terminal reference, symbol tag) copy it character-for-character from the excerpt.
+4. If the question is about a specialist diagram domain and the excerpts show relevant circuit or schematic evidence, answer from that evidence even when it is incomplete. State what is confirmed first, then what remains unresolved.
+5. For electrical-control questions: copy exact symbol/value labels when present; explain relay/contact/coil/load paths when visible; do not say the manual does not specify unless the retrieved drawing evidence clearly lacks the requested detail.
+6. Drawing and spec-sheet names: when a Source header includes a 'spec sheet:' label (e.g. 'spec sheet: "ORDER SPEC SHEET — PP2 049"'), reference that drawing or spec-sheet name explicitly in your answer text — for example "According to the ORDER SPEC SHEET for PP2 049..." or "As shown on the ORDER SPEC SHEET (PP2 049)...". Do not leave the drawing name only in the citation chip; name it inline so engineers immediately know which document the value comes from.
+7. Never fabricate technical details.
+8. Multi-step procedures: synthesise steps from ALL provided excerpts in sequence. No single sentence needs to cover the whole procedure — build it across multiple sources. Never say "the manual does not specify" for a procedure when the excerpts contain relevant steps.
+9. PROCEDURE STEPS section: when "PROCEDURE STEPS (verified from knowledge graph)" appears above the excerpts, list every step in full as the primary answer — do not summarise, skip, reorder, or paraphrase any step. Number them exactly as given.
 
 FORMATTING — answers are rendered as Markdown in the UI:
 - Prose answers: flowing paragraphs.
@@ -1559,7 +1690,8 @@ Please answer based on the above information.`;
         const c = ragChunks[idx];
         const displayPage = printedPgMap.get(`${c.manual_id}:${c.page_number}`) ?? c.page_number;
         const sectionTag = c.section_path ? `, section: "${c.section_path}"` : "";
-        const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}]`;
+        const pageCtxTag = c.page_context ? `, spec sheet: "${c.page_context}"` : "";
+        const header = `[Source ${i + 1}: "${c.manual_name}", page ${displayPage}${sectionTag}${pageCtxTag}]`;
         const typeHint =
           c.element_type === "table" ? "[TABLE] " :
           c.element_type === "list_item" ? "[LIST] " : "";
@@ -1577,7 +1709,9 @@ Please answer based on the above information.`;
     // AND strictness is normal, the answer is well-grounded. The specialist would
     // be checking against the same evidence and finding nothing new — skip it and
     // emit a synthetic pass. For engineering_strict or safety_critical, always run.
+    const forceSpecialistReview = requiresSpecialistReview(technicalDomain, trimmedQuestion);
     const skipSpecialist =
+      !forceSpecialistReview &&
       scratchpad.evidenceQuality === "strong" &&
       scratchpad.uncoveredAspects.length === 0 &&
       strictness === "normal";
@@ -1645,7 +1779,9 @@ Please answer based on the above information.`;
       // A "revise" on strong-evidence answers is almost always a wording improvement,
       // not a factual correction — no need to pay for another specialist call to confirm.
       const skipSecondPass =
-        scratchpad.evidenceQuality === "strong" && strictness === "normal";
+        !forceSpecialistReview &&
+        scratchpad.evidenceQuality === "strong" &&
+        strictness === "normal";
 
       if (skipSecondPass) {
         req.log.info(
